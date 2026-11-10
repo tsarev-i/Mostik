@@ -1,11 +1,153 @@
-//! Mostik desktop shell.
-//!
-//! For now it only opens the main window with the UI embedded from `app/ui/dist`.
+//! Mostik desktop shell: windows, tray, the `mostikfile://` scheme and the IPC commands.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backend;
+mod login;
+mod store;
+mod webview;
+
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager};
+
+/// Shows, unminimizes and focuses the main window.
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Tray icon with "Open" and "Quit"; a left click shows the main window.
+fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(
+        app,
+        "open",
+        backend::text(app, "Открыть Мостик", "Open Mostik"),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(app, "quit", backend::text(app, "Выйти", "Quit"), true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    app.manage(backend::TrayItems {
+        open: open.clone(),
+        quit: quit.clone(),
+    });
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip(backend::text(
+            app,
+            "Мостик | неофициальный клиент Телемост",
+            "Mostik | unofficial Telemost client",
+        ))
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(backend::AppState::default())
+        .register_asynchronous_uri_scheme_protocol("mostikfile", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_owned();
+            let query = request.uri().query().map(str::to_owned);
+            tauri::async_runtime::spawn(async move {
+                let response = match backend::serve_file(&app, &path, query.as_deref()).await {
+                    Ok((bytes, kind)) => tauri::http::Response::builder()
+                        .header("Content-Type", kind)
+                        .header("Cache-Control", "max-age=3600")
+                        .body(bytes),
+                    Err(e) => tauri::http::Response::builder().status(404).body(e.into_bytes()),
+                };
+                if let Ok(r) = response {
+                    responder.respond(r);
+                }
+            });
+        })
+        .on_window_event(|window, event| {
+            // Files dropped onto the window, as in Slack, are attached to the message.
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let files = backend::allow_files(window.app_handle(), paths);
+                if !files.is_empty() {
+                    let _ = window.app_handle().emit("mostik://files", &files);
+                }
+            }
+        })
+        .setup(|app| {
+            // The tray is optional: without an app indicator in the desktop environment we simply run without it.
+            if let Err(e) = setup_tray(app.handle()) {
+                eprintln!("tray icon unavailable: {e}");
+            }
+            if let Some(main) = app.get_webview_window("main") {
+                webview::harden(&main);
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            backend::bootstrap,
+            backend::login,
+            backend::logout,
+            backend::history,
+            backend::mark_read,
+            backend::send_message,
+            backend::edit_message,
+            backend::delete_message,
+            backend::set_reaction,
+            backend::set_important,
+            backend::typing,
+            backend::open_url,
+            backend::search_messages,
+            backend::set_muted,
+            backend::set_starred,
+            backend::mark_unread,
+            backend::pin_message,
+            backend::forward_message,
+            backend::start_call,
+            backend::recommended_chats,
+            backend::join_chat,
+            backend::open_yandex_id,
+            backend::save_file,
+            backend::test_notification,
+            backend::set_preferences,
+            backend::set_zoom,
+            backend::set_window_title,
+            backend::user_profile,
+            backend::open_dm,
+            backend::search_people,
+            backend::create_channel,
+            backend::chat_members,
+            backend::change_members,
+            backend::update_chat,
+            backend::leave_chat,
+            backend::chat_details,
+            backend::pick_files,
+            backend::send_files,
+            backend::presence,
+            backend::set_status,
+        ])
         .run(tauri::generate_context!())
         .expect("failed to start Mostik");
 }

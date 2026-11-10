@@ -11,8 +11,27 @@ description = "Mostik desktop shell (Tauri 2)"
 name = "mostik"
 path = "src/main.rs"
 
+[[bin]]
+name = "mostik-selftest"
+path = "src/bin/selftest.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+futures-util = "0.3"
+imagesize = "0.13"
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+mime_guess = "2"
+mostik-core.workspace = true
+mostik-yandex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Same version as wry uses: needed to customise the WebKitGTK context menu.
+webkit2gtk = "=2.0.2"
