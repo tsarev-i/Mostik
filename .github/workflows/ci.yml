@@ -189,4 +189,4 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           ls -l dist
-          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Mostik $VERSION" --generate-notes
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Mostik v$VERSION" --generate-notes
