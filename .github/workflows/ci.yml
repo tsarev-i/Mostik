@@ -1,14 +1,21 @@
+# dev and pull requests: tests on Linux, then bundles in parallel: AppImage for Linux, NSIS setup for Windows.
+# main: the same, then a GitHub release tagged vX.Y.Z with the bundles attached.
+#
+# Release version: X.Y comes from `[workspace.package] version` in Cargo.toml, Z is one more
+# than the latest vX.Y.* tag (or the patch from Cargo.toml if that is higher). To start a new
+# minor or major line, bump the version in Cargo.toml.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
   pull_request:
   workflow_dispatch:
 
+# Runs on main wait for each other instead of being cancelled: each one publishes a release.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -16,21 +23,52 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  TAURI_CLI_VERSION: 2.12.4
 
 jobs:
-  build:
-    name: Build and test
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    outputs:
+      rust: ${{ steps.versions.outputs.rust }}
+      wasm-bindgen: ${{ steps.versions.outputs.wasm-bindgen }}
+      version: ${{ steps.versions.outputs.version }}
+      release: ${{ steps.versions.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The toolchain is the declared MSRV, and the wasm-bindgen CLI must match the crate exactly.
+      - name: Read versions
+        id: versions
+        env:
+          RELEASE: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        run: |
+          base=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          version=$base
+          if [ "$RELEASE" = true ]; then
+            prefix="v${base%.*}."
+            last=$(git ls-remote --tags --refs origin \
+              | awk -v p="refs/tags/$prefix" 'index($2, p) == 1 { s = substr($2, length(p) + 1); if (s ~ /^[0-9]+$/) print s }' \
+              | sort -n | tail -1)
+            patch=${base##*.}
+            if [ -n "$last" ] && [ $((last + 1)) -gt "$patch" ]; then
+              patch=$((last + 1))
+            fi
+            version="${base%.*}.$patch"
+          fi
+          {
+            echo "rust=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
+            echo "wasm-bindgen=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
+            echo "version=$version"
+            echo "release=$RELEASE"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    needs: version
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-
-      # The toolchain is the declared MSRV and the wasm-bindgen CLI must match the
-      # wasm-bindgen crate exactly, so both versions are read from the repo.
-      - name: Read tool versions
-        id: versions
-        run: |
-          echo "rust=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
-          echo "wasm-bindgen=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
 
       - name: Install system libraries
         run: |
@@ -39,7 +77,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ steps.versions.outputs.rust }}
+          toolchain: ${{ needs.version.outputs.rust }}
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
@@ -47,7 +85,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen@${{ steps.versions.outputs.wasm-bindgen }}
+          tool: wasm-bindgen@${{ needs.version.outputs.wasm-bindgen }}
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -59,11 +97,96 @@ jobs:
       - name: Clippy (UI, wasm)
         run: cargo clippy --locked -p mostik-ui --target wasm32-unknown-unknown --all-targets -- -D warnings
 
-      - name: Clippy (workspace)
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --all-features
 
-      - name: Build workspace
-        run: cargo build --locked --workspace
+  bundle:
+    name: Bundle (${{ matrix.platform }})
+    needs: [version, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu image: its glibc 2.35 lets the AppImage run on older distributions.
+          - platform: linux
+            os: ubuntu-22.04
+          - platform: windows
+            os: windows-2025
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      # The AppImage bundles the tray library found here: Ayatana, the one current distributions ship.
+      - name: Install system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ needs.version.outputs.rust }}
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ needs.version.outputs.wasm-bindgen }},tauri-cli@${{ env.TAURI_CLI_VERSION }}
+
+      # Tauri takes the bundle version from Cargo.toml.
+      - name: Set version ${{ needs.version.outputs.version }}
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: sed -i "/^\[workspace\.package\]/,/^\[/s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+
+      - name: Build UI (wasm)
+        run: bash scripts/ui.sh build --release
+
+      # The UI is already built: on Windows the hook's `bash` could resolve to WSL instead of Git Bash.
+      - name: Build bundles
+        run: cargo tauri build --ci --config '{"build":{"beforeBuildCommand":null}}'
+
+      - name: Collect bundles
+        run: |
+          shopt -s nullglob
+          mkdir -p dist
+          cp target/release/bundle/*/*.{AppImage,exe} dist/
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mostik-${{ needs.version.outputs.version }}-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Release
+    needs: [version, bundle]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: mostik-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish v${{ needs.version.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          ls -l dist
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Mostik $VERSION" --generate-notes

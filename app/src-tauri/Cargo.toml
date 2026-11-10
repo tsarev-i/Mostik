@@ -6,14 +6,22 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "Mostik desktop shell (Tauri 2)"
+default-run = "mostik"
 
 [[bin]]
 name = "mostik"
 path = "src/main.rs"
 
+# Live write self-test for development, kept out of the release bundles.
+# No tests of its own: the store.rs tests it includes already run with the main binary.
 [[bin]]
 name = "mostik-selftest"
 path = "src/bin/selftest.rs"
+required-features = ["selftest"]
+test = false
+
+[features]
+selftest = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

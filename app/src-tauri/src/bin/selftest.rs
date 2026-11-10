@@ -4,7 +4,7 @@
 //! Runs: send → edit → reaction (add, remove) → "important" → typing →
 //! read marker → delete → thread reply, checking every step against the chat history.
 //!
-//! Run: `cargo run -p mostik-app --bin mostik-selftest` (needs a session saved by Mostik).
+//! Run: `cargo run -p mostik-app --features selftest --bin mostik-selftest` (needs a session saved by Mostik).
 //! `-- --threads` only prints the format of thread chat IDs (read-only).
 
 #[allow(dead_code)]
