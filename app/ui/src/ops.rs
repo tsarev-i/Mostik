@@ -30,8 +30,21 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
             s.users.push(a);
         }
         if let Some(old) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
+            // An edit push may come without reactions or a sequence number: keep the known ones.
+            // Reaction changes arrive as separate `Reactions` events.
             let thread = m.thread.clone().or_else(|| old.thread.clone());
-            *old = Message { thread, ..m.clone() };
+            let reactions = if m.reactions.is_empty() {
+                std::mem::take(&mut old.reactions)
+            } else {
+                m.reactions.clone()
+            };
+            let seq_no = if m.seq_no == 0 { old.seq_no } else { m.seq_no };
+            *old = Message {
+                thread,
+                reactions,
+                seq_no,
+                ..m.clone()
+            };
             return;
         }
         let mine = m.author == s.me;
@@ -572,17 +585,28 @@ const LINK_BASE: &str = "https://messenger.360.yandex.ru";
 
 /// Telemost message link → `(chat, time)`, so that it opens in Mostik rather than in the browser.
 fn parse_message_link(url: &str) -> Option<(ChatId, Timestamp)> {
+    let (chat, ts) = split_message_link(url)?;
+    let chat = String::from(js_sys::decode_uri_component(chat).ok()?);
+    Some((ChatId(chat), ts))
+}
+
+/// `(encoded chat, time)` of a message link. Accepts `/chats/<chat>/<time>` with an optional
+/// `/chat` prefix and an optional `#` route, as the web clients write it.
+fn split_message_link(url: &str) -> Option<(&str, Timestamp)> {
     let rest = ["https://messenger.360.yandex.ru", "https://telemost.360.yandex.ru"]
         .iter()
         .find_map(|base| url.strip_prefix(base))?;
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    // Only a whole `chat` segment is a prefix: `chats/…` must stay intact.
     let rest = rest
-        .trim_start_matches("/chat")
-        .trim_start_matches("/#")
-        .trim_start_matches('#');
-    let rest = rest.strip_prefix("/chats/")?;
+        .strip_prefix("chat/")
+        .or_else(|| rest.strip_prefix("chat#"))
+        .unwrap_or(rest);
+    let rest = rest.trim_start_matches('#').trim_start_matches('/');
+    let rest = rest.strip_prefix("chats/")?;
     let (chat, ts) = rest.split_once('/')?;
-    let chat = String::from(js_sys::decode_uri_component(chat).ok()?);
-    Some((ChatId(chat), ts.trim_end_matches('/').parse().ok()?))
+    (!chat.is_empty()).then_some(())?;
+    Some((chat, ts.trim_end_matches('/').parse().ok()?))
 }
 
 /// "Mute" / "Unmute" for a chat.
@@ -822,6 +846,10 @@ pub fn subscribe(c: Ctx) {
             });
         })
         .await;
+        bridge::listen(bridge::SIGNED_OUT_EVENT, move |reason: String| {
+            c.phase.set(Phase::Login { reason: Some(reason) });
+        })
+        .await;
         bridge::listen(bridge::SNAPSHOT_EVENT, move |snapshot: Snapshot| {
             let current = c.current.get_untracked();
             c.snap.set(snapshot);
@@ -987,4 +1015,28 @@ pub fn set_status(c: Ctx, availability: Availability, status: Option<CustomStatu
             Err(e) => report(c, format!("{}: {e}", tr().err_status)),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_message_link;
+
+    #[test]
+    fn splits_message_links() {
+        let own = "https://messenger.360.yandex.ru/chats/0%2F0%2Fabc/123";
+        assert_eq!(split_message_link(own), Some(("0%2F0%2Fabc", 123)));
+        assert_eq!(
+            split_message_link("https://telemost.360.yandex.ru/chat/#/chats/a_b/7/"),
+            Some(("a_b", 7))
+        );
+        assert_eq!(
+            split_message_link("https://messenger.360.yandex.ru/#/chats/x/9"),
+            Some(("x", 9))
+        );
+        assert_eq!(
+            split_message_link("https://messenger.360.yandex.ru/chats/x/notanumber"),
+            None
+        );
+        assert_eq!(split_message_link("https://example.com/chats/x/1"), None);
+    }
 }

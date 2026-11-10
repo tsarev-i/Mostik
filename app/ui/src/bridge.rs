@@ -90,6 +90,8 @@ pub enum LiveEvent {
 
 pub const EVENT: &str = "mostik://event";
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
+/// The session expired while the app was running: show the login screen with this reason.
+pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
 
 #[derive(Serialize)]
 struct NoArgs {}

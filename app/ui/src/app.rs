@@ -1965,7 +1965,7 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     Effect::new(move |_| {
         if let Some(el) = area.get() {
             let _ = el.focus();
-            let n = el.value().chars().count() as u32;
+            let n = utf16_len(&el.value());
             let _ = el.set_selection_range(n, n);
             autosize(&el);
         }
@@ -2630,53 +2630,67 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool) -> impl IntoView {
     }
 }
 
-/// Wraps the composer selection in Telemost markup markers.
-fn wrap_selection(area: &web_sys::HtmlTextAreaElement, before: &str, after: &str) -> String {
-    let value = area.value();
-    let chars: Vec<char> = value.chars().collect();
-    let to_idx = |p: Option<u32>| p.map_or(chars.len(), |p| (p as usize).min(chars.len()));
-    let start = to_idx(area.selection_start().ok().flatten());
-    let end = to_idx(area.selection_end().ok().flatten()).max(start);
-    let selected: String = chars[start..end].iter().collect();
-    let new_value = format!(
-        "{}{before}{selected}{after}{}",
-        chars[..start].iter().collect::<String>(),
-        chars[end..].iter().collect::<String>()
-    );
-    let caret = (start + before.chars().count() + selected.chars().count()) as u32;
-    area.set_value(&new_value);
-    let _ = area.focus();
-    let _ = area.set_selection_range(caret, caret);
-    new_value
+/// Selection of a textarea as UTF-16 offsets, the units the DOM selection API uses.
+fn selection(area: &web_sys::HtmlTextAreaElement) -> (Option<u32>, Option<u32>) {
+    (
+        area.selection_start().ok().flatten(),
+        area.selection_end().ok().flatten(),
+    )
 }
 
-/// Inserts `text` in place of the selection (or at the cursor); `drop_before` is how many characters before the cursor to remove
-/// (the typed `:code` when picking a suggestion).
-fn insert_text(area: &web_sys::HtmlTextAreaElement, text: &str, drop_before: usize) -> String {
-    let value = area.value();
-    let chars: Vec<char> = value.chars().collect();
-    let to_idx = |p: Option<u32>| p.map_or(chars.len(), |p| (p as usize).min(chars.len()));
-    let end0 = to_idx(area.selection_end().ok().flatten());
-    let start = to_idx(area.selection_start().ok().flatten())
-        .min(end0)
-        .saturating_sub(drop_before);
-    let new_value = format!(
-        "{}{text}{}",
-        chars[..start].iter().collect::<String>(),
-        chars[end0..].iter().collect::<String>()
-    );
-    let caret = (start + text.chars().count()) as u32;
-    area.set_value(&new_value);
+/// Puts the caret at UTF-16 offset `caret`.
+fn place_caret(area: &web_sys::HtmlTextAreaElement, value: &str, caret: u32) {
+    area.set_value(value);
     let _ = area.focus();
     let _ = area.set_selection_range(caret, caret);
-    new_value
 }
 
-/// `:code` before the cursor (two characters or more), for emoji suggestions, as in Slack.
-fn emoji_query(area: &web_sys::HtmlTextAreaElement) -> Option<String> {
-    let value = area.value();
-    let caret = area.selection_start().ok().flatten()? as usize;
-    let before: String = value.chars().take(caret).collect();
+/// Byte index in `s` of a UTF-16 offset; a missing or out-of-range offset means the end of the text.
+/// An offset inside a surrogate pair moves to the end of that character.
+fn utf16_to_byte(s: &str, offset: Option<u32>) -> usize {
+    let Some(offset) = offset else { return s.len() };
+    let mut units = 0;
+    for (i, ch) in s.char_indices() {
+        if units >= offset as usize {
+            return i;
+        }
+        units += ch.len_utf16();
+    }
+    s.len()
+}
+
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
+}
+
+/// `value` with the `start..end` selection wrapped in `before`/`after`, and the caret after the wrapped text.
+fn wrap_text(value: &str, start: Option<u32>, end: Option<u32>, before: &str, after: &str) -> (String, u32) {
+    let start = utf16_to_byte(value, start);
+    let end = utf16_to_byte(value, end).max(start);
+    let head = format!("{}{before}{}", &value[..start], &value[start..end]);
+    let caret = utf16_len(&head);
+    (format!("{head}{after}{}", &value[end..]), caret)
+}
+
+/// `value` with `text` in place of the `start..end` selection; `drop_before` characters before the
+/// selection are removed too. Returns the new value and the caret after the inserted text.
+fn insert_into(value: &str, start: Option<u32>, end: Option<u32>, text: &str, drop_before: usize) -> (String, u32) {
+    let end = utf16_to_byte(value, end);
+    let selected = utf16_to_byte(value, start).min(end);
+    let start = value[..selected]
+        .char_indices()
+        .rev()
+        .take(drop_before)
+        .last()
+        .map_or(selected, |(i, _)| i);
+    let head = format!("{}{text}", &value[..start]);
+    let caret = utf16_len(&head);
+    (format!("{head}{}", &value[end..]), caret)
+}
+
+/// `:code` that ends at UTF-16 offset `caret` (two characters or more), for emoji suggestions.
+fn emoji_code_before(value: &str, caret: u32) -> Option<String> {
+    let before = &value[..utf16_to_byte(value, Some(caret))];
     let colon = before.rfind(':')?;
     let code = &before[colon + 1..];
     let starts_word = before[..colon].chars().next_back().is_none_or(char::is_whitespace);
@@ -2684,6 +2698,29 @@ fn emoji_query(area: &web_sys::HtmlTextAreaElement) -> Option<String> {
         && code.chars().count() >= 2
         && code.chars().all(|ch| ch.is_ascii_alphanumeric() || "_+-".contains(ch)))
     .then(|| code.to_owned())
+}
+
+/// Wraps the composer selection in Telemost markup markers.
+fn wrap_selection(area: &web_sys::HtmlTextAreaElement, before: &str, after: &str) -> String {
+    let (start, end) = selection(area);
+    let (value, caret) = wrap_text(&area.value(), start, end, before, after);
+    place_caret(area, &value, caret);
+    value
+}
+
+/// Inserts `text` in place of the selection (or at the cursor); `drop_before` is how many characters before the cursor to remove
+/// (the typed `:code` when picking a suggestion).
+fn insert_text(area: &web_sys::HtmlTextAreaElement, text: &str, drop_before: usize) -> String {
+    let (start, end) = selection(area);
+    let (value, caret) = insert_into(&area.value(), start, end, text, drop_before);
+    place_caret(area, &value, caret);
+    value
+}
+
+/// `:code` before the cursor (two characters or more), for emoji suggestions, as in Slack.
+fn emoji_query(area: &web_sys::HtmlTextAreaElement) -> Option<String> {
+    let caret = area.selection_start().ok().flatten()?;
+    emoji_code_before(&area.value(), caret)
 }
 
 #[component]
@@ -2742,6 +2779,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         let chat = c.current.get_untracked();
         let chat_for_draft = chat.clone();
         let thread_parent = parent();
+        let sent_text = text.clone();
         sending.set(true);
         spawn_local(async move {
             let result = if with_files {
@@ -2752,12 +2790,20 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             sending.set(false);
             match result {
                 Ok(()) => {
+                    // Clear only what was sent: while the message was on its way the user may have
+                    // switched to another chat or thread, or kept typing.
+                    let unchanged = |d: &str| d.trim() == sent_text;
                     if !thread {
                         c.drafts.update(|d| {
-                            d.remove(&chat_for_draft);
+                            if d.get(&chat_for_draft).is_some_and(|t| unchanged(t)) {
+                                d.remove(&chat_for_draft);
+                            }
                         });
                     }
-                    set_draft.set(String::new());
+                    let same_place = c.current.get_untracked() == chat_for_draft && parent() == thread_parent;
+                    if same_place && unchanged(&draft.get_untracked()) {
+                        set_draft.set(String::new());
+                    }
                 }
                 Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_not_sent))),
             }
@@ -4651,5 +4697,36 @@ fn AboutDialog() -> impl IntoView {
                 <p class="muted">{tr().version(env!("CARGO_PKG_VERSION"))}</p>
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selection_offsets_are_utf16() {
+        // "👍" is two UTF-16 units: "world" spans 9..14.
+        let value = "👍 hello world";
+        assert_eq!(
+            wrap_text(value, Some(9), Some(14), "**", "**"),
+            ("👍 hello **world**".to_owned(), 16)
+        );
+        assert_eq!(
+            wrap_text(value, None, None, "`", "`"),
+            ("👍 hello world``".to_owned(), 15)
+        );
+        assert_eq!(
+            insert_into(value, Some(2), Some(2), "😀", 0),
+            ("👍😀 hello world".to_owned(), 4)
+        );
+        // `:ok` typed after an emoji: the code and the colon are replaced.
+        assert_eq!(
+            insert_into("👍 :ok", Some(6), Some(6), "👌", 3),
+            ("👍 👌".to_owned(), 5)
+        );
+        assert_eq!(emoji_code_before("👍 :ok", 6).as_deref(), Some("ok"));
+        assert_eq!(emoji_code_before("a:ok", 4), None);
+        assert_eq!(utf16_to_byte("👍x", Some(1)), "👍".len());
     }
 }
