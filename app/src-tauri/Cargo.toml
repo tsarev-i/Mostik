@@ -21,7 +21,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 futures-util = "0.3"
 imagesize = "0.13"
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "windows-native"] }
 mime_guess = "2"
 mostik-core.workspace = true
 mostik-yandex.workspace = true
