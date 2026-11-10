@@ -91,6 +91,7 @@ mod tests {
         assert_eq!(name(100123), Some("TADA"));
         assert_eq!(emoji(1), "❔");
         let mut ids: Vec<u64> = TABLE.iter().map(|t| t.0).collect();
+        ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), TABLE.len(), "IDs are unique");
     }

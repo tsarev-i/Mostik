@@ -412,11 +412,10 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
         });
     }
     if let Some(seen) = cm.get("SeenMarker") {
-        let from = s(sm, &["ServerMessageInfo", "From", "Guid"]);
         let chat = s(seen, &["ChatId"])?;
-        if me.is_some_and(|me| from == Some(me.0.as_str())) && thread_parent(chat).is_none() {
+        if me.is_some_and(|me| from.as_ref() == Some(me)) && thread_parent(chat).is_none() {
             return Some(LiveEvent::Seen {
-                chat_id: ChatId(s(seen, &["ChatId"])?.to_owned()),
+                chat_id: ChatId(chat.to_owned()),
             });
         }
         return None;
