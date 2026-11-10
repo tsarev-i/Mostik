@@ -1,9 +1,19 @@
-[package]
-name = "mostik"
-version = "0.1.0"
-edition = "2026"
-description = "Неофициальный клиент Яндекс Телемост"
-license = "MIT"
-authors = ["Ivan Tsarev"]
+[workspace]
+resolver = "3"
+members = [
+    "app/src-tauri",
+    "app/ui",
+]
 
-[dependencies]
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Ivan Tsarev"]
+license = "MIT"
+description = "Unofficial Slack-like desktop client for Yandex Telemost"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

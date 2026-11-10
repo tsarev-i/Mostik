@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Mostik",
+  "mainBinaryName": "mostik",
+  "version": "0.1.0",
+  "identifier": "dev.mostik.client",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "beforeBuildCommand": "bash ../../scripts/ui.sh build --release"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Mostik | unofficial Telemost client",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 900,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "appimage"
+    ],
+    "category": "Network",
+    "shortDescription": "Unofficial Yandex Telemost client",
+    "longDescription": "Mostik is an unofficial Slack-like client for Yandex Telemost chats and meetings. Not affiliated with Yandex LLC.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
+  }
+}

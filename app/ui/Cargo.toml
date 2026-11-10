@@ -1,0 +1,13 @@
+[package]
+name = "mostik-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mostik user interface (Leptos, wasm)"
+
+[dependencies]
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
