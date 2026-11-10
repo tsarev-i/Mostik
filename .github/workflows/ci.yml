@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # The toolchain is the declared MSRV and the wasm-bindgen CLI must match the
+      # wasm-bindgen crate exactly, so both versions are read from the repo.
+      - name: Read tool versions
+        id: versions
+        run: |
+          echo "rust=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')" >> "$GITHUB_OUTPUT"
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.versions.outputs.rust }}
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.versions.outputs.wasm-bindgen }}
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # The desktop shell embeds app/ui/dist at compile time, so the UI goes first.
+      - name: Build UI (wasm)
+        run: bash scripts/ui.sh build
+
+      - name: Clippy (UI, wasm)
+        run: cargo clippy --locked -p mostik-ui --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      - name: Clippy (workspace)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --workspace
+
+      - name: Build workspace
+        run: cargo build --locked --workspace
