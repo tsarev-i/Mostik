@@ -109,7 +109,7 @@ fn which_day(ts: Timestamp) -> Day {
     }
 }
 
-/// "Сегодня", "Вчера", "понедельник, 9 ноября" / "Today", "Yesterday", "Monday, November 9th".
+/// "Today", "Yesterday", "Monday, November 9th" (and the Russian equivalents).
 pub fn day_label(ts: Timestamp) -> String {
     let d = date(ts);
     let lang = format().0;
@@ -145,7 +145,7 @@ fn ordinal(n: u32) -> &'static str {
     }
 }
 
-/// "сегодня в 10:41" / "today at 10:41".
+/// "today at 10:41" (and the Russian equivalent).
 pub fn relative(ts: Timestamp) -> String {
     let lang = format().0;
     let day = match (which_day(ts), lang) {
@@ -161,7 +161,7 @@ pub fn relative(ts: Timestamp) -> String {
     }
 }
 
-/// Short date for lists: the time today, "Yesterday", otherwise "9 нояб." / "Nov 9".
+/// Short date for lists: the time today, "Yesterday", otherwise "Nov 9" (or the Russian short form).
 pub fn short_date(ts: Timestamp) -> String {
     let d = date(ts);
     let lang = format().0;
