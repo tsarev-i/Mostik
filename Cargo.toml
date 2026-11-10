@@ -1,0 +1,9 @@
+[package]
+name = "mostik"
+version = "0.1.0"
+edition = "2026"
+description = "Неофициальный клиент Яндекс Телемост"
+license = "MIT"
+authors = ["Ivan Tsarev"]
+
+[dependencies]
