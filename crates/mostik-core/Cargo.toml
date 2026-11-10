@@ -1,0 +1,11 @@
+[package]
+name = "mostik-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mostik domain model: chats, messages, users"
+
+[dependencies]
+serde.workspace = true

@@ -1,0 +1,11 @@
+//! Mostik domain model.
+//!
+//! The types depend neither on the Telemost transport nor on the UI:
+//! `mostik-yandex` builds them and `mostik-ui` renders them.
+
+pub mod markup;
+pub mod mock;
+pub mod model;
+pub mod reactions;
+
+pub use model::*;

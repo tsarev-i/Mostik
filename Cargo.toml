@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/mostik-core",
     "app/src-tauri",
     "app/ui",
 ]
@@ -12,6 +13,11 @@ rust-version = "1.94"
 authors = ["Ivan Tsarev"]
 license = "MIT"
 description = "Unofficial Slack-like desktop client for Yandex Telemost"
+
+[workspace.dependencies]
+mostik-core = { path = "crates/mostik-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 lto = "thin"

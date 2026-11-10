@@ -2322,6 +2322,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mostik-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "mostik-ui"
 version = "0.1.0"
 dependencies = [
