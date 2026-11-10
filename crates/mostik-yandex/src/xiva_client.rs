@@ -54,6 +54,17 @@ pub struct XivaClient {
     seq: AtomicU64,
     closed: Arc<AtomicBool>,
     subscription_id: Arc<StdMutex<Option<String>>>,
+    /// The reader task; aborting it drops the socket.
+    reader: tokio::task::AbortHandle,
+}
+
+impl Drop for XivaClient {
+    /// Closes the socket: without this the reader task would keep the connection alive and keep
+    /// feeding `on_event` after the client is gone. No `Incoming::Closed` is sent for a dropped client.
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.reader.abort();
+    }
 }
 
 impl XivaClient {
@@ -80,7 +91,7 @@ impl XivaClient {
         let subscription_id: Arc<StdMutex<Option<String>>> = Arc::default();
 
         let (w, p, c, sub) = (writer.clone(), pending.clone(), closed.clone(), subscription_id.clone());
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             while let Some(msg) = stream.next().await {
                 let Ok(msg) = msg else { break };
                 match msg {
@@ -123,6 +134,7 @@ impl XivaClient {
             seq: AtomicU64::new(0),
             closed,
             subscription_id,
+            reader: reader.abort_handle(),
         })
     }
 
@@ -151,25 +163,44 @@ impl XivaClient {
 
     /// Sends a request and waits for the response with the same `seq`.
     pub async fn call(&self, method: &str, body: &impl Serialize, timeout_s: u64) -> Result<Value, XivaError> {
-        if self.is_closed() {
-            return Err(XivaError::Closed);
-        }
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (tx, rx) = oneshot::channel();
         if let Ok(mut m) = self.pending.lock() {
             m.insert(seq, tx);
         }
-        let bytes = xiva::encode_rpc(seq, method, body)?;
-        self.writer.lock().await.send(WsMessage::Binary(bytes.into())).await?;
+        // Checked after registering: the reader marks the socket closed before it drops the waiters,
+        // so either the check sees the close or the waiter is dropped and `rx` fails at once.
+        if self.is_closed() {
+            self.forget(seq);
+            return Err(XivaError::Closed);
+        }
+        let sent = match xiva::encode_rpc(seq, method, body) {
+            Ok(bytes) => self
+                .writer
+                .lock()
+                .await
+                .send(WsMessage::Binary(bytes.into()))
+                .await
+                .map_err(XivaError::from),
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = sent {
+            self.forget(seq);
+            return Err(e);
+        }
         match tokio::time::timeout(Duration::from_secs(timeout_s), rx).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(_)) => Err(XivaError::Closed),
             Err(_) => {
-                if let Ok(mut m) = self.pending.lock() {
-                    m.remove(&seq);
-                }
+                self.forget(seq);
                 Err(XivaError::Timeout(method.to_owned(), timeout_s))
             }
+        }
+    }
+
+    fn forget(&self, seq: u64) {
+        if let Ok(mut m) = self.pending.lock() {
+            m.remove(&seq);
         }
     }
 }

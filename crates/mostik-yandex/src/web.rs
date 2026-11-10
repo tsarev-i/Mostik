@@ -1,5 +1,8 @@
 //! HTTP side of the client: the web client page, CSRF and the `/api/` RPC.
 
+use std::sync::{Arc, Mutex};
+
+use reqwest::StatusCode;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use serde_json::Value;
 
@@ -78,7 +81,8 @@ pub struct WebClient {
     http: reqwest::Client,
     jar: CookieJar,
     user_agent: String,
-    csrf: Option<String>,
+    /// Shared by all `clone_light` copies, so a refreshed token reaches every one of them.
+    csrf: Arc<Mutex<Option<String>>>,
     pub page: Option<PageParams>,
 }
 
@@ -91,7 +95,7 @@ impl WebClient {
             http,
             jar,
             user_agent,
-            csrf: None,
+            csrf: Arc::default(),
             page: None,
         })
     }
@@ -145,10 +149,10 @@ impl WebClient {
         Ok(params)
     }
 
-    /// CSRF token for write requests; fetched once and cached.
-    pub async fn csrf_token(&mut self) -> Result<String, WebError> {
-        if let Some(t) = &self.csrf {
-            return Ok(t.clone());
+    /// CSRF token for write requests; fetched once and cached until the server rejects it.
+    pub async fn csrf_token(&self) -> Result<String, WebError> {
+        if let Some(t) = self.csrf.lock().ok().and_then(|c| c.clone()) {
+            return Ok(t);
         }
         let resp = self
             .http
@@ -162,8 +166,19 @@ impl WebClient {
             return Err(WebError::Unauthorized);
         }
         let token = parse_csrf(&body).ok_or_else(|| WebError::BadResponse(format!("csrf: HTTP {status}")))?;
-        self.csrf = Some(token.clone());
+        if let Ok(mut c) = self.csrf.lock() {
+            *c = Some(token.clone());
+        }
         Ok(token)
+    }
+
+    /// Forgets a token the server rejected, unless another request has already replaced it.
+    fn invalidate_csrf(&self, rejected: &str) {
+        if let Ok(mut c) = self.csrf.lock()
+            && c.as_deref() == Some(rejected)
+        {
+            *c = None;
+        }
     }
 
     /// File or preview from the Messenger storage: `file_shortterm/<Id2>[?size=…]`.
@@ -206,7 +221,6 @@ impl WebClient {
         content_type: &str,
         bytes: Vec<u8>,
     ) -> Result<Value, WebError> {
-        let csrf = self.csrf_token().await?;
         // Like `encodeURI` in the web client: the chat ID goes in with its slashes as is,
         // only the file name is encoded (and a `/` in it is escaped so it cannot break the path).
         let enc = |s: &str| -> String {
@@ -232,17 +246,29 @@ impl WebClient {
             crate::endpoints::FILES_HOST,
             enc(filename)
         );
-        let mut headers = self.headers(crate::endpoints::FILES_HOST);
-        if let Ok(v) = HeaderValue::from_str(&csrf) {
-            headers.insert("X-CSRF-TOKEN", v);
-        }
-        if let Ok(v) = HeaderValue::from_str(content_type) {
-            headers.insert(reqwest::header::CONTENT_TYPE, v);
-        }
-        let resp = self.http.post(url).headers(headers).body(bytes).send().await?;
-        let status = resp.status();
-        let body = resp.text().await?;
-        if status.as_u16() == 401 || status.as_u16() == 403 {
+        let bytes = bytes::Bytes::from(bytes);
+        let mut retried = false;
+        let (status, body) = loop {
+            let csrf = self.csrf_token().await?;
+            let mut headers = self.headers(crate::endpoints::FILES_HOST);
+            if let Ok(v) = HeaderValue::from_str(&csrf) {
+                headers.insert("X-CSRF-TOKEN", v);
+            }
+            if let Ok(v) = HeaderValue::from_str(content_type) {
+                headers.insert(reqwest::header::CONTENT_TYPE, v);
+            }
+            let resp = self.http.post(&url).headers(headers).body(bytes.clone()).send().await?;
+            let status = resp.status();
+            let body = resp.text().await?;
+            // A 403 usually means a stale CSRF token: retry once with a fresh one.
+            if status == StatusCode::FORBIDDEN && !retried {
+                self.invalidate_csrf(&csrf);
+                retried = true;
+                continue;
+            }
+            break (status, body);
+        };
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             return Err(WebError::Unauthorized);
         }
         let v: Value =
@@ -258,32 +284,63 @@ impl WebClient {
 
     /// `POST /api/` call in the web client format. Returns the whole response JSON.
     pub async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, WebError> {
-        let csrf = self.csrf_token().await?;
         let request = RpcRequest::new(method, params).form_value()?;
-        let form = reqwest::multipart::Form::new().text(FORM_FIELD, request);
-        let mut headers = self.headers("messenger.360.yandex.ru");
-        if let Ok(v) = HeaderValue::from_str(&csrf) {
-            headers.insert("X-CSRF-TOKEN", v);
+        let mut retried = false;
+        loop {
+            let csrf = self.csrf_token().await?;
+            let form = reqwest::multipart::Form::new().text(FORM_FIELD, request.clone());
+            let mut headers = self.headers("messenger.360.yandex.ru");
+            if let Ok(v) = HeaderValue::from_str(&csrf) {
+                headers.insert("X-CSRF-TOKEN", v);
+            }
+            headers.insert(
+                "X-Request-Attempt",
+                HeaderValue::from_static(if retried { "1" } else { "0" }),
+            );
+            if let Some(id) = self.page.as_ref().and_then(|p| p.service_id.as_deref())
+                && let Ok(v) = HeaderValue::from_str(id)
+            {
+                headers.insert("X-Origin-Service-ID", v);
+            }
+            let resp = self.http.post(API_URL).headers(headers).multipart(form).send().await?;
+            let status = resp.status();
+            let body = resp.text().await?;
+            if status == StatusCode::UNAUTHORIZED {
+                return Err(WebError::Unauthorized);
+            }
+            let parsed = serde_json::from_str::<Value>(&body);
+            // The server rejects a stale CSRF token with a 403 or a `csrf…` error code: retry once with a fresh one.
+            if !retried && csrf_rejected(status, parsed.as_ref().ok()) {
+                self.invalidate_csrf(&csrf);
+                retried = true;
+                continue;
+            }
+            return parsed.map_err(|_| WebError::BadResponse(format!("{method}: HTTP {status}, not JSON")));
         }
-        headers.insert("X-Request-Attempt", HeaderValue::from_static("0"));
-        if let Some(id) = self.page.as_ref().and_then(|p| p.service_id.as_deref())
-            && let Ok(v) = HeaderValue::from_str(id)
-        {
-            headers.insert("X-Origin-Service-ID", v);
-        }
-        let resp = self.http.post(API_URL).headers(headers).multipart(form).send().await?;
-        let status = resp.status();
-        let body = resp.text().await?;
-        if status.as_u16() == 401 {
-            return Err(WebError::Unauthorized);
-        }
-        serde_json::from_str(&body).map_err(|_| WebError::BadResponse(format!("{method}: HTTP {status}, not JSON")))
     }
+}
+
+/// Whether a response says the CSRF token was not accepted.
+fn csrf_rejected(status: StatusCode, body: Option<&Value>) -> bool {
+    status == StatusCode::FORBIDDEN
+        || body
+            .and_then(|v| v.pointer("/data/code"))
+            .and_then(Value::as_str)
+            .is_some_and(|code| code.to_ascii_lowercase().contains("csrf"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_rejected_csrf() {
+        let ok = serde_json::json!({"status": "ok", "data": {}});
+        let bad = serde_json::json!({"status": "error", "data": {"code": "csrf_token_invalid"}});
+        assert!(!csrf_rejected(StatusCode::OK, Some(&ok)));
+        assert!(csrf_rejected(StatusCode::OK, Some(&bad)));
+        assert!(csrf_rejected(StatusCode::FORBIDDEN, None));
+    }
 
     #[test]
     fn parses_global_params() {
