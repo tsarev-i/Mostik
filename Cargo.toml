@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/mostik-core",
+    "crates/mostik-yandex",
     "app/src-tauri",
     "app/ui",
 ]
@@ -16,8 +17,11 @@ description = "Unofficial Slack-like desktop client for Yandex Telemost"
 
 [workspace.dependencies]
 mostik-core = { path = "crates/mostik-core" }
+mostik-yandex = { path = "crates/mostik-yandex" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [profile.release]
 lto = "thin"
