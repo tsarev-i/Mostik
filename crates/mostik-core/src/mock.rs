@@ -123,6 +123,24 @@ pub fn demo() -> Snapshot {
     let dm_anna = chat("dm-anna", ChatKind::Direct { peer: uid("anna") }, "", 2, 1, 1);
     let dm_boris = chat("dm-boris", ChatKind::Direct { peer: uid("boris") }, "", 2, 0, 0);
     let notes = chat("notes", ChatKind::Notes, "Notes", 1, 0, 0);
+    // Meeting chats live in their own Telemost namespace, `0/22/…`.
+    let mut sync = chat(
+        "0/22/weekly-sync",
+        ChatKind::Group { public: false },
+        "Weekly sync",
+        8,
+        1,
+        0,
+    );
+    sync.last_ts = TODAY + 75 * MIN;
+    let demo_call = chat(
+        "0/22/release-demo",
+        ChatKind::Group { public: false },
+        "Release demo",
+        12,
+        0,
+        0,
+    );
 
     let sections = vec![
         Section {
@@ -139,6 +157,11 @@ pub fn demo() -> Snapshot {
             id: "dms".into(),
             title: "Direct messages".into(),
             chats: vec![cid("notes"), cid("dm-anna"), cid("dm-boris")],
+        },
+        Section {
+            id: "meetings".into(),
+            title: "Meeting chats".into(),
+            chats: vec![cid("0/22/weekly-sync"), cid("0/22/release-demo")],
         },
     ];
 
@@ -267,6 +290,18 @@ pub fn demo() -> Snapshot {
             "Put the production logs on the shared drive.",
         ),
         msg("notes", YESTERDAY + 10 * MIN, "me", "Check Yandex ID login on Wayland."),
+        msg(
+            "0/22/weekly-sync",
+            TODAY + 75 * MIN,
+            "vera",
+            "Notes from the sync: login review today, release tonight.",
+        ),
+        msg(
+            "0/22/release-demo",
+            YESTERDAY + 62 * MIN,
+            "gleb",
+            "The demo plan is in the channel description, questions go here.",
+        ),
     ];
 
     Snapshot {
@@ -279,7 +314,9 @@ pub fn demo() -> Snapshot {
             avatar: None,
         }],
         users: vec![me, anna, boris, vera, gleb, bot],
-        chats: vec![general, dev, design, release, random, news, dm_anna, dm_boris, notes],
+        chats: vec![
+            general, dev, design, release, random, news, dm_anna, dm_boris, notes, sync, demo_call,
+        ],
         sections,
         messages,
     }
