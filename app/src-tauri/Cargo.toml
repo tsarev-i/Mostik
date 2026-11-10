@@ -30,7 +30,7 @@ serde_json.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "macros", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Same version as wry uses: needed to customise the WebKitGTK context menu.

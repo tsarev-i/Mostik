@@ -34,6 +34,8 @@ const WEBVIEW_UA: &str =
 pub const EVENT: &str = "mostik://event";
 /// Fresh snapshot after a reconnect.
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
+/// The session is no longer valid: the UI shows the login screen with this reason.
+pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
 const PAGE_SIZE: u32 = 50;
 const MAX_DIAG_EVENTS: usize = 300;
 
@@ -56,6 +58,9 @@ struct Shared {
     muted: BTreeSet<String>,
     titles: BTreeMap<String, String>,
     names: BTreeMap<String, String>,
+    /// Set once the snapshot is built: until then `muted`, `titles` and `names` are incomplete,
+    /// so no notifications are shown.
+    ready: bool,
 }
 
 /// In-memory attachment cache: showing an image again does not hit the network.
@@ -92,6 +97,8 @@ impl FileCache {
 /// Live connection: HTTP client, Xiva socket and shared state.
 pub struct Live {
     files: StdMutex<FileCache>,
+    /// Per-file locks of downloads in progress, so the same file is not fetched twice at once.
+    downloads: StdMutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
     web: WebClient,
     xiva: XivaClient,
     me: UserId,
@@ -395,16 +402,36 @@ pub async fn serve_file(app: &AppHandle, path: &str, query: Option<&str>) -> Res
 
 async fn cached_file(live: &Live, id: &str, size: Option<&str>) -> Result<(Arc<Vec<u8>>, String), String> {
     let key = format!("{id}?{}", size.unwrap_or(""));
-    if let Some(hit) = live.files.lock().ok().and_then(|c| c.get(&key)) {
+    let cached = || live.files.lock().ok().and_then(|c| c.get(&key));
+    if let Some(hit) = cached() {
         return Ok(hit);
     }
-    let (bytes, kind) = live.web.fetch_file(id, size).await.map_err(|e| e.to_string())?;
+    let lock = live
+        .downloads
+        .lock()
+        .map_err(|e| e.to_string())?
+        .entry(key.clone())
+        .or_default()
+        .clone();
+    let _guard = lock.lock().await;
+    // Someone else may have fetched it while we waited for the lock.
+    if let Some(hit) = cached() {
+        return Ok(hit);
+    }
+    let fetched = live.web.fetch_file(id, size).await.map_err(|e| e.to_string());
+    if let Ok(mut d) = live.downloads.lock() {
+        d.remove(&key);
+    }
+    let (bytes, kind) = fetched?;
     let bytes = Arc::new(bytes);
     if let Ok(mut c) = live.files.lock() {
         c.put(key, bytes.clone(), kind.clone());
     }
     Ok((bytes, kind))
 }
+
+/// How many image previews are fetched at the same time.
+const PREFETCH_CONCURRENCY: usize = 6;
 
 /// Fetches image previews in parallel while the UI renders the history.
 fn prefetch_previews(live: Arc<Live>, messages: &[Message]) {
@@ -414,13 +441,26 @@ fn prefetch_previews(live: Arc<Live>, messages: &[Message]) {
         .filter(|a| a.kind == mostik_core::AttachmentKind::Image)
         .map(|a| a.file_id.clone())
         .collect();
-    for chunk in ids.chunks(6).map(<[String]>::to_vec) {
-        let live = live.clone();
-        tauri::async_runtime::spawn(async move {
-            let jobs = chunk.iter().map(|id| cached_file(&live, id, Some("middle")));
-            futures_util::future::join_all(jobs).await;
-        });
+    if ids.is_empty() {
+        return;
     }
+    tauri::async_runtime::spawn(async move {
+        use futures_util::StreamExt;
+        // Owned futures: a stream of closures over borrowed IDs trips the `Send` check of `spawn`.
+        let jobs: Vec<_> = ids
+            .into_iter()
+            .map(|id| {
+                let live = live.clone();
+                async move {
+                    let _ = cached_file(&live, &id, Some("middle")).await;
+                }
+            })
+            .collect();
+        futures_util::stream::iter(jobs)
+            .buffer_unordered(PREFETCH_CONCURRENCY)
+            .for_each(|_| async {})
+            .await;
+    });
 }
 
 fn percent_decode(s: &str) -> String {
@@ -533,8 +573,10 @@ async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar) -> Result<Bo
     write_probe(app, "probe.json", &probe);
     match result {
         Ok((snapshot, live)) => {
-            *state.live.lock().await = Some(Arc::new(live));
+            let live = Arc::new(live);
+            *state.live.lock().await = Some(live.clone());
             start_heartbeat(app);
+            probe_threads(app.clone(), live);
             Ok(Boot::Ready { snapshot })
         }
         Err(ConnectError::Unauthorized) => {
@@ -552,6 +594,21 @@ async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar) -> Result<Bo
         }
         Err(ConnectError::Other(e)) => Err(e),
     }
+}
+
+/// Diagnostics of the thread ID format, in the background so that it never delays the start.
+fn probe_threads(app: AppHandle, live: Arc<Live>) {
+    tauri::async_runtime::spawn(async move {
+        let probe = match live.xiva.call("history", &wire::thread_list(0), 30).await {
+            Ok(v) => {
+                let mut entry = id_patterns(&v);
+                entry["shape"] = shape(&v);
+                entry
+            }
+            Err(e) => err_json(e),
+        };
+        write_probe(&app, "probe-threads.json", &probe);
+    });
 }
 
 enum ConnectError {
@@ -607,11 +664,14 @@ fn handle_incoming(app: &AppHandle, shared: &StdMutex<Shared>, diag: &AtomicUsiz
 
 fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>) {
     let Ok(mut sh) = shared.lock() else { return };
-    let entry = sh.last.entry(m.chat_id.0.clone()).or_default();
-    if m.ts > entry.0 {
-        *entry = (m.ts, m.seq_no.max(entry.1));
+    // A thread reply lives in the thread chat: its time and number mean nothing in the parent chat.
+    if m.thread_parent.is_none() {
+        let entry = sh.last.entry(m.chat_id.0.clone()).or_default();
+        if m.ts > entry.0 {
+            *entry = (m.ts, m.seq_no.max(entry.1));
+        }
     }
-    if sh.me.as_ref() == Some(&m.author) || sh.muted.contains(&m.chat_id.0) || m.edited {
+    if !sh.ready || sh.me.as_ref() == Some(&m.author) || sh.muted.contains(&m.chat_id.0) || m.edited {
         return;
     }
     if sh.my_availability == mostik_core::Availability::DoNotDisturb {
@@ -1262,39 +1322,24 @@ pub async fn send_files(
         return Err(format!("the file was not picked by the user: {bad}"));
     }
     let target = target_chat(&chat_id, thread)?;
-    let mut web = live.web.clone_light();
-    let (mut images, mut files) = (Vec::new(), Vec::new());
     let gallery_id = request_id();
-    for path in &paths {
-        let p = std::path::Path::new(path);
-        let bytes = std::fs::read(p).map_err(|e| format!("{path}: {e}"))?;
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".into());
-        let mime = mime_guess::from_path(p).first_or_octet_stream();
-        let size = bytes.len();
-        let dims = (mime.type_() == "image")
-            .then(|| imagesize::blob_size(&bytes).ok())
-            .flatten();
-        let payload = if dims.is_some() {
-            gallery_id.clone()
-        } else {
-            request_id()
-        };
-        let up = web
-            .upload_file(&target, &payload, &name, mime.essence_str(), bytes)
-            .await
-            .map_err(|e| e.to_string())?;
-        let id = up
-            .get("file_id")
-            .and_then(Value::as_str)
-            .ok_or("Telemost did not return file_id")?
-            .to_owned();
-        let info = json!({ "Id2": id, "Name": name, "Size": size });
-        match dims {
-            Some(d) => images.push(json!({ "Image": { "Width": d.width, "Height": d.height, "FileInfo": info } })),
-            None => files.push((payload, info)),
+    // Files are read and uploaded a few at a time; `buffered` keeps their order for the gallery.
+    let uploads: Vec<_> = paths
+        .into_iter()
+        .map(|path| upload_one(live.web.clone_light(), target.clone(), gallery_id.clone(), path))
+        .collect();
+    let uploaded: Vec<Uploaded> = {
+        use futures_util::{StreamExt, TryStreamExt};
+        futures_util::stream::iter(uploads)
+            .buffered(UPLOAD_CONCURRENCY)
+            .try_collect()
+            .await?
+    };
+    let (mut images, mut files) = (Vec::new(), Vec::new());
+    for u in uploaded {
+        match u {
+            Uploaded::Image(item) => images.push(item),
+            Uploaded::File(payload, info) => files.push((payload, info)),
         }
     }
     let mut sent = Vec::new();
@@ -1320,6 +1365,45 @@ pub async fn send_files(
         sent.push(send_plain(&live, &chat_id, thread, msg, "").await?);
     }
     Ok(sent)
+}
+
+/// How many files are uploaded at the same time.
+const UPLOAD_CONCURRENCY: usize = 3;
+
+/// An uploaded file: a gallery item for an image, or a payload ID and `FileInfo` for any other file.
+enum Uploaded {
+    Image(Value),
+    File(String, Value),
+}
+
+/// Reads a file without blocking the runtime and uploads it to the Messenger storage.
+async fn upload_one(mut web: WebClient, target: String, gallery_id: String, path: String) -> Result<Uploaded, String> {
+    let p = std::path::Path::new(&path);
+    let bytes = tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?;
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let mime = mime_guess::from_path(p).first_or_octet_stream();
+    let size = bytes.len();
+    let dims = (mime.type_() == "image")
+        .then(|| imagesize::blob_size(&bytes).ok())
+        .flatten();
+    let payload = if dims.is_some() { gallery_id } else { request_id() };
+    let up = web
+        .upload_file(&target, &payload, &name, mime.essence_str(), bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    let id = up
+        .get("file_id")
+        .and_then(Value::as_str)
+        .ok_or("Telemost did not return file_id")?
+        .to_owned();
+    let info = json!({ "Id2": id, "Name": name, "Size": size });
+    Ok(match dims {
+        Some(d) => Uploaded::Image(json!({ "Image": { "Width": d.width, "Height": d.height, "FileInfo": info } })),
+        None => Uploaded::File(payload, info),
+    })
 }
 
 /// Sends a ready `ClientMessage` and returns the feed message (with its attachments).
@@ -1541,7 +1625,17 @@ async fn reconnect_loop(app: AppHandle) {
                 let _ = app.emit(SNAPSHOT_EVENT, &snapshot);
                 break;
             }
-            Err(ConnectError::Unauthorized) => break,
+            Err(ConnectError::Unauthorized) => {
+                store::delete();
+                *state.live.lock().await = None;
+                let reason = text(
+                    &app,
+                    "Сессия Яндекс ID недействительна, войдите снова.",
+                    "Your Yandex ID session has expired. Please sign in again.",
+                );
+                let _ = app.emit(SIGNED_OUT_EVENT, reason);
+                break;
+            }
             Err(ConnectError::Other(e)) => eprintln!("reconnect failed: {e}"),
         }
         delay = (delay * 2).min(60);
@@ -1604,6 +1698,12 @@ async fn connect_inner(
             .unwrap_or("me")
             .to_owned(),
     );
+    if me_id.0 != "me"
+        && let Ok(mut sh) = shared.lock()
+    {
+        // Known before the rest of the snapshot, so pushes arriving meanwhile recognise our own messages.
+        sh.me = Some(me_id.clone());
+    }
     let me_name = who
         .pointer("/UserInfo/DisplayName")
         .and_then(Value::as_str)
@@ -1618,15 +1718,6 @@ async fn connect_inner(
     probe["history"] = list.as_ref().map(id_patterns).unwrap_or_else(err_json);
     let list = list.map_err(|e| ConnectError::Other(format!("Telemost did not return the chat list: {e}")))?;
 
-    // Threads: for now only to diagnose the format of their identifiers.
-    probe["threads"] = match xiva.call("history", &wire::thread_list(0), 30).await {
-        Ok(v) => {
-            let mut entry = id_patterns(&v);
-            entry["shape"] = shape(&v);
-            entry
-        }
-        Err(e) => err_json(e),
-    };
     probe["subscription"] = json!(xiva.wait_subscription(Duration::from_secs(3)).await.is_some());
 
     let mut data = convert::from_history(&list, Some(&me_id));
@@ -1688,20 +1779,22 @@ async fn connect_inner(
     // Photos and job titles: the history does not always carry `AvatarId`, so fill them in from the directory.
     let guids: Vec<String> = snapshot.users.iter().map(|u| u.id.0.clone()).collect();
     let mut filled = 0;
-    for chunk in guids.chunks(100) {
-        if let Ok(v) = web.rpc("get_users_data", json!({ "guids": chunk })).await {
-            for p in convert::profiles(&v) {
-                if let Some(u) = snapshot.users.iter_mut().find(|u| u.id == p.id) {
-                    if u.avatar.is_none() && p.avatar.is_some() {
-                        u.avatar = p.avatar.clone();
-                        filled += 1;
-                    }
-                    if u.title.is_none() {
-                        u.title = p.position.clone();
-                    }
-                    if !p.display_name.is_empty() && (u.display_name == u.id.0 || u.display_name.is_empty()) {
-                        u.display_name = p.display_name.clone();
-                    }
+    let jobs = guids.chunks(100).map(|chunk| {
+        let mut web = web.clone_light();
+        async move { web.rpc("get_users_data", json!({ "guids": chunk })).await }
+    });
+    for v in futures_util::future::join_all(jobs).await.into_iter().flatten() {
+        for p in convert::profiles(&v) {
+            if let Some(u) = snapshot.users.iter_mut().find(|u| u.id == p.id) {
+                if u.avatar.is_none() && p.avatar.is_some() {
+                    u.avatar = p.avatar.clone();
+                    filled += 1;
+                }
+                if u.title.is_none() {
+                    u.title = p.position.clone();
+                }
+                if !p.display_name.is_empty() && (u.display_name == u.id.0 || u.display_name.is_empty()) {
+                    u.display_name = p.display_name.clone();
                 }
             }
         }
@@ -1716,7 +1809,13 @@ async fn connect_inner(
     }
     if let Ok(mut sh) = shared.lock() {
         sh.me = Some(me_id.clone());
-        sh.last = last;
+        // Pushes that arrived while connecting may already be newer than the history.
+        for (chat, (ts, seq)) in last {
+            let entry = sh.last.entry(chat).or_default();
+            if ts > entry.0 {
+                *entry = (ts, seq.max(entry.1));
+            }
+        }
         for ch in &snapshot.chats {
             if ch.muted {
                 sh.muted.insert(ch.id.0.clone());
@@ -1727,6 +1826,7 @@ async fn connect_inner(
         for u in &snapshot.users {
             sh.names.insert(u.id.0.clone(), u.display_name.clone());
         }
+        sh.ready = true;
     }
     probe["snapshot"] = json!({
         "chats": snapshot.chats.len(),
@@ -1741,6 +1841,7 @@ async fn connect_inner(
         snapshot,
         Live {
             files: StdMutex::default(),
+            downloads: StdMutex::default(),
             web,
             xiva,
             me: me_id,

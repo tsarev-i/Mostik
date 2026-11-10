@@ -3,6 +3,7 @@
 //! The user types the login, password and captcha on the Yandex page themselves.
 //! When Yandex ID sends them back to `telemost.360.yandex.ru`, the session cookies are taken and the window closes.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mostik_yandex::endpoints::passport_login_url;
@@ -11,20 +12,26 @@ use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::oneshot;
 
-/// Window label of the login window.
-pub const LABEL: &str = "login";
+/// Label prefix of login windows; each window gets its own number.
+const LABEL_PREFIX: &str = "login-";
 const RETURN_HOST: &str = "telemost.360.yandex.ru";
+
+static NEXT_WINDOW: AtomicU32 = AtomicU32::new(1);
 
 /// Opens the login window. The channel closes without a value if the user closes the window.
 pub fn open(app: &AppHandle) -> Result<oneshot::Receiver<CookieJar>, String> {
-    if let Some(existing) = app.get_webview_window(LABEL) {
-        let _ = existing.close();
+    // Closing is asynchronous, so a new window cannot reuse the old label: it gets a fresh one.
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(LABEL_PREFIX) {
+            let _ = window.close();
+        }
     }
+    let label = format!("{LABEL_PREFIX}{}", NEXT_WINDOW.fetch_add(1, Ordering::Relaxed));
     let (tx, rx) = oneshot::channel();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let url = passport_login_url().parse().map_err(|e| format!("login URL: {e}"))?;
     let on_close = tx.clone();
-    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
+    let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
         .title(crate::backend::text(
             app,
             "Вход через Яндекс ID | Мостик (неофициальный клиент)",
