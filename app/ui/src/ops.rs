@@ -1294,6 +1294,10 @@ pub fn subscribe(c: Ctx) {
             crate::sound::play(&c.settings.with_untracked(|s| s.sound.clone()));
         })
         .await;
+        bridge::listen(bridge::OPEN_EVENT, move |t: bridge::OpenTarget| {
+            jump_to_message(c, t.chat_id, t.ts, t.thread_parent);
+        })
+        .await;
         bridge::listen(bridge::FILES_EVENT, move |files: Vec<bridge::PendingFile>| {
             c.pending_files.update(|p| {
                 for f in files {

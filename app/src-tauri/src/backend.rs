@@ -32,6 +32,27 @@ const WEBVIEW_UA: &str =
 
 /// Live event for the UI.
 pub const EVENT: &str = "mostik://event";
+/// Open a message: the user clicked its notification.
+pub const OPEN_EVENT: &str = "mostik://open";
+
+/// The message a clicked notification was about.
+#[derive(Clone, Serialize)]
+pub struct OpenTarget {
+    pub chat_id: String,
+    pub ts: Timestamp,
+    pub thread_parent: Option<Timestamp>,
+}
+
+impl OpenTarget {
+    /// From the `extra` data [`notify`] gives a notification.
+    pub fn from_extra(extra: &std::collections::HashMap<String, Value>) -> Option<Self> {
+        Some(OpenTarget {
+            chat_id: extra.get("chat")?.as_str()?.to_owned(),
+            ts: extra.get("ts")?.as_u64()?,
+            thread_parent: extra.get("thread").and_then(Value::as_u64),
+        })
+    }
+}
 /// Fresh snapshot after a reconnect.
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 /// The session is no longer valid: the UI shows the login screen with this reason.
@@ -1180,7 +1201,18 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
     } else {
         body
     };
-    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+    // A click on the notification opens this message (see `open_from_notification`).
+    let mut builder = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .extra("chat", &m.chat_id.0)
+        .extra("ts", m.ts);
+    if let Some(parent) = m.thread_parent {
+        builder = builder.extra("thread", parent);
+    }
+    if let Err(e) = builder.show() {
         eprintln!("notification not shown: {e}");
     }
     // The UI plays the sound (the one chosen in the preferences).

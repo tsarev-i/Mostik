@@ -559,6 +559,15 @@ pub struct PendingFile {
 pub const FILES_EVENT: &str = "mostik://files";
 /// The backend showed a notification: play the sound.
 pub const SOUND_EVENT: &str = "mostik://sound";
+/// The user clicked a message notification: open that message.
+pub const OPEN_EVENT: &str = "mostik://open";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenTarget {
+    pub chat_id: ChatId,
+    pub ts: Timestamp,
+    pub thread_parent: Option<Timestamp>,
+}
 
 pub async fn pick_files() -> Result<Vec<PendingFile>, String> {
     call("pick_files", NoArgs {}).await

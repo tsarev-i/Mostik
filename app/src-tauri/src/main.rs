@@ -16,6 +16,7 @@ mod webview;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 /// Shows, unminimizes and focuses the main window.
 fn show_main(app: &AppHandle) {
@@ -24,6 +25,33 @@ fn show_main(app: &AppHandle) {
         let _ = w.show();
         let _ = w.set_focus();
     }
+}
+
+/// A click on a message notification shows the main window on that message. On Wayland the
+/// window cannot take the focus by itself: it asks for attention instead.
+fn open_from_notification(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.notification().on_action(move |performed| {
+        if performed.action_id() != "tap" {
+            return;
+        }
+        let Some(target) = performed
+            .notification()
+            .and_then(|n| backend::OpenTarget::from_extra(n.extra()))
+        else {
+            return;
+        };
+        let app = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            show_main(&app);
+            if let Some(w) = app.get_webview_window("main")
+                && !w.is_focused().unwrap_or(false)
+            {
+                let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
+            }
+            let _ = app.emit(backend::OPEN_EVENT, &target);
+        });
+    });
 }
 
 /// Tray icon with "Open" and "Quit"; a left click shows the main window.
@@ -106,6 +134,9 @@ fn main() {
             }
         })
         .setup(|app| {
+            // Before anything can notify: clicks are reported only for notifications shown
+            // after a handler exists.
+            open_from_notification(app.handle());
             // The tray is optional: without an app indicator in the desktop environment we simply run without it.
             if let Err(e) = setup_tray(app.handle()) {
                 eprintln!("tray icon unavailable: {e}");
