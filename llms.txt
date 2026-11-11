@@ -7,6 +7,7 @@ Mostik talks to the undocumented protocol of the Telemost web client (HTTP RPC p
 ## Docs
 
 - [README (Russian)](https://github.com/tsarev-i/Mostik/blob/HEAD/README.md): features, screenshots, installation, building from source
+- [Changelog (Russian)](https://github.com/tsarev-i/Mostik/blob/HEAD/CHANGELOG.md): changes and fixes by release, newest first
 - [Design notes](https://github.com/tsarev-i/Mostik/blob/HEAD/docs/design.md): layout metrics, colour tokens, typography and behaviour
 
 ## Downloads

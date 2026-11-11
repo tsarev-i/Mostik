@@ -11,7 +11,7 @@ use mostik_core::*;
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
 use crate::settings::{ColorMode, NotifyMode, Settings, SidebarFilter, SidebarSort, THEME_SWATCHES, THEMES};
-use crate::{bridge, ops, time};
+use crate::{bridge, ops, order, time};
 
 /// Window state shared by all components.
 #[derive(Clone, Copy)]
@@ -82,12 +82,31 @@ pub struct Ctx {
     pub sidebar_w: RwSignal<f64>,
     pub thread_w: RwSignal<f64>,
     pub dragging: RwSignal<Option<Drag>>,
+    /// Custom chat order in the sidebar sections, kept between runs.
+    pub chat_order: RwSignal<order::ChatOrder>,
+    /// A sidebar chat being dragged to a new place.
+    pub chat_drag: RwSignal<Option<ChatDrag>>,
     pub prefs: RwSignal<bool>,
     pub search: RwSignal<String>,
     /// Ticks once a second, to expire "is typing…".
     pub now: RwSignal<f64>,
     /// The call window that is open now, shown at the bottom of the sidebar like a Slack huddle.
     pub call: RwSignal<Option<bridge::CallInfo>>,
+}
+
+/// A sidebar chat held with the mouse button.
+#[derive(Clone, PartialEq)]
+pub struct ChatDrag {
+    pub section: String,
+    pub chat: ChatId,
+    /// Where the button went down.
+    pub from: (f64, f64),
+    /// The pointer moved far enough: it is a drag, not a click.
+    pub active: bool,
+    /// Drop place: next to this chat, after it with `true`.
+    pub target: Option<(ChatId, bool)>,
+    /// Already dropped: the click that follows the button release must not open the chat.
+    pub dropped: bool,
 }
 
 /// Open right-click menu: the point that was clicked and what for.
@@ -328,6 +347,8 @@ pub fn App() -> impl IntoView {
         sidebar_w: RwSignal::new(stored_width("mostik.sidebar_w", 270.0)),
         thread_w: RwSignal::new(stored_width("mostik.thread_w", 400.0)),
         dragging: RwSignal::new(None),
+        chat_order: RwSignal::new(order::load()),
+        chat_drag: RwSignal::new(None),
         prefs: RwSignal::new(false),
         search: RwSignal::new(String::new()),
         now: RwSignal::new(js_sys::Date::now()),
@@ -372,6 +393,7 @@ pub fn App() -> impl IntoView {
         Duration::from_secs(120),
     );
     Effect::new(move |_| c.drafts.with(save_drafts));
+    Effect::new(move |_| c.chat_order.with(order::save));
 
     // Unread count in the window title, as in Slack.
     Effect::new(move |_| {
@@ -453,10 +475,22 @@ pub fn App() -> impl IntoView {
         }
     };
     // Listen to both pointer and mouse events: some environments send only one kind.
-    let _pm = window_event_listener(ev::pointermove, move |e| drag_to(e.client_x() as f64));
-    let _mm = window_event_listener(ev::mousemove, move |e| drag_to(e.client_x() as f64));
-    let _pu = window_event_listener(ev::pointerup, move |_| drag_end());
-    let _mu = window_event_listener(ev::mouseup, move |_| drag_end());
+    let _pm = window_event_listener(ev::pointermove, move |e| {
+        drag_to(e.client_x() as f64);
+        chat_drag_to(c, &e);
+    });
+    let _mm = window_event_listener(ev::mousemove, move |e| {
+        drag_to(e.client_x() as f64);
+        chat_drag_to(c, &e);
+    });
+    let _pu = window_event_listener(ev::pointerup, move |_| {
+        drag_end();
+        chat_drop(c);
+    });
+    let _mu = window_event_listener(ev::mouseup, move |_| {
+        drag_end();
+        chat_drop(c);
+    });
 
     // Ctrl+= / Ctrl+- / Ctrl+0 zoom, as in Slack.
     let _zoom = window_event_listener(ev::keydown, move |e| {
@@ -634,7 +668,15 @@ fn LoginScreen(reason: Option<String>) -> impl IntoView {
 fn Workspace() -> impl IntoView {
     let c = ctx();
     view! {
-        <div class=move || if c.dragging.get().is_some() { "window dragging" } else { "window" }>
+        <div class=move || {
+            if c.dragging.get().is_some() {
+                "window dragging"
+            } else if c.chat_drag.with(|d| d.as_ref().is_some_and(|d| d.active && !d.dropped)) {
+                "window chat-dragging"
+            } else {
+                "window"
+            }
+        }>
             <TopBar/>
             <div class="body">
                 <Rail/>
@@ -760,6 +802,14 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
         .with_untracked(|s| s.sections.iter().map(|sec| sec.id.clone()).collect());
     let collapsed = c.collapsed.with_untracked(|set| set.contains(&id));
     let toggle_id = id.clone();
+    let custom = c.settings.with_untracked(|s| s.sidebar_sort == SidebarSort::Custom)
+        && c.chat_order.with_untracked(|o| o.contains_key(&id));
+    let reset = custom.then(|| {
+        let id = id.clone();
+        view! {
+            <button on:click=move |_| { close_menus(c); c.chat_order.update(|o| { o.remove(&id); }); }>{tr().reset_order}</button>
+        }
+    });
     view! {
         <button disabled=unread.is_empty() on:click=move |_| {
             close_menus(c);
@@ -774,6 +824,7 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
         }>{if collapsed { tr().expand_section } else { tr().collapse_section }}</button>
         <button on:click=move |_| { close_menus(c); c.collapsed.set(all.iter().cloned().collect()); }>{tr().collapse_all}</button>
         <button on:click=move |_| { close_menus(c); c.collapsed.set(HashSet::new()); }>{tr().expand_all}</button>
+        {reset.map(|r| view! { <div class="menu-sep"></div>{r} })}
     }
 }
 
@@ -933,6 +984,7 @@ fn sidebar_menu_items(c: Ctx) -> impl IntoView {
                     <div class="menu-label">{tr().sort_by}</div>
                     {sort_item(SidebarSort::Alphabetical, tr().s_az)}
                     {sort_item(SidebarSort::Recency, tr().s_recency)}
+                    {sort_item(SidebarSort::Custom, tr().s_custom)}
                 </div>
             </Show>
         </div>
@@ -1655,11 +1707,11 @@ fn SidebarSection(section: Section) -> impl IntoView {
     let visible = {
         let (chats, section_id) = (section.chats.clone(), section.id.clone());
         Memo::new(move |_| {
-            let (filter, sort, hide_muted) = c.settings.with(|s| (s.sidebar_filter, s.sidebar_sort, s.hide_muted));
+            let (filter, hide_muted) = c.settings.with(|s| (s.sidebar_filter, s.hide_muted));
             let current = c.current.get();
             let now = (js_sys::Date::now() * 1000.0) as Timestamp;
             c.snap.with(|s| {
-                let mut list: Vec<&Chat> = chats
+                section_order(c, s, &section_id, &chats)
                     .iter()
                     .filter_map(|id| s.chat(id))
                     .filter(|ch| {
@@ -1675,11 +1727,8 @@ fn SidebarSection(section: Section) -> impl IntoView {
                             )
                     })
                     .filter(|ch| in_current_org(c, ch))
-                    .collect();
-                if sort == SidebarSort::Alphabetical && section_id != "starred" {
-                    list.sort_by_cached_key(|ch| (ch.kind != ChatKind::Notes, chat_title(s, ch).to_lowercase()));
-                }
-                list.into_iter().map(|ch| ch.id.clone()).collect::<Vec<_>>()
+                    .map(|ch| ch.id.clone())
+                    .collect::<Vec<_>>()
             })
         })
     };
@@ -1689,7 +1738,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
         (always || !empty.get()).then(|| {
         let section_id = section_id.clone();
         view! {
-            <div class="sb-section">
+            <div class="sb-section" data-section=section_id.clone()>
                 <button class="sb-section-title" on:click=toggle.clone() on:contextmenu={
                     let id = section.id.clone();
                     move |e: ev::MouseEvent| {
@@ -1702,7 +1751,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     </span>
                     <span>{tr().section(&section.id, &section.title)}</span>
                 </button>
-                {move || {
+                {let section_id = section_id.clone(); move || {
                     // As in Slack: a collapsed section still shows the open chat and chats with unread messages.
                     let folded = collapsed.get();
                     visible
@@ -1713,7 +1762,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                                 || c.current.with(|cur| cur == id)
                                 || c.snap.with(|s| s.chat(id).is_some_and(|ch| ch.unread > 0 && !ch.muted))
                         })
-                        .map(|id| view! { <ChatRow id=id/> })
+                        .map(|id| view! { <ChatRow id=id section=section_id.clone()/> })
                         .collect_view()
                 }}
                 {(section_id == "dms").then(|| view! {
@@ -1735,6 +1784,121 @@ fn SidebarSection(section: Section) -> impl IntoView {
             </div>
         }
     })
+    }
+}
+
+/// Section chats in sidebar order, before the filter. Starred chats keep the Telemost order
+/// unless the user dragged them; chats new to a custom order go on top (in "Starred", at the bottom).
+fn section_order(c: Ctx, s: &Snapshot, section_id: &str, chats: &[ChatId]) -> Vec<ChatId> {
+    let starred = section_id == "starred";
+    match c.settings.with(|st| st.sidebar_sort) {
+        SidebarSort::Alphabetical if !starred => {
+            let mut list = chats.to_vec();
+            list.sort_by_cached_key(|id| {
+                s.chat(id)
+                    .map(|ch| (ch.kind != ChatKind::Notes, chat_title(s, ch).to_lowercase()))
+            });
+            list
+        }
+        SidebarSort::Custom => c
+            .chat_order
+            .with(|o| order::apply(o.get(section_id).map_or(&[], Vec::as_slice), chats, starred)),
+        _ => chats.to_vec(),
+    }
+}
+
+/// Where a dragged chat would land: next to the row under the pointer, before or after it.
+fn drop_target(section: &str, y: f64) -> Option<(ChatId, bool)> {
+    let rows = document()
+        .query_selector_all(&format!(".sb-section[data-section=\"{section}\"] .sb-row[data-chat]"))
+        .ok()?;
+    let mut last = None;
+    for i in 0..rows.length() {
+        let Some(el) = rows
+            .item(i)
+            .and_then(|n| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(n).ok())
+        else {
+            continue;
+        };
+        let Some(id) = el.get_attribute("data-chat").map(ChatId) else {
+            continue;
+        };
+        let r = el.get_bounding_client_rect();
+        if y < r.top() + r.height() / 2.0 {
+            return Some((id, false));
+        }
+        last = Some(id);
+    }
+    last.map(|id| (id, true))
+}
+
+/// Pointer move with a sidebar chat held: starts the drag after a few pixels, then tracks the drop place
+/// and scrolls the sidebar near its edges.
+fn chat_drag_to(c: Ctx, e: &ev::MouseEvent) {
+    let Some(d) = c.chat_drag.get_untracked() else { return };
+    if d.dropped {
+        return;
+    }
+    // The button was released outside the window.
+    if e.buttons() & 1 == 0 {
+        return c.chat_drag.set(None);
+    }
+    let (x, y) = (e.client_x() as f64, e.client_y() as f64);
+    if !d.active && (x - d.from.0).hypot(y - d.from.1) < 5.0 {
+        return;
+    }
+    if let Some(el) = document().query_selector(".sb-scroll").ok().flatten() {
+        let r = el.get_bounding_client_rect();
+        if y < r.top() + 24.0 {
+            el.set_scroll_top(el.scroll_top() - 12);
+        } else if y > r.bottom() - 24.0 {
+            el.set_scroll_top(el.scroll_top() + 12);
+        }
+    }
+    let target = drop_target(&d.section, y);
+    if !d.active || d.target != target {
+        c.chat_drag.set(Some(ChatDrag {
+            active: true,
+            target,
+            ..d
+        }));
+    }
+}
+
+/// Button released: puts the dragged chat in its new place and switches the sidebar to the custom order.
+fn chat_drop(c: Ctx) {
+    let Some(d) = c.chat_drag.get_untracked() else { return };
+    if !d.active {
+        return c.chat_drag.set(None);
+    }
+    if d.dropped {
+        return;
+    }
+    c.chat_drag.set(Some(ChatDrag {
+        dropped: true,
+        target: None,
+        ..d.clone()
+    }));
+    set_timeout(move || c.chat_drag.set(None), Duration::ZERO);
+    let Some((anchor, after)) = d.target else { return };
+    let current = untrack(|| {
+        c.snap.with(|s| {
+            s.sections
+                .iter()
+                .find(|sec| sec.id == d.section)
+                .map(|sec| section_order(c, s, &sec.id, &sec.chats))
+        })
+    });
+    let Some(current) = current else { return };
+    let moved = order::move_chat(current.clone(), &d.chat, &anchor, after);
+    if moved == current {
+        return;
+    }
+    c.chat_order.update(|o| {
+        o.insert(d.section, moved);
+    });
+    if c.settings.with_untracked(|s| s.sidebar_sort != SidebarSort::Custom) {
+        c.settings.update(|s| s.sidebar_sort = SidebarSort::Custom);
     }
 }
 
@@ -1762,7 +1926,7 @@ fn shown_in_sidebar(ch: &Chat, filter: SidebarFilter, hide_muted: bool, now: Tim
 }
 
 #[component]
-fn ChatRow(id: ChatId) -> impl IntoView {
+fn ChatRow(id: ChatId, section: String) -> impl IntoView {
     let c = ctx();
     let data = {
         let id = id.clone();
@@ -1802,7 +1966,50 @@ fn ChatRow(id: ChatId) -> impl IntoView {
             }));
         }
     };
+    // Drag state of this row: being dragged, or the drop place before or after it.
+    let drag_cls = {
+        let id = id.clone();
+        Memo::new(move |_| {
+            c.chat_drag.with(|d| match d {
+                Some(d) if d.active && !d.dropped => {
+                    if d.chat == id {
+                        " dragging"
+                    } else {
+                        match &d.target {
+                            Some((t, false)) if t == &id => " drop-before",
+                            Some((t, true)) if t == &id => " drop-after",
+                            _ => "",
+                        }
+                    }
+                }
+                _ => "",
+            })
+        })
+    };
+    let hold = {
+        let id = id.clone();
+        move |e: ev::MouseEvent| {
+            if e.button() != 0 {
+                return;
+            }
+            // No text selection or native image drag: the row is dragged by hand.
+            e.prevent_default();
+            c.chat_drag.set(Some(ChatDrag {
+                section: section.clone(),
+                chat: id.clone(),
+                from: (e.client_x() as f64, e.client_y() as f64),
+                active: false,
+                target: None,
+                dropped: false,
+            }));
+        }
+    };
+    let data_chat = id.0.clone();
     let select = move |_| {
+        // The click that ends a drag.
+        if c.chat_drag.with_untracked(|d| d.as_ref().is_some_and(|d| d.active)) {
+            return;
+        }
         if c.view.get_untracked() == ViewMode::Drafts {
             c.view.set(ViewMode::Home);
         }
@@ -1823,6 +2030,7 @@ fn ChatRow(id: ChatId) -> impl IntoView {
             if ctx_open.get() {
                 cls.push_str(" ctx");
             }
+            cls.push_str(drag_cls.get());
             let icon = match face {
                 Some(u) => {
                     view! { <span class="sb-icon face"><Avatar user=u size=20 presence=true/></span> }.into_any()
@@ -1841,7 +2049,7 @@ fn ChatRow(id: ChatId) -> impl IntoView {
             let pencil = (has_draft && ch.mentions == 0)
                 .then(|| view! { <span class="sb-pencil"><Icon icon=I::Compose size=13/></span> });
             view! {
-                <button class=cls on:click=select.clone() on:contextmenu=on_ctx.clone()>
+                <button class=cls data-chat=data_chat.clone() on:mousedown=hold.clone() on:click=select.clone() on:contextmenu=on_ctx.clone()>
                     {icon}
                     <span class="sb-name">{title}</span>
                     {you}
