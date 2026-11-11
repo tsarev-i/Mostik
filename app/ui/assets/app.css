@@ -1,20 +1,11 @@
-/* Mostik: dark “aubergine” theme following Slack 4.53 metrics (docs/design.md). */
+/* Mostik: layout following Slack 4.53 metrics (docs/design.md). */
 
 :root {
   color-scheme: dark;
   --font: "Lato", "Noto Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "Noto Sans Mono", monospace;
 
-  --frame-a: #4a1a4f;
-  --frame-b: #2c0e2f;
-  --frame-c: #230a25;
-  --rail-top: #3f1745;
-  --rail-bottom: #290c2a;
-  --sidebar-top: #28192b;
-  --sidebar-bottom: #1e1420;
-  --sidebar-text: #c7bcc9;
-  --sidebar-hover: rgba(255, 255, 255, 0.08);
-  --sidebar-selected: #7c3c85;
+  /* The colours of the frame, rail and sidebar are in “Sidebar themes”. */
 
   --bg: #202326;
   --bg-raised: #25272b;
@@ -26,6 +17,7 @@
   --text-strong: #f8f8f8;
   --text-muted: #9a9b9e;
   --link: #1d9bd1;
+  --code-text: #e8912d;
   --accent-green: #007a5a;
   --badge: #e01e5a;
   --online: #2bac76;
@@ -95,11 +87,11 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: grid;
   place-items: center;
   border-radius: 6px;
-  color: rgba(255, 255, 255, 0.8);
+  color: rgba(var(--chrome-ink), 0.8);
 }
-.tb-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+.tb-btn:hover:not(:disabled) { background: rgba(var(--chrome-ink), 0.12); }
 
-/* "Update" pill: a new version is out. Light on every frame theme. */
+/* "Update" pill: a new version is out. In the ink of the frame, so it stands out on every theme. */
 .update-btn {
   height: 26px;
   display: flex;
@@ -107,13 +99,13 @@ button:disabled { opacity: 0.4; cursor: default; }
   gap: 6px;
   padding: 0 12px 0 10px;
   border-radius: 13px;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(var(--chrome-ink), 0.92);
   color: var(--frame-b);
   font-size: 13px;
   font-weight: 700;
   white-space: nowrap;
 }
-.update-btn:hover:not(:disabled) { background: #fff; }
+.update-btn:hover:not(:disabled) { background: var(--chrome-strong); }
 .update-btn:disabled { opacity: 0.85; }
 .update-spinner {
   width: 13px;
@@ -131,21 +123,21 @@ button:disabled { opacity: 0.4; cursor: default; }
   gap: 8px;
   padding: 0 10px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.85);
+  background: rgba(var(--chrome-ink), 0.2);
+  color: rgba(var(--chrome-ink), 0.85);
   cursor: text;
 }
-.search:hover { background: rgba(255, 255, 255, 0.26); }
+.search:hover { background: rgba(var(--chrome-ink), 0.26); }
 .search input {
   flex: 1;
   min-width: 0;
   background: none;
   border: 0;
   outline: none;
-  color: #fff;
+  color: var(--chrome-strong);
   font: 13px var(--font);
 }
-.search input::placeholder { color: rgba(255, 255, 255, 0.8); }
+.search input::placeholder { color: rgba(var(--chrome-ink), 0.8); }
 
 /* ── Rail ───────────────────────────────────────────────────────── */
 
@@ -181,7 +173,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  color: rgba(255, 255, 255, 0.9);
+  color: rgba(var(--chrome-ink), 0.9);
 }
 .rail-icon {
   width: 36px;
@@ -191,8 +183,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   border-radius: 8px;
   transition: background 0.1s;
 }
-.rail-item:hover .rail-icon { background: rgba(255, 255, 255, 0.12); transform: scale(1.04); }
-.rail-item.active .rail-icon { background: rgba(255, 255, 255, 0.24); }
+.rail-item:hover .rail-icon { background: rgba(var(--chrome-ink), 0.12); transform: scale(1.04); }
+.rail-item.active .rail-icon { background: rgba(var(--chrome-ink), 0.24); }
 .rail-label { font-size: 11px; font-weight: 700; line-height: 1.2; }
 
 .rail-spacer { flex: 1; }
@@ -203,11 +195,11 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
+  background: rgba(var(--chrome-ink), 0.2);
+  color: var(--chrome-strong);
   margin-bottom: 8px;
 }
-.rail-add:hover { background: rgba(255, 255, 255, 0.3); }
+.rail-add:hover { background: rgba(var(--chrome-ink), 0.3); }
 
 /* ── Workspace card ─────────────────────────────────────────────── */
 
@@ -218,7 +210,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   margin: 0 6px 6px 0;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(var(--chrome-ink), 0.06);
 }
 
 /* ── Sidebar ────────────────────────────────────────────────────── */
@@ -229,7 +221,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--sidebar-top), var(--sidebar-bottom));
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  border-right: 1px solid rgba(var(--chrome-ink), 0.06);
   color: var(--sidebar-text);
 }
 
@@ -249,7 +241,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   padding: 3px 6px;
   margin-left: -6px;
   border-radius: 6px;
-  color: #fff;
+  color: var(--chrome-strong);
   font-size: 18px;
   font-weight: 900;
 }
@@ -262,9 +254,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .sb-scroll { flex: 1; overflow-y: auto; padding: 4px 0 12px; }
 .sb-scroll::-webkit-scrollbar { width: 8px; }
-.sb-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.15); border-radius: 4px; }
+.sb-scroll::-webkit-scrollbar-thumb { background: rgba(var(--chrome-ink), 0.15); border-radius: 4px; }
 
-.sb-quick { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.sb-quick { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid rgba(var(--chrome-ink), 0.08); }
 
 .sb-section { margin-bottom: 10px; }
 
@@ -292,12 +284,12 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: grid;
   place-items: center;
   border-radius: 4px;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(var(--chrome-ink), 0.75);
   opacity: 0;
 }
 .sb-section-head:hover .sb-section-add,
 .sb-section-add:focus-visible { opacity: 1; }
-.sb-section-add:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+.sb-section-add:hover { background: rgba(var(--chrome-ink), 0.12); color: var(--chrome-strong); }
 
 .caret { display: grid; place-items: center; width: 20px; transition: transform 0.12s; }
 .caret.collapsed { transform: rotate(-90deg); }
@@ -317,7 +309,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .sb-row:hover { background: var(--sidebar-hover); }
 .sb-row.ctx:not(.selected) { background: var(--sidebar-hover); }
 .sb-row.selected { background: var(--sidebar-selected); color: #fff; }
-.sb-row.unread { color: #fff; font-weight: 900; }
+.sb-row.unread { color: var(--chrome-strong); font-weight: 900; }
 .sb-row.muted { opacity: 0.55; }
 .window.chat-dragging { cursor: grabbing; user-select: none; }
 .window.chat-dragging .sb-row:hover:not(.selected) { background: transparent; }
@@ -340,11 +332,11 @@ button:disabled { opacity: 0.4; cursor: default; }
   width: 20px;
   height: 20px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(var(--chrome-ink), 0.1);
 }
 .sb-name { overflow: hidden; text-overflow: ellipsis; }
-.sb-you { color: rgba(255, 255, 255, 0.55); font-weight: 400; }
-.sb-add { color: rgba(255, 255, 255, 0.75); }
+.sb-you { color: rgba(var(--chrome-ink), 0.55); font-weight: 400; }
+.sb-add { color: rgba(var(--chrome-ink), 0.75); }
 
 .badge {
   margin-left: auto;
@@ -618,7 +610,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   border: 1px solid var(--border);
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.06);
-  color: #e8912d;
+  color: var(--code-text);
   font: 12px var(--mono);
 }
 .msg-link { color: var(--link); text-decoration: none; }
@@ -834,7 +826,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .window.center { display: grid; place-items: center; }
 
-.splash { display: grid; justify-items: center; gap: 16px; color: rgba(255, 255, 255, 0.85); }
+.splash { display: grid; justify-items: center; gap: 16px; color: rgba(var(--chrome-ink), 0.85); }
 .spinner {
   width: 32px;
   height: 32px;
@@ -843,6 +835,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
+.splash .spinner { border-color: rgba(var(--chrome-ink), 0.2); border-top-color: var(--chrome-strong); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .login-card {
@@ -922,9 +915,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 .kbd {
   padding: 0 6px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(var(--chrome-ink), 0.15);
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(var(--chrome-ink), 0.75);
 }
 .search-results {
   position: absolute;
@@ -954,7 +947,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .sr-item.selected .sr-sub, .sr-item:hover .sr-sub, .sr-item.selected .sr-chat { color: rgba(255, 255, 255, 0.75); }
 .sr-msg-head { display: flex; align-items: baseline; gap: 2px; }
 .history-wrap { position: relative; }
-.tb-btn.active { background: rgba(255, 255, 255, 0.12); }
+.tb-btn.active { background: rgba(var(--chrome-ink), 0.12); }
 .popover.history-menu { top: 32px; left: 0; right: auto; width: 300px; max-height: 420px; overflow-y: auto; z-index: 40; }
 /* A message reached from search or a link. */
 .msg.highlight { background: rgba(242, 199, 68, 0.18); transition: background 1.5s; }
@@ -1172,25 +1165,73 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 /* ── Sidebar themes ─────────────────────────────────────────────── */
 
-:root[data-theme="midnight"] {
+/* A theme sets the colours of the frame, rail and sidebar; Dusk also paints the message column in dark mode.
+   The swatches in Preferences carry `data-theme` too and paint themselves with the same tokens, so a swatch
+   always shows the theme as it is. */
+
+:root {
+  --sidebar-hover: rgba(255, 255, 255, 0.08);
+  /* Ink of the frame, rail and sidebar as an RGB triple for rgba(), its strongest shade
+     (names, unread chats) and the tint of panels on the sidebar (the call bar). */
+  --chrome-ink: 255, 255, 255;
+  --chrome-strong: #fff;
+  --chrome-panel: rgba(0, 0, 0, 0.28);
+}
+
+/* Mostik's own. Dusk is the default: its frame, rail and sidebar apply to `:root` without a known theme. */
+:root, .swatch[data-theme="dusk"] {
+  --frame-a: #2a3446; --frame-b: #1f2735; --frame-c: #171c25;
+  --rail-top: #253044; --rail-bottom: #1b2130;
+  --sidebar-top: #1f2634; --sidebar-bottom: #1a202c;
+  --sidebar-selected: #3f5f96; --sidebar-text: #b7c1d3;
+}
+/* Dusk is a whole palette: its own ink on the chrome and, in dark mode, the message column (light mode,
+   below, keeps its own colours for the column). Text pairs: 11.8, muted 6.3, link 7.7, sidebar 9.0, selected 6.4. */
+:root[data-theme="dusk"] {
+  --sidebar-hover: rgba(255, 255, 255, 0.07);
+  --chrome-ink: 223, 229, 239;
+  --chrome-strong: #f1f4f9;
+  --bg: #1b1f27; --bg-raised: #222731; --bg-hover: #232935; --bg-input: #20252f;
+  --border: #333a48; --border-soft: rgba(255, 255, 255, 0.07);
+  --text: #d5dae3; --text-strong: #eff2f7; --text-muted: #95a1b5;
+  --link: #82b5ee; --code-text: #e8b38a;
+  --accent-green: #2f7d66; --badge: #c93762; --online: #4fbf8f; --away: #e3a24a;
+  --mention-bg: rgba(240, 196, 92, 0.08); --mention-bar: #e3a24a;
+  --mention-chip: rgba(130, 181, 238, 0.16); --mention-chip-me: rgba(240, 196, 92, 0.24);
+  --important-bg: rgba(79, 191, 143, 0.08);
+}
+:root[data-theme="moss"], .swatch[data-theme="moss"] {
+  --frame-a: #4d5532; --frame-b: #30351f; --frame-c: #232716;
+  --rail-top: #454c2c; --rail-bottom: #2c311d;
+  --sidebar-top: #2f3422; --sidebar-bottom: #24281a;
+  --sidebar-selected: #5e7230; --sidebar-text: #d4d9c3;
+}
+/* The classic ones. Twilight took Aubergine's place. */
+:root[data-theme="twilight"], .swatch[data-theme="twilight"] {
+  --frame-a: #53388a; --frame-b: #35245c; --frame-c: #22183f;
+  --rail-top: #473078; --rail-bottom: #2b1d4e;
+  --sidebar-top: #362460; --sidebar-bottom: #271a47;
+  --sidebar-selected: #7750d3; --sidebar-text: #d8d0f1;
+}
+:root[data-theme="midnight"], .swatch[data-theme="midnight"] {
   --frame-a: #2a2d33; --frame-b: #1d1f23; --frame-c: #16181b;
   --rail-top: #26292e; --rail-bottom: #191b1f;
   --sidebar-top: #1d1f23; --sidebar-bottom: #17191c;
   --sidebar-selected: #1164a3; --sidebar-text: #c9cacc;
 }
-:root[data-theme="forest"] {
+:root[data-theme="forest"], .swatch[data-theme="forest"] {
   --frame-a: #1d5a40; --frame-b: #12392a; --frame-c: #0c281d;
   --rail-top: #17503a; --rail-bottom: #0f3123;
   --sidebar-top: #133b2b; --sidebar-bottom: #0e2a1f;
   --sidebar-selected: #2bac76; --sidebar-text: #c3d9cf;
 }
-:root[data-theme="ocean"] {
+:root[data-theme="ocean"], .swatch[data-theme="ocean"] {
   --frame-a: #1b4a78; --frame-b: #102e4c; --frame-c: #0b2038;
   --rail-top: #174270; --rail-bottom: #0e2944;
   --sidebar-top: #112f4e; --sidebar-bottom: #0c2238;
   --sidebar-selected: #2d8fd5; --sidebar-text: #c2d4e6;
 }
-:root[data-theme="sunset"] {
+:root[data-theme="sunset"], .swatch[data-theme="sunset"] {
   --frame-a: #7a3417; --frame-b: #4a1d12; --frame-c: #33130c;
   --rail-top: #6b2d14; --rail-bottom: #401a10;
   --sidebar-top: #4a1f13; --sidebar-bottom: #34150d;
@@ -1278,7 +1319,17 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .theme:hover { border-color: #1d9bd1; }
 .theme.selected { border-color: #1264a3; box-shadow: 0 0 0 1px #1264a3; }
-.swatch { width: 28px; height: 28px; border-radius: 6px; flex: none; }
+/* The sidebar of the theme in `data-theme` and its selected row (see “Sidebar themes”). */
+.swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  flex: none;
+  background: linear-gradient(135deg, var(--sidebar-top) 0 60%, var(--sidebar-selected) 60% 100%);
+  box-shadow: inset 0 0 0 1px rgba(127, 127, 127, 0.25);
+}
+/* Theme groups: Mostik's own and the classic ones. */
+.theme-group { margin-top: 16px; font-size: 13px; font-weight: 700; color: var(--text-muted); }
 .image-link { display: block; margin-top: 4px; color: var(--link); }
 .image-link:hover { text-decoration: underline; }
 
@@ -1336,8 +1387,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   align-items: center;
   gap: 8px;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--chrome-panel);
+  border: 1px solid rgba(var(--chrome-ink), 0.08);
   color: var(--sidebar-text);
 }
 .call-where {
@@ -1373,7 +1424,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .call-label {
   font-size: 15px;
   font-weight: 700;
-  color: #fff;
+  color: var(--chrome-strong);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -1387,13 +1438,13 @@ button:disabled { opacity: 0.4; cursor: default; }
   gap: 6px;
   padding: 0 8px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  background: rgba(var(--chrome-ink), 0.08);
+  color: var(--chrome-strong);
   font-size: 13px;
   font-weight: 700;
 }
-.call-btn:hover { background: rgba(255, 255, 255, 0.16); }
-.call-btn.leave { flex: none; background: #e01e5a; }
+.call-btn:hover { background: rgba(var(--chrome-ink), 0.16); }
+.call-btn.leave { flex: none; background: #e01e5a; color: #fff; }
 .call-btn.leave:hover { background: #c41a50; }
 .sb-pencil { margin-left: auto; opacity: 0.8; display: grid; place-items: center; }
 /* A call is going on in the chat: green headphones, like Slack's huddle mark. */
@@ -1413,7 +1464,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .sb-call ~ .sb-close, .sb-pencil ~ .sb-close, .badge ~ .sb-close { margin-left: 4px; }
 .sb-row:hover .sb-close { display: grid; }
 .window.chat-dragging .sb-close { display: none; }
-.sb-close:hover { opacity: 1; background: rgba(255, 255, 255, 0.16); }
+.sb-close:hover { opacity: 1; background: rgba(var(--chrome-ink), 0.16); }
 .sb-draft-count { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 12px; opacity: 0.8; }
 .dm-list { flex: 1; overflow-y: auto; padding: 4px 0 12px; }
 .dm-list-title { padding: 4px 16px 8px; font-size: 13px; font-weight: 700; opacity: 0.8; }
@@ -1429,7 +1480,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .dm-row:hover { background: var(--sidebar-hover); }
 .dm-row.selected { background: var(--sidebar-selected); color: #fff; }
-.dm-row.unread .dm-name, .dm-row.unread .dm-preview { color: #fff; font-weight: 900; }
+.dm-row.unread .dm-name, .dm-row.unread .dm-preview { color: var(--chrome-strong); font-weight: 900; }
 .dm-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .dm-top { display: flex; align-items: baseline; gap: 8px; }
 .dm-name { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1563,9 +1614,9 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: rgba(0, 0, 0, 0.5);
   color: #fff;
 }
-.sb-compose { color: rgba(255, 255, 255, 0.9); }
-.sb-compose:hover { background: var(--sidebar-hover); color: #fff; }
-.sb-compose.active { background: var(--sidebar-hover); color: #fff; }
+.sb-compose { color: rgba(var(--chrome-ink), 0.9); }
+.sb-compose:hover { background: var(--sidebar-hover); color: var(--chrome-strong); }
+.sb-compose.active { background: var(--sidebar-hover); color: var(--chrome-strong); }
 .sb-header-actions { display: flex; align-items: center; gap: 2px; }
 /* Toggle items in menus: a check mark on the left, as in Slack's “Filter and sort”. */
 .popover.menu .menu-radio { display: flex; align-items: center; gap: 6px; padding-left: 12px; }
@@ -1653,7 +1704,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .presence.offline, .presence.away {
   background: var(--sidebar-bottom);
-  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.75);
+  box-shadow: inset 0 0 0 1.5px rgba(var(--chrome-ink), 0.75);
 }
 .main .presence, .thread-pane .presence, .modal .presence, .me-menu .presence { border-color: var(--bg); }
 .main .presence.offline, .main .presence.away, .thread-pane .presence.offline, .thread-pane .presence.away,
@@ -1665,7 +1716,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 /* Status in the rail, as in Slack: an emoji badge above the avatar, together one capsule. */
 .rail-me { position: relative; display: flex; flex-direction: column; align-items: center; border-radius: 8px; }
-.rail-me.with-status { background: rgba(255, 255, 255, 0.22); }
+.rail-me.with-status { background: rgba(var(--chrome-ink), 0.22); }
 .rail-status {
   width: 36px;
   height: 26px;
@@ -1832,9 +1883,9 @@ button.ws-tile { cursor: pointer; }
 .btn.small { height: 28px; padding: 0 12px; font-size: 13px; }
 /* “Mentions” (Activity). */
 .act-tabs { display: flex; gap: 4px; padding: 4px 12px 8px; flex-wrap: wrap; }
-.act-tab { padding: 3px 10px; border-radius: 12px; border: 1px solid var(--border); font-size: 13px; color: var(--text-muted); }
+.act-tab { padding: 3px 10px; border-radius: 12px; border: 1px solid rgba(var(--chrome-ink), 0.2); font-size: 13px; color: rgba(var(--chrome-ink), 0.7); }
 .act-tab.active { background: var(--sidebar-selected); border-color: transparent; color: #fff; }
-.act-what { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-what { font-size: 12px; color: rgba(var(--chrome-ink), 0.6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .act-row .dm-name { font-weight: 700; }
 .empty-state.small { padding: 24px 16px; text-align: center; color: var(--text-muted); }
 .rail-icon { position: relative; }
@@ -1885,7 +1936,7 @@ button.ws-tile { cursor: pointer; }
 }
 .ring-text { min-width: 0; }
 .ring-name {
-  color: var(--text-strong);
+  color: var(--chrome-strong);
   font-size: 18px;
   font-weight: 900;
   white-space: nowrap;

@@ -10,7 +10,7 @@ use mostik_core::*;
 
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
-use crate::settings::{ColorMode, NotifyMode, Settings, SidebarFilter, SidebarSort, THEME_SWATCHES, THEMES};
+use crate::settings::{ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES};
 use crate::{bridge, folders, hidden, ops, order, time};
 
 /// Window state shared by all components.
@@ -5745,13 +5745,23 @@ fn PrefAppearance() -> impl IntoView {
             {radio(c, "mode", tr().p_mode_system, ColorMode::System, m, set_m)}
         </div>
         <h3 class="pref-h">{tr().p_themes}</h3>
+        <div class="theme-group">{tr().themes_own}</div>
+        {theme_buttons(c, 0..OWN_THEMES)}
+        <div class="theme-group">{tr().themes_classic}</div>
+        {theme_buttons(c, OWN_THEMES..THEMES.len())}
+    }
+}
+
+/// Buttons of the themes `range` of [`THEMES`]: a swatch and the name.
+fn theme_buttons(c: Ctx, range: std::ops::Range<usize>) -> impl IntoView {
+    view! {
         <div class="themes">
-            {THEMES.into_iter().enumerate().map(|(i, id)| {
-                let (rail, accent) = THEME_SWATCHES[i];
+            {range.map(|i| {
+                let id = THEMES[i];
                 view! {
                     <button class=move || if c.settings.with(|s| s.theme == id) { "theme selected" } else { "theme" }
                         on:click=move |_| c.settings.update(|s| s.theme = id.to_owned())>
-                        <span class="swatch" style=format!("background:linear-gradient(135deg,{rail} 0 60%,{accent} 60% 100%)")></span>
+                        <span class="swatch" data-theme=id></span>
                         <span>{tr().theme_names[i]}</span>
                     </button>
                 }

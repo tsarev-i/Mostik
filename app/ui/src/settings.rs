@@ -42,16 +42,11 @@ pub enum SidebarSort {
     Custom,
 }
 
-/// Sidebar themes. Own colours and names, not copies of Slack themes.
-pub const THEMES: [&str; 5] = ["aubergine", "midnight", "forest", "ocean", "sunset"];
-/// Theme colour swatches for the picker: (rail, highlight).
-pub const THEME_SWATCHES: [(&str, &str); 5] = [
-    ("#3f1745", "#7c3c85"),
-    ("#1b1d21", "#1164a3"),
-    ("#123829", "#2bac76"),
-    ("#0f2b46", "#2d8fd5"),
-    ("#4a1d12", "#e8912d"),
-];
+/// Sidebar themes in the picker's order: Mostik's own first (the first one is the default), then the classic ones.
+/// Own colours and names, not copies of Slack themes.
+pub const THEMES: [&str; 7] = ["dusk", "moss", "twilight", "midnight", "forest", "ocean", "sunset"];
+/// How many of [`THEMES`] are Mostik's own; the rest are the classic ones.
+pub const OWN_THEMES: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -123,6 +118,13 @@ impl Settings {
             .and_then(|s| s.get_item(KEY).ok().flatten())
             .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default();
+        // Themes an older version offered: Twilight took Aubergine's place, the others fall back to the default.
+        if s.theme == "aubergine" {
+            s.theme = "twilight".to_owned();
+        }
+        if !THEMES.contains(&s.theme.as_str()) {
+            s.theme = Self::default().theme;
+        }
         // A sound an older version offered and this one does not.
         if !mostik_core::NOTIFICATION_SOUNDS.contains(&s.sound.as_str()) {
             s.sound = Self::default().sound;

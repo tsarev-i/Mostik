@@ -26,7 +26,7 @@ The app icon is `docs/design/app-icon.png` (source: `app-icon.svg`, a suspension
 The sidebar and the main column sit on a shared card with an 8px radius on top of the
 gradient window background.
 
-## Colours (dark theme, the default)
+## Colours (measured from Slack, dark mode)
 
 | Token | Value | Measured at |
 |---|---|---|
@@ -42,6 +42,16 @@ gradient window background.
 
 The other tokens (badge `#E01E5A`, online `#2BAC76`, mention highlight and so on) are
 the `:root` variables in `app/ui/assets/app.css`.
+
+The rail and sidebar rows above are Slack's Aubergine; Mostik no longer has that theme.
+
+The colour mode (light, dark) paints the main column, dialogs and menus; a theme paints the frame, rail and sidebar
+(`:root[data-theme]` blocks). Preferences → Appearance shows Mostik's own themes first, Dusk (the default) and Moss,
+then the classic ones: Twilight (in place of Aubergine), Midnight, Forest, Ocean, Sunset. Dusk is a whole palette:
+in dark mode it also sets the message column, links, inline code and accents; light mode keeps its own column.
+Text on the chrome takes its colour from `--chrome-ink` (an RGB triple for `rgba()`) and `--chrome-strong` rather
+than a fixed white. A theme's swatch in Preferences carries `data-theme` and paints the theme's own sidebar and
+selected-row tokens, so it cannot drift from the theme.
 
 ## Typography
 
