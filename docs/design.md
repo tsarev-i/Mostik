@@ -66,4 +66,8 @@ until then Noto Sans is used.
 
 - Reactions come only from the Telemost set, no custom emoji.
 - Markup: bold, italic, strikethrough, underline, code, links and code blocks. Lists and quotes are not supported.
-- A call opens in the external browser: WebKitGTK has no WebRTC.
+- A call opens in its own window, like a huddle: the Telemost meeting page, titled "Call · #channel", with
+  the current call shown at the bottom of the sidebar ("Show the window", "Leave") and the header call button
+  turned green. Leaving the meeting closes the window. WebKitGTK has no WebRTC, so on Linux the window is an
+  installed Chromium-based browser in app mode driven over a DevTools pipe (`call.rs`, `cdp.rs`); on Windows
+  it is a WebView2 window.

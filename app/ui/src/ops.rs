@@ -534,14 +534,51 @@ pub fn typing(c: Ctx, chat: ChatId) {
     });
 }
 
-/// A call in a chat, like a Slack huddle: the chat meeting opens in the browser.
+/// A call in a chat, like a Slack huddle: the chat meeting opens in the call window.
+/// If this chat's call is already open, its window comes to the front.
 pub fn start_call(c: Ctx, chat: ChatId) {
     if !c.live {
         return report(c, tr().only_in_app_calls.into());
     }
+    if let Some(current) = c.call.get_untracked() {
+        // One call at a time, as in Slack: bring the current one back instead.
+        focus_call(c);
+        if current.chat_id.as_deref() != Some(chat.0.as_str()) {
+            report(c, tr().call_busy.into());
+        }
+        return;
+    }
+    let label = c.snap.with_untracked(|s| {
+        s.chat(&chat).map_or_else(String::new, |ch| {
+            let title = crate::app::display_title(s, ch);
+            match ch.kind {
+                ChatKind::Group { public: true } | ChatKind::Broadcast => format!("#{title}"),
+                _ => title,
+            }
+        })
+    });
     c.notice.set(Some(tr().call_opening.into()));
     spawn_local(async move {
-        if let Err(e) = bridge::start_call(&chat.0).await {
+        if let Err(e) = bridge::start_call(&chat.0, &label).await {
+            c.notice.set(None);
+            report(c, format!("{}: {e}", tr().err_call));
+        }
+    });
+}
+
+/// "Show" in the sidebar call bar.
+pub fn focus_call(c: Ctx) {
+    spawn_local(async move {
+        if let Err(e) = bridge::focus_call().await {
+            report(c, format!("{}: {e}", tr().err_call));
+        }
+    });
+}
+
+/// "Leave" in the sidebar call bar: the bar goes away when the backend reports the call closed.
+pub fn leave_call(c: Ctx) {
+    spawn_local(async move {
+        if let Err(e) = bridge::leave_call().await {
             report(c, format!("{}: {e}", tr().err_call));
         }
     });
@@ -846,6 +883,16 @@ pub fn subscribe(c: Ctx) {
             });
         })
         .await;
+        bridge::listen(bridge::CALL_EVENT, move |call: Option<bridge::CallInfo>| {
+            if call.is_some() {
+                c.notice.set(None);
+            }
+            c.call.set(call);
+        })
+        .await;
+        if let Ok(call) = bridge::current_call().await {
+            c.call.set(call);
+        }
         bridge::listen(bridge::SIGNED_OUT_EVENT, move |reason: String| {
             c.phase.set(Phase::Login { reason: Some(reason) });
         })

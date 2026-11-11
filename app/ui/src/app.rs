@@ -86,6 +86,8 @@ pub struct Ctx {
     pub search: RwSignal<String>,
     /// Ticks once a second, to expire "is typing…".
     pub now: RwSignal<f64>,
+    /// The call window that is open now, shown at the bottom of the sidebar like a Slack huddle.
+    pub call: RwSignal<Option<bridge::CallInfo>>,
 }
 
 /// Open right-click menu: the point that was clicked and what for.
@@ -329,6 +331,7 @@ pub fn App() -> impl IntoView {
         prefs: RwSignal::new(false),
         search: RwSignal::new(String::new()),
         now: RwSignal::new(js_sys::Date::now()),
+        call: RwSignal::new(None),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -1509,7 +1512,7 @@ fn chat_face(s: &Snapshot, ch: &Chat) -> Option<User> {
 }
 
 /// Chat name for the UI: your own name for the chat with yourself.
-fn display_title(s: &Snapshot, ch: &Chat) -> String {
+pub(crate) fn display_title(s: &Snapshot, ch: &Chat) -> String {
     match &ch.kind {
         ChatKind::Notes => s
             .user(&s.me)
@@ -1588,7 +1591,45 @@ fn Sidebar() -> impl IntoView {
                     children=move |sec: Section| view! { <SidebarSection section=sec/> }
                 />
             </div>
+            <CallBar/>
         </aside>
+    }
+}
+
+/// The current call at the bottom of the sidebar, like the Slack huddle bar: where it is,
+/// a button that brings the call window back and "Leave".
+#[component]
+fn CallBar() -> impl IntoView {
+    let c = ctx();
+    move || {
+        c.call.get().map(|call| {
+            let chat = call.chat_id.clone().map(ChatId);
+            let open_chat = move |_| {
+                if let Some(id) = chat.clone() {
+                    ops::open_chat(c, id);
+                }
+            };
+            view! {
+                <div class="call-bar">
+                    <button class="call-where" title=tr().call_go_to_chat on:click=open_chat>
+                        <span class="call-live"><Icon icon=I::Headphones size=14/></span>
+                        <span class="call-text">
+                            <span class="call-kind">{tr().call_in_progress}</span>
+                            <span class="call-label">{call.label.clone()}</span>
+                        </span>
+                    </button>
+                    <div class="call-actions">
+                        <button class="call-btn" title=tr().call_show on:click=move |_| ops::focus_call(c)>
+                            <Icon icon=I::Window size=16/>
+                        </button>
+                        <button class="call-btn leave" title=tr().call_leave on:click=move |_| ops::leave_call(c)>
+                            <Icon icon=I::PhoneOff size=16/>
+                            <span>{tr().call_leave}</span>
+                        </button>
+                    </div>
+                </div>
+            }
+        })
     }
 }
 
@@ -1855,7 +1896,9 @@ fn ChannelHeader() -> impl IntoView {
                             <span>{ch.member_count}</span>
                         </button>
                     })}
-                    <button class="huddle-btn" title=tr().call_hint on:click=move |_| ops::start_call(c, c.current.get_untracked())>
+                    <button class="huddle-btn" title=tr().call_hint
+                        class:active=move || c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_deref() == Some(c.current.get().0.as_str())))
+                        on:click=move |_| ops::start_call(c, c.current.get_untracked())>
                         <Icon icon=I::Video size=16/>
                         <span>{tr().call}</span>
                     </button>

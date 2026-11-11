@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 
-use crate::{login, store};
+use crate::{call, login, store};
 
 /// UA of the embedded WebKitGTK; the unofficial client label is appended to it.
 const WEBVIEW_UA: &str =
@@ -222,8 +222,9 @@ pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn logout(state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
     store::delete();
+    call::close(&app);
     *state.live.lock().await = None;
     Ok(())
 }
@@ -532,17 +533,27 @@ pub fn open_yandex_id() -> Result<(), String> {
 
 /// A link from a message opens in the default browser. Only `http`, `https` and `mailto`:
 /// the address comes from someone else's text, so files and other schemes must not open.
+/// A Telemost meeting link opens in the call window, like a huddle link in Slack.
 #[tauri::command]
-pub fn open_url(url: String) -> Result<(), String> {
+pub async fn open_url(app: AppHandle, state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
     let allowed = ["http://", "https://", "mailto:"].iter().any(|p| lower.starts_with(p));
     if !allowed || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("this link cannot be opened".into());
     }
+    if call::is_meeting_url(&url)
+        && let Ok(live) = live(&state).await
+    {
+        let info = call::CallInfo {
+            chat_id: None,
+            label: text(&app, "Встреча в Телемосте", "Telemost meeting").to_owned(),
+        };
+        return call::open(&app, &url, info, live.web.jar()).await;
+    }
     open_external(&url)
 }
 
-fn open_external(url: &str) -> Result<(), String> {
+pub(crate) fn open_external(url: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     let (program, args) = ("xdg-open", vec![url]);
     #[cfg(target_os = "macos")]
@@ -1202,10 +1213,23 @@ pub async fn forward_message(
     })
 }
 
-/// A call from a chat, like a Slack huddle: a meeting bound to the chat (`create_meeting`) opens
-/// in the browser (the embedded WebKitGTK has no WebRTC). `meeting_id` is the meeting link itself.
+/// A call from a chat, like a Slack huddle: the meeting bound to the chat (`create_meeting`) opens
+/// in the call window (`call.rs`). `meeting_id` is the meeting link itself. `label` is what the
+/// window title and the sidebar show: `#dev` or the person's name.
 #[tauri::command]
-pub async fn start_call(state: tauri::State<'_, AppState>, chat_id: String) -> Result<(), String> {
+pub async fn start_call(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    chat_id: String,
+    label: String,
+) -> Result<(), String> {
+    // Before `create_meeting`: it already announces the call in the chat.
+    if let Some(current) = call::info(&app)
+        && current.chat_id.as_deref() != Some(chat_id.as_str())
+    {
+        call::focus(&app).await;
+        return Err(call::BUSY.into());
+    }
     let live = live(&state).await?;
     let mut web = live.web.clone_light();
     let v = web
@@ -1225,7 +1249,29 @@ pub async fn start_call(state: tauri::State<'_, AppState>, chat_id: String) -> R
     } else {
         format!("https://telemost.360.yandex.ru/j/{id}")
     };
-    open_external(&url)
+    let info = call::CallInfo {
+        chat_id: Some(chat_id),
+        label,
+    };
+    call::open(&app, &url, info, live.web.jar()).await
+}
+
+/// "Show" in the sidebar call bar: the call window comes to the front.
+#[tauri::command]
+pub async fn focus_call(app: AppHandle) {
+    call::focus(&app).await;
+}
+
+/// "Leave" in the sidebar call bar: the call window closes.
+#[tauri::command]
+pub fn leave_call(app: AppHandle) {
+    call::close(&app);
+}
+
+/// The current call, for a UI that has just loaded.
+#[tauri::command]
+pub fn current_call(app: AppHandle) -> Option<call::CallInfo> {
+    call::info(&app)
 }
 
 /// Group from an HTTP RPC response (`get_recommended_chats`, `activate_chat`).
@@ -1627,6 +1673,7 @@ async fn reconnect_loop(app: AppHandle) {
             }
             Err(ConnectError::Unauthorized) => {
                 store::delete();
+                call::close(&app);
                 *state.live.lock().await = None;
                 let reason = text(
                     &app,

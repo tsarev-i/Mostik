@@ -41,5 +41,7 @@ tauri-plugin-notification = "2"
 tokio = { version = "1", features = ["fs", "macros", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# fd setup for the DevTools pipe of the call browser.
+libc = "0.2"
 # Same version as wry uses: needed to customise the WebKitGTK context menu.
 webkit2gtk = "=2.0.2"

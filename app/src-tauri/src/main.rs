@@ -1,8 +1,11 @@
-//! Mostik desktop shell: windows, tray, the `mostikfile://` scheme and the IPC commands.
+//! Mostik desktop shell: windows, tray, calls, the `mostikfile://` scheme and the IPC commands.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backend;
+mod call;
+#[cfg(target_os = "linux")]
+mod cdp;
 mod login;
 mod store;
 mod webview;
@@ -70,6 +73,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(backend::AppState::default())
+        .manage(call::CallState::default())
         .register_asynchronous_uri_scheme_protocol("mostikfile", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let path = request.uri().path().to_owned();
@@ -104,6 +108,7 @@ fn main() {
             if let Some(main) = app.get_webview_window("main") {
                 webview::harden(&main);
             }
+            call::cleanup(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -126,6 +131,9 @@ fn main() {
             backend::pin_message,
             backend::forward_message,
             backend::start_call,
+            backend::focus_call,
+            backend::leave_call,
+            backend::current_call,
             backend::recommended_chats,
             backend::join_chat,
             backend::open_yandex_id,

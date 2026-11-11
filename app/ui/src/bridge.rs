@@ -92,6 +92,16 @@ pub const EVENT: &str = "mostik://event";
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 /// The session expired while the app was running: show the login screen with this reason.
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
+/// The current call changed: [`CallInfo`] or `null`.
+pub const CALL_EVENT: &str = "mostik://call";
+
+/// Mirror of the backend `CallInfo`: the call window that is open now.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallInfo {
+    pub chat_id: Option<String>,
+    pub label: String,
+}
 
 #[derive(Serialize)]
 struct NoArgs {}
@@ -616,8 +626,27 @@ pub async fn forward_message(m: &Message, to_chat: &str, text: &str) -> Result<S
     .await
 }
 
-pub async fn start_call(chat_id: &str) -> Result<(), String> {
-    call("start_call", ChatArgs { chat_id }).await
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CallArgs<'a> {
+    chat_id: &'a str,
+    label: &'a str,
+}
+
+pub async fn start_call(chat_id: &str, label: &str) -> Result<(), String> {
+    call("start_call", CallArgs { chat_id, label }).await
+}
+
+pub async fn focus_call() -> Result<(), String> {
+    call("focus_call", NoArgs {}).await
+}
+
+pub async fn leave_call() -> Result<(), String> {
+    call("leave_call", NoArgs {}).await
+}
+
+pub async fn current_call() -> Result<Option<CallInfo>, String> {
+    call("current_call", NoArgs {}).await
 }
 
 pub async fn recommended_chats() -> Result<Vec<mostik_core::Chat>, String> {
