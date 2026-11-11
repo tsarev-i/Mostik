@@ -350,6 +350,21 @@ pub struct Snapshot {
     pub chats: Vec<Chat>,
     pub sections: Vec<Section>,
     pub messages: Vec<Message>,
+    /// Telemost chat folders listing their chats by hand, of every organization.
+    #[serde(default)]
+    pub folders: Vec<ChatFolder>,
+}
+
+/// A Telemost chat folder (the `folders` bucket) that lists its chats by hand; Mostik shows it as
+/// a sidebar section. Folders by chat type ("Личные", "Новые") are filters and are left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatFolder {
+    pub id: String,
+    /// Organization id the folder belongs to, as the bucket keys it ("0" without one).
+    pub org: String,
+    /// The name; it may start with the folder's emoji, as `⚠️|Test` (see [`split_chat_icon`]).
+    pub name: String,
+    pub chats: Vec<ChatId>,
 }
 
 impl Snapshot {
@@ -543,8 +558,9 @@ impl Chat {
     }
 }
 
-/// A group name may start with its emoji, as `⚠️|Test`: Telemost has no chat icons, so the emoji
-/// is shown in place of `#`, like the emoji of a section in Slack, and the rest as the name.
+/// A group or folder name may start with its emoji, as `⚠️|Test`: Telemost has no emoji icons,
+/// so Mostik shows the emoji in place of `#`, like the emoji of a section in Slack, and the rest
+/// as the name.
 pub fn split_chat_icon(name: &str) -> (Option<&str>, &str) {
     if let Some((icon, rest)) = name.split_once('|') {
         let (icon, rest) = (icon.trim(), rest.trim());
@@ -676,6 +692,7 @@ mod tests {
             users: vec![],
             chats: vec![],
             sections: vec![],
+            folders: vec![],
         };
         let active: Vec<_> = snap.active_calls().into_iter().map(|(c, u)| (c.0, u)).collect();
         assert_eq!(active, [("a".into(), "u-a".into()), ("c".into(), "u-c".into())]);

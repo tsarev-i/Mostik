@@ -694,6 +694,25 @@ struct StarArgs<'a> {
     starred: bool,
 }
 
+/// Chat folders of every organization, read afresh from Telemost.
+pub async fn chat_folders() -> Result<Vec<mostik_core::ChatFolder>, String> {
+    call("chat_folders", NoArgs {}).await
+}
+
+#[derive(Serialize)]
+struct FoldersArgs<'a> {
+    org: &'a str,
+    folders: &'a [mostik_core::ChatFolder],
+}
+
+/// Writes the organization's chat folders; returns those of every organization.
+pub async fn save_chat_folders(
+    org: &str,
+    folders: &[mostik_core::ChatFolder],
+) -> Result<Vec<mostik_core::ChatFolder>, String> {
+    call("save_chat_folders", FoldersArgs { org, folders }).await
+}
+
 /// Returns the new list of starred chats.
 pub async fn set_starred(chat_id: &str, starred: bool) -> Result<Vec<String>, String> {
     call("set_starred", StarArgs { chat_id, starred }).await

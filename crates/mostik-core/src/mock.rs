@@ -339,5 +339,6 @@ pub fn demo() -> Snapshot {
         ],
         sections,
         messages,
+        folders: vec![],
     }
 }

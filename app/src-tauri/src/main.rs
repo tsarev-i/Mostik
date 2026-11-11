@@ -167,6 +167,8 @@ fn main() {
             backend::search_messages,
             backend::set_notify_level,
             backend::set_starred,
+            backend::chat_folders,
+            backend::save_chat_folders,
             backend::mark_unread,
             backend::pin_message,
             backend::forward_message,

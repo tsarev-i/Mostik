@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use mostik_core::*;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn s<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     path.iter().try_fold(v, |v, k| v.get(*k))?.as_str()
@@ -767,6 +767,7 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
             section("meetings", "Meeting chats", meetings),
         ],
         messages: data.messages,
+        folders: vec![],
     }
 }
 
@@ -895,17 +896,17 @@ pub fn own_guid(history: &Value) -> Option<UserId> {
 
 /// A `whoami`-shaped answer built from one's own directory profile, for when `whoami` has failed.
 pub fn whoami_from_profile(me: &UserId, profile: Option<&UserProfile>) -> Value {
-    let mut info = serde_json::json!({ "Guid": me.0 });
+    let mut info = json!({ "Guid": me.0 });
     if let Some(p) = profile {
         info["DisplayName"] = Value::from(p.display_name.as_str());
         if let Some(a) = &p.avatar {
             info["AvatarId"] = Value::from(a.as_str());
         }
         if let Some(o) = &p.organization {
-            info["OrganizationInfos"] = serde_json::json!([{ "OrganizationName": o }]);
+            info["OrganizationInfos"] = json!([{ "OrganizationName": o }]);
         }
     }
-    serde_json::json!({ "UserInfo": info })
+    json!({ "UserInfo": info })
 }
 
 /// Members from the `get_chat_members` response: the same records as `get_users_data`, plus `role`.
@@ -954,8 +955,97 @@ pub fn notes_chat(me: &UserId) -> Chat {
     }
 }
 
-/// Applies synced settings (`get_buckets`): pinned chats go to the "Starred" section,
-/// muted chats set `Chat::muted`.
+/// Whether a folder of the `folders` bucket is one of chat types ("Личные", "Новые", support
+/// chats): a filter rather than a list of chats.
+fn is_type_folder(f: &Value) -> bool {
+    f.get("included_type_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|l| !l.is_empty())
+}
+
+/// The folders listing their chats by hand from the `folders` bucket value:
+/// `{"<org id>": {"custom_folders": [{id, name, included_chat_ids, …}], "main_folder": …}}`.
+pub fn chat_folders(value: &Value) -> Vec<ChatFolder> {
+    let Some(orgs) = value.as_object() else {
+        return vec![];
+    };
+    orgs.iter()
+        .flat_map(|(org, v)| {
+            v.get("custom_folders")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|f| !is_type_folder(f))
+                .filter_map(move |f| {
+                    Some(ChatFolder {
+                        id: s(f, &["id"])?.to_owned(),
+                        org: org.clone(),
+                        name: s(f, &["name"]).unwrap_or_default().to_owned(),
+                        chats: f
+                            .get("included_chat_ids")
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(|id| ChatId(id.to_owned()))
+                            .collect(),
+                    })
+                })
+        })
+        .collect()
+}
+
+/// Writes the organization's folders into the `folders` bucket value: they replace its folders
+/// of chats in this order, keeping the fields Mostik does not know (icon, pinned chats); the
+/// folders by chat type stay where they are, as do other organizations.
+pub fn put_chat_folders(value: &mut Value, org: &str, folders: &[ChatFolder]) {
+    if !value.is_object() {
+        *value = json!({});
+    }
+    let entry = &mut value[org];
+    if !entry.is_object() {
+        *entry = json!({ "custom_folders": [], "main_folder": { "excluded_folder_ids": [] } });
+    }
+    let old: Vec<Value> = entry
+        .get("custom_folders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let write = |f: &ChatFolder| {
+        let mut v = old
+            .iter()
+            .find(|o| s(o, &["id"]) == Some(f.id.as_str()) && !is_type_folder(o))
+            .cloned()
+            .unwrap_or_else(|| {
+                json!({ "excluded_chat_ids": [], "excluded_type_ids": [], "included_type_ids": [],
+                        "pinned_chat_ids": [] })
+            });
+        let chats: Vec<&str> = f.chats.iter().map(|c| c.0.as_str()).collect();
+        if let Some(pinned) = v.get_mut("pinned_chat_ids").and_then(Value::as_array_mut) {
+            pinned.retain(|p| p.as_str().is_some_and(|p| chats.contains(&p)));
+        }
+        v["id"] = json!(f.id);
+        v["name"] = json!(f.name);
+        v["included_chat_ids"] = json!(chats);
+        v
+    };
+    let mut mine = folders.iter().map(write);
+    let mut list: Vec<Value> = old
+        .iter()
+        .filter_map(|o| {
+            if is_type_folder(o) {
+                Some(o.clone())
+            } else {
+                mine.next()
+            }
+        })
+        .collect();
+    list.extend(mine);
+    entry["custom_folders"] = json!(list);
+}
+
+/// Applies synced settings (`get_buckets`): chat folders, pinned chats go to the "Starred"
+/// section, muted chats set `Chat::muted`.
 pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
     let list = buckets
         .pointer("/data/buckets")
@@ -967,6 +1057,7 @@ pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
             .find(|b| b["bucket_name"] == name)
             .map(|b| b["bucket_value"].clone())
     };
+    snapshot.folders = bucket("folders").map(|v| chat_folders(&v)).unwrap_or_default();
     if let Some(mutings) = bucket("chat_mutings").and_then(|v| v.as_object().cloned()) {
         for ch in &mut snapshot.chats {
             if let Some(m) = mutings.get(&ch.id.0) {
@@ -1428,6 +1519,56 @@ mod tests {
         assert_eq!(online_from_heartbeat(&hb(5 * 60_000_000)), Some(true));
         assert_eq!(online_from_heartbeat(&hb(15 * 60_000_000)), Some(false));
         assert_eq!(online_from_heartbeat(&json!({})), None);
+    }
+
+    #[test]
+    fn folders_of_chats_are_read_and_written() {
+        let mut value = json!({
+            "0": {"custom_folders": [{"icon": {"value": 2}, "id": "default_private",
+                "included_type_ids": ["private"], "name": "Личные"}]},
+            "42": {"custom_folders": [
+                {"icon": {"value": 1}, "id": "default_unread", "included_type_ids": ["unread"], "name": "Новые"},
+                {"id": "a", "name": "⚠️|Test", "included_chat_ids": ["0/0/x", "0/0/y"],
+                 "included_type_ids": [], "pinned_chat_ids": ["0/0/y"], "icon": {"value": 7}},
+                {"id": "b", "name": "old", "included_chat_ids": []}],
+                "main_folder": {"excluded_folder_ids": []}}});
+        let folders = chat_folders(&value);
+        assert_eq!(folders.len(), 2);
+        assert_eq!((folders[0].org.as_str(), folders[0].name.as_str()), ("42", "⚠️|Test"));
+        assert_eq!(folders[0].chats, vec![ChatId("0/0/x".into()), ChatId("0/0/y".into())]);
+
+        // "b" deleted, "a" renamed with "0/0/y" taken out, "c" new.
+        let new = vec![
+            ChatFolder {
+                id: "c".into(),
+                org: "42".into(),
+                name: "New".into(),
+                chats: vec![ChatId("0/0/z".into())],
+            },
+            ChatFolder {
+                id: "a".into(),
+                org: "42".into(),
+                name: "Work".into(),
+                chats: vec![ChatId("0/0/x".into())],
+            },
+        ];
+        put_chat_folders(&mut value, "42", &new);
+        let list = value["42"]["custom_folders"].as_array().unwrap();
+        let ids: Vec<&str> = list.iter().map(|f| f["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["default_unread", "c", "a"]);
+        assert_eq!(list[2]["icon"]["value"], 7);
+        assert_eq!(list[2]["pinned_chat_ids"], json!([]));
+        assert_eq!(list[1]["included_chat_ids"], json!(["0/0/z"]));
+        assert_eq!(value["42"]["main_folder"], json!({"excluded_folder_ids": []}));
+        assert_eq!(value["0"]["custom_folders"][0]["id"], "default_private");
+        assert_eq!(
+            chat_folders(&value).iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["New", "Work"]
+        );
+
+        // An organization without folders yet.
+        put_chat_folders(&mut value, "7", &new[..1]);
+        assert_eq!(value["7"]["custom_folders"][0]["name"], "New");
     }
 
     #[test]

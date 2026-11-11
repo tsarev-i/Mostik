@@ -1,12 +1,14 @@
-//! Own sidebar sections ("folders"), as custom sections in Slack. Telemost has nothing like them,
-//! so they live in `localStorage`. A chat put into a folder leaves its own section; a starred
-//! chat stays in "Starred", which Telemost keeps.
+//! Sidebar sections of one's own, as custom sections in Slack: Telemost chat folders that list
+//! their chats by hand (the `folders` bucket, per organization), so they are the same on every
+//! device. A chat put into a folder leaves its own section; a starred chat stays in "Starred".
+//! The section emoji lives in the folder name, as `⚠️|Test`: Telemost folders have none.
 
-use mostik_core::{Chat, ChatId, ChatKind, Section};
+use mostik_core::{Chat, ChatFolder, ChatId, ChatKind, Section, split_chat_icon};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
+    /// The section id: the Telemost folder id after [`PREFIX`].
     pub id: String,
     pub name: String,
     /// Emoji before the name, as in Slack.
@@ -18,34 +20,68 @@ pub struct Folder {
 
 pub type Folders = Vec<Folder>;
 
-const KEY: &str = "mostik.folders";
+/// Where an earlier Mostik kept its sections, before they were Telemost folders.
+const LOCAL_KEY: &str = "mostik.folders";
 const PREFIX: &str = "folder:";
 
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
-}
-
-pub fn load() -> Folders {
-    storage()
-        .and_then(|s| s.get_item(KEY).ok().flatten())
+/// Sections kept by an earlier Mostik in `localStorage`; the key is cleared, they move to Telemost.
+pub fn take_local() -> Folders {
+    let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
+        return vec![];
+    };
+    let list = s
+        .get_item(LOCAL_KEY)
+        .ok()
+        .flatten()
         .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default()
-}
-
-pub fn save(folders: &Folders) {
-    if let (Some(s), Ok(v)) = (storage(), serde_json::to_string(folders)) {
-        let _ = s.set_item(KEY, &v);
-    }
+        .unwrap_or_default();
+    let _ = s.remove_item(LOCAL_KEY);
+    list
 }
 
 pub fn is_folder(section_id: &str) -> bool {
     section_id.starts_with(PREFIX)
 }
 
-/// An id no folder has yet.
-pub fn new_id(folders: &Folders, seed: u64) -> String {
-    (seed..)
-        .map(|n| format!("{PREFIX}{n:x}"))
+/// The section of a Telemost folder.
+pub fn from_telemost(f: &ChatFolder) -> Folder {
+    let (emoji, name) = split_chat_icon(&f.name);
+    Folder {
+        id: format!("{PREFIX}{}", f.id),
+        name: name.to_owned(),
+        emoji: emoji.map(str::to_owned),
+        chats: f.chats.clone(),
+    }
+}
+
+/// The Telemost folder of a section in organization `org`.
+pub fn to_telemost(f: &Folder, org: &str) -> ChatFolder {
+    let name = f.name.trim();
+    ChatFolder {
+        id: f.id.strip_prefix(PREFIX).unwrap_or(&f.id).to_owned(),
+        org: org.to_owned(),
+        name: match &f.emoji {
+            Some(e) => format!("{e}|{name}"),
+            None => name.to_owned(),
+        },
+        chats: f.chats.clone(),
+    }
+}
+
+/// A section id no folder has yet, from a random number: Telemost folder ids look like
+/// `19c5-b440-c41d-7ef0`.
+pub fn new_id(folders: &Folders, random: u64) -> String {
+    (0u64..)
+        .map(|n| {
+            let r = random.wrapping_add(n);
+            format!(
+                "{PREFIX}{:04x}-{:04x}-{:04x}-{:04x}",
+                r >> 48,
+                (r >> 32) & 0xffff,
+                (r >> 16) & 0xffff,
+                r & 0xffff
+            )
+        })
         .find(|id| !folders.iter().any(|f| &f.id == id))
         .unwrap_or_default()
 }
@@ -129,6 +165,28 @@ pub fn reorder(folders: &mut Folders, id: &str, shown: &[ChatId]) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn section_emoji_lives_in_the_folder_name() {
+        let t = ChatFolder {
+            id: "19c5".into(),
+            org: "42".into(),
+            name: "⚠️|Test".into(),
+            chats: vec![],
+        };
+        let f = from_telemost(&t);
+        assert_eq!(
+            (f.id.as_str(), f.name.as_str(), f.emoji.as_deref()),
+            ("folder:19c5", "Test", Some("⚠️"))
+        );
+        assert_eq!(to_telemost(&f, "42"), t);
+        let plain = Folder {
+            emoji: None,
+            name: " ivan_test ".into(),
+            ..f
+        };
+        assert_eq!(to_telemost(&plain, "42").name, "ivan_test");
+    }
+
     fn ids(list: &[&str]) -> Vec<ChatId> {
         list.iter().map(|s| ChatId((*s).into())).collect()
     }
@@ -191,8 +249,8 @@ mod tests {
         assert_eq!(folders[0].chats, ids(&["a", "b"]));
         move_chat(&mut folders, &a, None, None);
         assert!(folder_of(&folders, &a).is_none());
-        // "folder:1" and "folder:2" are taken.
-        assert_eq!(new_id(&folders, 1), "folder:3");
-        assert_eq!(new_id(&vec![], 1), "folder:1");
+        assert_eq!(new_id(&vec![], 0x19c5_b440_c41d_7ef0), "folder:19c5-b440-c41d-7ef0");
+        let taken = vec![folder("folder:0000-0000-0000-0001", &[])];
+        assert_eq!(new_id(&taken, 1), "folder:0000-0000-0000-0002");
     }
 }

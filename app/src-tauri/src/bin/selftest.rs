@@ -8,6 +8,7 @@
 //! `-- --threads` only prints the format of thread chat IDs (read-only).
 //! `-- --listen` prints every raw push as JSON until stopped (read-only; includes message texts).
 //! `-- --dump [list | <chat id>]` prints the raw chat list or the latest page of a chat (read-only).
+//! `-- --buckets` prints the synced settings, `get_buckets` (read-only).
 
 #[allow(dead_code)]
 #[path = "../store.rs"]
@@ -95,6 +96,14 @@ async fn run() -> Res<()> {
     let ua = identity::user_agent(UA);
     let mut web = WebClient::new(jar, ua.clone()).map_err(|e| e.to_string())?;
     let page = web.load_page().await.map_err(|e| e.to_string())?;
+    if std::env::args().any(|a| a == "--buckets") {
+        let v = web
+            .rpc("get_buckets", json!({ "version": 0 }))
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("{v}");
+        return Ok(());
+    }
 
     let pushes: Arc<Mutex<Vec<Value>>> = Arc::default();
     let sink = pushes.clone();

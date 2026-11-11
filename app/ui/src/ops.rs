@@ -298,6 +298,55 @@ pub fn open_chat(c: Ctx, id: ChatId) {
     });
 }
 
+/// A random number, for new ids.
+pub fn random_u64() -> u64 {
+    let half = || (js_sys::Math::random() * 4_294_967_296.0) as u64;
+    (half() << 32) | half()
+}
+
+/// Changes the sidebar sections of the current organization and writes them to Telemost, where
+/// they are chat folders. Shown at once; put back if Telemost refuses.
+pub fn change_folders(c: Ctx, change: impl FnOnce(&mut crate::folders::Folders)) {
+    use crate::folders;
+    let before = c.folders.get_untracked();
+    let mut list = before.clone();
+    change(&mut list);
+    if list == before {
+        return;
+    }
+    let org = c.snap.with_untracked(|s| crate::app::org_key(s, c.org.get_untracked()));
+    let put = move |list: &folders::Folders| {
+        let mine: Vec<_> = list.iter().map(|f| folders::to_telemost(f, &org)).collect();
+        c.snap.update(|s| {
+            s.folders.retain(|f| f.org != org);
+            s.folders.extend(mine.iter().cloned());
+        });
+        mine
+    };
+    let mine = put(&list);
+    if !c.live {
+        return;
+    }
+    let org = c.snap.with_untracked(|s| crate::app::org_key(s, c.org.get_untracked()));
+    spawn_local(async move {
+        if let Err(e) = bridge::save_chat_folders(&org, &mine).await {
+            put(&before);
+            report(c, format!("{}: {e}", tr().err_settings));
+        }
+    });
+}
+
+/// Reads the chat folders afresh: they may have changed in Telemost.
+pub fn refresh_folders(c: Ctx) {
+    spawn_local(async move {
+        if let Ok(list) = bridge::chat_folders().await
+            && c.snap.with_untracked(|s| s.folders != list)
+        {
+            c.snap.update(|s| s.folders = list);
+        }
+    });
+}
+
 /// Hides the chat from the sidebar until something new comes in it.
 pub fn hide_chat(c: Ctx, id: ChatId) {
     let Some(last) = c.snap.with_untracked(|s| s.chat(&id).map(|ch| ch.last_ts)) else {

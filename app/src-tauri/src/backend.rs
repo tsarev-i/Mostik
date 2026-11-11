@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use mostik_core::{CallNote, ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId};
+use mostik_core::{
+    CallNote, ChatFolder, ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId,
+};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
@@ -1748,6 +1750,37 @@ pub async fn set_notify_level(
         }
     }
     Ok(())
+}
+
+/// Chat folders of every organization, read afresh (the `folders` bucket): folders made or
+/// changed in Telemost while Mostik runs come with no push.
+#[tauri::command]
+pub async fn chat_folders(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<ChatFolder>, String> {
+    let live = live(&state).await?;
+    let mut web = live.web.clone_light();
+    let v = web
+        .rpc("get_buckets", json!({ "version": 0 }))
+        .await
+        .map_err(|e| web_error(&app, e))?;
+    rpc_ok(&v)?;
+    Ok(v.pointer("/data/buckets")
+        .and_then(Value::as_array)
+        .and_then(|l| l.iter().find(|b| b["bucket_name"] == "folders"))
+        .map(|b| convert::chat_folders(&b["bucket_value"]))
+        .unwrap_or_default())
+}
+
+/// Writes the organization's chat folders (the sidebar sections) into Telemost.
+/// Returns the folders of every organization as they now are.
+#[tauri::command]
+pub async fn save_chat_folders(
+    state: tauri::State<'_, AppState>,
+    org: String,
+    folders: Vec<ChatFolder>,
+) -> Result<Vec<ChatFolder>, String> {
+    let live = live(&state).await?;
+    let value = update_bucket(&live, "folders", move |v| convert::put_chat_folders(v, &org, &folders)).await?;
+    Ok(convert::chat_folders(&value))
 }
 
 /// "Star" / "Unstar" (the `pinned_chats` bucket). Returns the new list.

@@ -105,8 +105,8 @@ pub struct Ctx {
     pub deleted: RwSignal<HashSet<(ChatId, Timestamp)>>,
     /// Chats hidden from the sidebar with "×", kept between runs.
     pub hidden: RwSignal<hidden::Hidden>,
-    /// Own sidebar sections, kept between runs.
-    pub folders: RwSignal<folders::Folders>,
+    /// Own sidebar sections: the Telemost chat folders of the current organization.
+    pub folders: Memo<folders::Folders>,
     /// The sidebar sections: the Telemost ones with the folders.
     pub sections: Memo<Vec<Section>>,
     /// The "New section" / "Rename section" dialog.
@@ -330,6 +330,7 @@ fn empty_snapshot() -> Snapshot {
         chats: vec![],
         sections: vec![],
         messages: vec![],
+        folders: vec![],
     }
 }
 
@@ -337,7 +338,25 @@ fn empty_snapshot() -> Snapshot {
 pub fn App() -> impl IntoView {
     let live = bridge::available();
     let snap = RwSignal::new(empty_snapshot());
-    let folder_list = RwSignal::new(folders::load());
+    let org = RwSignal::new(
+        window()
+            .local_storage()
+            .ok()
+            .flatten()
+            .and_then(|s| s.get_item(ORG_KEY).ok().flatten())
+            .and_then(|v| v.parse().ok()),
+    );
+    let folder_list = Memo::new(move |_| {
+        let chosen = org.get();
+        snap.with(|s| {
+            let key = org_key(s, chosen);
+            s.folders
+                .iter()
+                .filter(|f| f.org == key)
+                .map(folders::from_telemost)
+                .collect::<folders::Folders>()
+        })
+    });
     let c = Ctx {
         snap,
         current: RwSignal::new(ChatId(String::new())),
@@ -363,14 +382,7 @@ pub fn App() -> impl IntoView {
         notice: RwSignal::new(None),
         lightbox: RwSignal::new(None),
         me_menu: RwSignal::new(false),
-        org: RwSignal::new(
-            window()
-                .local_storage()
-                .ok()
-                .flatten()
-                .and_then(|s| s.get_item(ORG_KEY).ok().flatten())
-                .and_then(|v| v.parse().ok()),
-        ),
+        org,
         nav_back: RwSignal::new(vec![]),
         nav_forward: RwSignal::new(vec![]),
         recent: RwSignal::new(vec![]),
@@ -451,7 +463,44 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| c.drafts.with(save_drafts));
     Effect::new(move |_| c.chat_order.with(order::save));
     Effect::new(move |_| c.hidden.with(hidden::save));
-    Effect::new(move |_| c.folders.with(folders::save));
+    // Sections an earlier Mostik kept in this browser move into Telemost folders, once.
+    let migrated = StoredValue::new(false);
+    Effect::new(move |_| {
+        if !c.live || c.phase.get() != Phase::Ready || migrated.get_value() {
+            return;
+        }
+        migrated.set_value(true);
+        let local = folders::take_local();
+        if !local.is_empty() {
+            ops::change_folders(c, move |list| {
+                for f in local {
+                    match list.iter_mut().find(|x| x.name == f.name) {
+                        Some(x) => {
+                            for id in f.chats {
+                                if !x.chats.contains(&id) {
+                                    x.chats.push(id);
+                                }
+                            }
+                        }
+                        None => list.push(folders::Folder {
+                            id: folders::new_id(list, ops::random_u64()),
+                            ..f
+                        }),
+                    }
+                }
+            });
+        }
+    });
+    // Folders made or changed in Telemost come with no push: they are read again when the window
+    // gets the focus, at most once a minute.
+    let folders_read = StoredValue::new(0.0);
+    let _folders_focus = window_event_listener(ev::focus, move |_| {
+        let now = js_sys::Date::now();
+        if c.live && c.phase.get_untracked() == Phase::Ready && now - folders_read.get_value() > 60_000.0 {
+            folders_read.set_value(now);
+            ops::refresh_folders(c);
+        }
+    });
     // A hidden chat that got something new is an ordinary chat again.
     Effect::new(move |_| {
         if c.hidden.with(|h| h.is_empty()) {
@@ -900,7 +949,7 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
             <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::Rename(rename_id.clone()))); }>{tr().rename_section}</button>
             <button class="danger" on:click=move |_| {
                 close_menus(c);
-                c.folders.update(|f| f.retain(|f| f.id != delete_id));
+                ops::change_folders(c, |f| f.retain(|f| f.id != delete_id));
                 c.collapsed.update(|set| { set.remove(&delete_id); });
             }>{tr().delete_section}</button>
         }
@@ -933,6 +982,16 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
 }
 
 const ORG_KEY: &str = "mostik.org";
+
+/// The key of the current organization in Telemost settings such as chat folders: its id, "0"
+/// without organizations.
+pub fn org_key(s: &Snapshot, chosen: Option<u64>) -> String {
+    s.organizations
+        .iter()
+        .find(|o| Some(o.id) == chosen)
+        .or(s.organizations.first())
+        .map_or_else(|| "0".to_owned(), |o| o.id.to_string())
+}
 
 /// Current organization: the selected one, or the first if none is selected.
 fn current_org(c: Ctx) -> Option<Organization> {
@@ -1203,7 +1262,7 @@ fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
             view! {
                 <button class="menu-radio" on:click=move |_| {
                     close_menus(c);
-                    c.folders.update(|f| folders::move_chat(f, &id, to.as_deref(), None));
+                    ops::change_folders(c, |f| folders::move_chat(f, &id, to.as_deref(), None));
                 }>
                     <span class="menu-tick">{on.then(|| view! { <Icon icon=I::Check size=14/> })}</span>
                     <span>{label}</span>
@@ -2296,7 +2355,7 @@ fn chat_drop(c: Ctx) {
     if to != d.section {
         let into = folders::is_folder(&to).then_some(to.as_str());
         let anchor = anchor.as_ref().map(|(id, after)| (id, *after));
-        c.folders.update(|f| folders::move_chat(f, &d.chat, into, anchor));
+        ops::change_folders(c, |f| folders::move_chat(f, &d.chat, into, anchor));
         return;
     }
     let Some((anchor, after)) = anchor else { return };
@@ -2339,7 +2398,7 @@ fn chat_drop(c: Ctx) {
         .chain(shown)
         .partition(|(id, _, _)| folders::is_folder(id));
     if !in_folders.is_empty() {
-        c.folders.update(|f| {
+        ops::change_folders(c, |f| {
             for (id, order, _) in &in_folders {
                 folders::reorder(f, id, order);
             }
@@ -6015,14 +6074,14 @@ fn FolderDialog(edit: FolderEdit) -> impl IntoView {
         close();
         let emoji = emoji.get_untracked();
         match edit.clone() {
-            FolderEdit::Rename(id) => c.folders.update(|f| {
+            FolderEdit::Rename(id) => ops::change_folders(c, |f| {
                 if let Some(f) = f.iter_mut().find(|f| f.id == id) {
                     f.name = text;
                     f.emoji = emoji;
                 }
             }),
-            FolderEdit::New(chat) => c.folders.update(|f| {
-                let id = folders::new_id(f, js_sys::Date::now() as u64);
+            FolderEdit::New(chat) => ops::change_folders(c, |f| {
+                let id = folders::new_id(f, ops::random_u64());
                 f.push(folders::Folder {
                     id: id.clone(),
                     name: text,
