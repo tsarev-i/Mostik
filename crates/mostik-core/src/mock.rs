@@ -91,11 +91,13 @@ pub fn demo() -> Snapshot {
     me.status = Some(CustomStatus {
         emoji: "💻".into(),
         text: "Writing a client".into(),
+        in_meeting: false,
     });
     let mut anna = user("anna", "Anna Smirnova", "UI designer", Presence::Online);
     anna.status = Some(CustomStatus {
         emoji: "🎨".into(),
         text: "In mockups".into(),
+        in_meeting: false,
     });
     let boris = user("boris", "Boris Kotov", "Backend developer", Presence::Away);
     let vera = user("vera", "Vera Lebedeva", "QA engineer", Presence::Online);

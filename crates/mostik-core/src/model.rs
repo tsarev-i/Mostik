@@ -68,6 +68,10 @@ pub struct PresenceInfo {
 pub struct CustomStatus {
     pub emoji: String,
     pub text: String,
+    /// Telemost's own "In meeting" status for the time of a call, shown as a call icon
+    /// (like the headphones of a Slack huddle) rather than its 📞.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_meeting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

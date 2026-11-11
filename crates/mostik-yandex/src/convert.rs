@@ -508,7 +508,11 @@ pub fn user_status(v: &Value) -> (Availability, Option<CustomStatus>) {
     let status = v.get("CustomStatus").and_then(|c| {
         let emoji = s(c, &["Emoji"]).unwrap_or_default().to_owned();
         let text = s(c, &["Text"]).unwrap_or_default().to_owned();
-        (!emoji.is_empty() || !text.is_empty()).then_some(CustomStatus { emoji, text })
+        (!emoji.is_empty() || !text.is_empty()).then_some(CustomStatus {
+            emoji,
+            text,
+            in_meeting: is_meeting_status(v),
+        })
     });
     (availability, status)
 }
@@ -736,6 +740,15 @@ mod tests {
             &json!({"CustomStatus": {"Emoji": "📞", "Text": "Созвоны до обеда"}})
         ));
         assert!(!is_meeting_status(&json!({"Availability": 3})));
+    }
+
+    #[test]
+    fn meeting_status_is_marked() {
+        let (_, st) =
+            user_status(&json!({"CustomStatus": {"Emoji": "📞", "Text": "На встрече", "IconName": "telemost"}}));
+        assert!(st.unwrap().in_meeting);
+        let (_, st) = user_status(&json!({"CustomStatus": {"Emoji": "🏖", "Text": "Vacation"}}));
+        assert!(!st.unwrap().in_meeting);
     }
 
     #[test]

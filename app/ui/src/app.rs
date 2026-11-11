@@ -1455,8 +1455,7 @@ fn Rail() -> impl IntoView {
             <button class=move || if me().is_some_and(|u| u.status.is_some()) { "rail-me with-status" } else { "rail-me" }
                 title=tr().profile_and_prefs on:click=move |_| c.me_menu.update(|v| *v = !*v)>
                 {move || me().and_then(|u| u.status).map(|st| {
-                    let emoji = if st.emoji.is_empty() { "💬".to_owned() } else { st.emoji };
-                    view! { <span class="rail-status" title=st.text>{emoji}</span> }
+                    view! { <span class="rail-status" title=status_text(&st)>{status_icon(&st, 18)}</span> }
                 })}
                 {move || me().map(|u| view! { <Avatar user=u size=36 presence=true/> })}
             </button>
@@ -1501,12 +1500,29 @@ fn presence_class(u: &User) -> &'static str {
 /// Status emoji after the name (with the status text in a tooltip).
 fn status_badge(u: &User) -> Option<AnyView> {
     let st = u.status.clone()?;
+    Some(view! { <span class="status-emoji" title=status_text(&st)>{status_icon(&st, 14)}</span> }.into_any())
+}
+
+/// The status emoji; Telemost's "In meeting" is a green headphones icon, like a Slack huddle.
+fn status_icon(st: &CustomStatus, size: u32) -> AnyView {
+    if st.in_meeting {
+        return view! { <span class="status-meeting"><Icon icon=I::Headphones size=size/></span> }.into_any();
+    }
     let emoji = if st.emoji.is_empty() {
         "💬".to_owned()
     } else {
         st.emoji.clone()
     };
-    Some(view! { <span class="status-emoji" title=st.text.clone()>{emoji}</span> }.into_any())
+    view! { {emoji} }.into_any()
+}
+
+/// The status text; Telemost's "In meeting" comes in the UI language.
+fn status_text(st: &CustomStatus) -> String {
+    if st.in_meeting {
+        tr().in_meeting.to_owned()
+    } else {
+        st.text.clone()
+    }
 }
 
 fn availability_label(u: &User) -> &'static str {
@@ -4358,6 +4374,7 @@ fn MeMenu() -> impl IntoView {
                 let dnd = u.availability == Availability::DoNotDisturb;
                 let line = match (dnd, c.dnd_until.get(), u.status.clone()) {
                     (true, Some(until), _) => format!("{} {}", tr().paused_until, time::hm((until * 1000.0) as Timestamp)),
+                    (_, _, Some(st)) if st.in_meeting => status_text(&st),
                     (_, _, Some(st)) => format!("{} {}", st.emoji, st.text).trim().to_owned(),
                     _ => availability_label(&u).to_owned(),
                 };
@@ -4445,6 +4462,7 @@ fn StatusDialog() -> impl IntoView {
         let status = (!e.trim().is_empty() || !t.trim().is_empty()).then(|| CustomStatus {
             emoji: e.trim().to_owned(),
             text: t.trim().to_owned(),
+            in_meeting: false,
         });
         let d = clear.get_untracked();
         ops::set_status(c, availability, status, (d > 0).then_some(d));
@@ -4809,7 +4827,7 @@ fn ProfilePane() -> impl IntoView {
                             </div>
                             {title.map(|t| view! { <div class="profile-title">{t}</div> })}
                             {user.as_ref().and_then(|u| u.status.clone()).map(|st| view! {
-                                <div class="profile-line"><span class="preset-emoji">{st.emoji}</span>{st.text}</div>
+                                <div class="profile-line"><span class="preset-emoji">{status_icon(&st, 18)}</span>{status_text(&st)}</div>
                             })}
                             {user.clone().map(|u| view! {
                                 <div class="profile-line"><span class=presence_class(&u)></span>{availability_label(&u)}</div>

@@ -1479,6 +1479,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   border-color: transparent;
 }
 .status-emoji { margin-left: 4px; font-size: 14px; line-height: 1; cursor: default; }
+/* Telemost's "In meeting" status: green headphones, like a Slack huddle. */
+.status-meeting { display: inline-flex; vertical-align: -2px; color: var(--online); }
 .me-menu > .me-status-btn {
   width: calc(100% - 24px);
   margin: 0 12px 6px;
