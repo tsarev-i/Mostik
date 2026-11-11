@@ -5,8 +5,8 @@ display scale 1.2; values converted to CSS pixels) in a test workspace without a
 Reference screenshots are kept locally in `docs/design/reference/` and never go into the repository.
 
 Slack's name, logo and icons are not used. The icons are our own in the Lucide style (ISC).
-The app icon is `docs/design/app-icon.png` (source: `app-icon.svg`, a lowercase Cyrillic "м" drawn as an arched
-bridge over water). Tauri icons are generated with `cargo tauri icon docs/design/app-icon.png -o app/src-tauri/icons`
+The app icon is `docs/design/app-icon.png` (source: `app-icon.svg`, a suspension bridge whose cable draws the letter
+"М"). Tauri icons are generated with `cargo tauri icon docs/design/app-icon.png -o app/src-tauri/icons`
 (remove the `android` and `ios` directories afterwards).
 
 ## Layout
