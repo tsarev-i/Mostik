@@ -1,5 +1,6 @@
-# dev and pull requests: tests on Linux, then bundles in parallel: AppImage for Linux, NSIS setup for Windows.
-# main: the same, then a GitHub release tagged vX.Y.Z with the bundles attached.
+# dev and pull requests: build and tests on Linux.
+# main: the same, then bundles in parallel (AppImage for Linux, NSIS setup for Windows) and a GitHub
+# release tagged vX.Y.Z with the bundles attached.
 #
 # Auto-update: with the TAURI_SIGNING_PRIVATE_KEY secret (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 # if the key has one) the bundles are signed, and the release gets latest.json, which installed
@@ -110,6 +111,7 @@ jobs:
   bundle:
     name: Bundle (${{ matrix.platform }})
     needs: [version, test]
+    if: needs.version.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -155,23 +157,17 @@ jobs:
         run: bash scripts/ui.sh build --release
 
       # The UI is already built: on Windows the hook's `bash` could resolve to WSL instead of Git Bash.
-      # With the signing key the bundles get .sig files for the updater; pull requests from forks
-      # have no secrets and build unsigned bundles.
+      # The signing key gives the bundles .sig files for the updater.
       - name: Build bundles
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          RELEASE: ${{ needs.version.outputs.release }}
         run: |
-          signed=true
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            if [ "$RELEASE" = true ]; then
-              echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set: a release without signed bundles breaks auto-update"
-              exit 1
-            fi
-            signed=false
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set: a release without signed bundles breaks auto-update"
+            exit 1
           fi
-          cargo tauri build --ci --config "{\"build\":{\"beforeBuildCommand\":null},\"bundle\":{\"createUpdaterArtifacts\":$signed}}"
+          cargo tauri build --ci --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":true}}'
 
       - name: Collect bundles
         run: |
