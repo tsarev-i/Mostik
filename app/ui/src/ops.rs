@@ -48,6 +48,10 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
             return;
         }
         let mine = m.author == s.me;
+        let me_name = s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default();
+        let mentioned = s
+            .mention_names()
+            .with(|who| mostik_core::markup::mentions_me(&m.text, who, &me_name));
         if let Some(parent) = m.thread_parent {
             if let Some(p) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == parent) {
                 let t = p.thread.get_or_insert(ThreadSummary {
@@ -68,11 +72,7 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
                 && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
             if !mine && !viewing {
                 ch.unread += 1;
-                if s.users
-                    .iter()
-                    .find(|u| u.id == s.me)
-                    .is_some_and(|me| m.text.contains(&format!("@{}", me.display_name)))
-                {
+                if mentioned {
                     ch.mentions += 1;
                 }
             }

@@ -254,6 +254,19 @@ impl Snapshot {
         self.chats.iter().find(|c| &c.id == id)
     }
 
+    /// Who can be mentioned: known people and the public group chats in the list (the user is in all of them).
+    pub fn mention_names(&self) -> crate::markup::MentionNames {
+        crate::markup::MentionNames {
+            people: self.users.iter().map(|u| u.display_name.clone()).collect(),
+            channels: self
+                .chats
+                .iter()
+                .filter(|c| c.kind == ChatKind::Group { public: true } && !c.name.is_empty())
+                .map(|c| c.name.clone())
+                .collect(),
+        }
+    }
+
     /// Chat feed messages without thread replies, oldest first.
     pub fn channel_messages(&self, chat: &ChatId) -> Vec<Message> {
         let mut list: Vec<Message> = self

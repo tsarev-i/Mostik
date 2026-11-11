@@ -58,6 +58,8 @@ struct Shared {
     muted: BTreeSet<String>,
     titles: BTreeMap<String, String>,
     names: BTreeMap<String, String>,
+    /// Public group chats the user is in: `@<name>` mentions them too.
+    channels: Vec<String>,
     /// Set once the snapshot is built: until then `muted`, `titles` and `names` are incomplete,
     /// so no notifications are shown.
     ready: bool,
@@ -699,7 +701,13 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         .me
         .as_ref()
         .and_then(|me| sh.names.get(&me.0))
-        .is_some_and(|name| m.text.contains(&format!("@{name}")));
+        .is_some_and(|me_name| {
+            let who = mostik_core::markup::MentionNames {
+                people: sh.names.values().cloned().collect(),
+                channels: sh.channels.clone(),
+            };
+            who.with(|who| mostik_core::markup::mentions_me(&m.text, who, me_name))
+        });
     match prefs.notify.as_str() {
         "nothing" => return,
         "direct" if !direct && !mentioned => return,
@@ -1935,6 +1943,7 @@ async fn connect_inner(
         for u in &snapshot.users {
             sh.names.insert(u.id.0.clone(), u.display_name.clone());
         }
+        sh.channels = snapshot.mention_names().channels;
         sh.ready = true;
     }
     probe["snapshot"] = json!({

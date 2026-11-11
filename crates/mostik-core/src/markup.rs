@@ -3,7 +3,8 @@
 //! Supports the same as the Messenger: `**bold**`, `__italic__`, `~~strike~~`,
 //! `++underline++`, `` `code` ``, `[text](url)` links and bare `http(s)://…` links,
 //! code blocks between ```` ``` ```` lines. Nesting is not supported.
-//! Mentions are recognised by known names: `@First Last`.
+//! Mentions are recognised by known names: `@First Last` for people, `@<name>` for public group chats
+//! (a group mention, like user groups in Slack) and `@all` for everyone in the chat.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inline {
@@ -13,13 +14,75 @@ pub enum Inline {
     Strike(String),
     Underline(String),
     Code(String),
-    /// Name without the `@`.
+    /// Person's name without the `@`.
     Mention(String),
+    /// Public group chat name without the `@`: mentions its members.
+    ChannelMention(String),
+    /// `@all`: everyone in the chat.
+    MentionAll,
     /// Link: caption and address (`http`, `https` or `mailto`).
     Link {
         text: String,
         url: String,
     },
+}
+
+/// The word after `@` that mentions everyone in the chat.
+pub const MENTION_ALL: &str = "all";
+
+/// What `@` can point at.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Mentionable<'a> {
+    /// Display names of people.
+    pub people: &'a [&'a str],
+    /// Names of public group chats the user is a member of.
+    pub channels: &'a [&'a str],
+}
+
+impl Mentionable<'_> {
+    /// Mention at the start of `after` (the text right after `@`): the span and its length in bytes.
+    /// The mention must end at a word boundary; the longest name wins, a person over a chat of the same name.
+    fn find(&self, after: &str) -> Option<(Inline, usize)> {
+        let ends_word = |len: usize| after[len..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        let fits = |n: &&&str| !n.is_empty() && after.starts_with(**n) && ends_word(n.len());
+        let person = self.people.iter().filter(fits).max_by_key(|n| n.len());
+        let channel = self.channels.iter().filter(fits).max_by_key(|n| n.len());
+        let best = match (person, channel) {
+            (Some(p), Some(c)) if c.len() > p.len() => Some(Inline::ChannelMention((*c).to_owned())),
+            (Some(p), _) => Some(Inline::Mention((*p).to_owned())),
+            (None, Some(c)) => Some(Inline::ChannelMention((*c).to_owned())),
+            (None, None) => None,
+        };
+        if let Some(span) = best {
+            let len = match &span {
+                Inline::Mention(n) | Inline::ChannelMention(n) => n.len(),
+                _ => 0,
+            };
+            return Some((span, len));
+        }
+        let all = after.get(..MENTION_ALL.len())?;
+        (all.eq_ignore_ascii_case(MENTION_ALL) && ends_word(MENTION_ALL.len()))
+            .then_some((Inline::MentionAll, all.len()))
+    }
+}
+
+/// Owned names behind a [`Mentionable`], for keeping them in state.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MentionNames {
+    pub people: Vec<String>,
+    pub channels: Vec<String>,
+}
+
+impl MentionNames {
+    /// Runs `f` with these names borrowed as a [`Mentionable`].
+    pub fn with<R>(&self, f: impl FnOnce(&Mentionable) -> R) -> R {
+        let people: Vec<&str> = self.people.iter().map(String::as_str).collect();
+        let channels: Vec<&str> = self.channels.iter().map(String::as_str).collect();
+        f(&Mentionable {
+            people: &people,
+            channels: &channels,
+        })
+    }
 }
 
 /// Message block: plain text with inline markup, or a code block.
@@ -102,8 +165,8 @@ const PAIRS: &[(&str, MakeInline)] = &[
     ("++", Inline::Underline),
 ];
 
-/// Splits a text block into inline spans; `names` are display names that can be mentioned.
-pub fn parse_inline(text: &str, names: &[&str]) -> Vec<Inline> {
+/// Splits a text block into inline spans; `who` is what can be mentioned.
+pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
     let mut out = Vec::new();
     let mut plain = String::new();
     let mut rest = text;
@@ -135,15 +198,13 @@ pub fn parse_inline(text: &str, names: &[&str]) -> Vec<Inline> {
             rest = &rest[len..];
             continue;
         }
-        if let Some(after) = rest.strip_prefix('@')
-            && let Some(name) = names
-                .iter()
-                .filter(|n| !n.is_empty() && after.starts_with(**n))
-                .max_by_key(|n| n.len())
+        if word_start
+            && let Some(after) = rest.strip_prefix('@')
+            && let Some((span, len)) = who.find(after)
         {
             flush(&mut out, &mut plain);
-            out.push(Inline::Mention((*name).to_owned()));
-            rest = &after[name.len()..];
+            out.push(span);
+            rest = &after[len..];
             continue;
         }
         let ch = rest.chars().next().expect("rest is not empty");
@@ -156,7 +217,7 @@ pub fn parse_inline(text: &str, names: &[&str]) -> Vec<Inline> {
 
 /// Text without markup, for previews in search, notifications and dialogs.
 pub fn plain(text: &str) -> String {
-    parse_inline(&text.replace("```", ""), &[])
+    parse_inline(&text.replace("```", ""), &Mentionable::default())
         .into_iter()
         .map(|p| match p {
             Inline::Text(t)
@@ -166,9 +227,24 @@ pub fn plain(text: &str) -> String {
             | Inline::Underline(t)
             | Inline::Code(t)
             | Inline::Mention(t)
+            | Inline::ChannelMention(t)
             | Inline::Link { text: t, .. } => t,
+            Inline::MentionAll => format!("@{MENTION_ALL}"),
         })
         .collect()
+}
+
+/// Whether `text` mentions the user named `me_name`: by name, through a public chat they are in
+/// (`who.channels` holds only such chats) or with `@all`. Code blocks do not count.
+pub fn mentions_me(text: &str, who: &Mentionable, me_name: &str) -> bool {
+    parse_blocks(text).iter().any(|b| match b {
+        Block::Text(t) => parse_inline(t, who).iter().any(|p| match p {
+            Inline::Mention(n) => !me_name.is_empty() && n == me_name,
+            Inline::ChannelMention(_) | Inline::MentionAll => true,
+            _ => false,
+        }),
+        Block::Code(_) => false,
+    })
 }
 
 fn flush(out: &mut Vec<Inline>, plain: &mut String) {
@@ -182,14 +258,26 @@ mod tests {
     use super::Inline::*;
     use super::*;
 
+    const NONE: Mentionable = Mentionable {
+        people: &[],
+        channels: &[],
+    };
+
     fn t(s: &str) -> Inline {
         Text(s.into())
+    }
+
+    fn people<'a>(names: &'a [&'a str]) -> Mentionable<'a> {
+        Mentionable {
+            people: names,
+            channels: &[],
+        }
     }
 
     #[test]
     fn parses_styles() {
         assert_eq!(
-            parse_inline("build **rc2**, `cargo test` and ~~old~~", &[]),
+            parse_inline("build **rc2**, `cargo test` and ~~old~~", &NONE),
             vec![
                 t("build "),
                 Bold("rc2".into()),
@@ -203,20 +291,68 @@ mod tests {
 
     #[test]
     fn unclosed_marker_is_text() {
-        assert_eq!(parse_inline("2 ** 3", &[]), vec![t("2 ** 3")]);
-        assert_eq!(parse_inline("****", &[]), vec![t("****")]);
+        assert_eq!(parse_inline("2 ** 3", &NONE), vec![t("2 ** 3")]);
+        assert_eq!(parse_inline("****", &NONE), vec![t("****")]);
     }
 
     #[test]
     fn mentions_prefer_longest_name() {
         let names = ["Ivan", "Ivan Petrov"];
         assert_eq!(
-            parse_inline("@Ivan Petrov hi", &names),
+            parse_inline("@Ivan Petrov hi", &people(&names)),
             vec![Mention("Ivan Petrov".into()), t(" hi")]
         );
-        assert_eq!(parse_inline("mail a@b.ru", &names), vec![t("mail a@b.ru")]);
+        assert_eq!(parse_inline("mail a@b.ru", &people(&names)), vec![t("mail a@b.ru")]);
         // Non-ASCII names are matched on character boundaries.
-        assert_eq!(parse_inline("@Иван!", &["Иван"]), vec![Mention("Иван".into()), t("!")]);
+        assert_eq!(
+            parse_inline("@Иван!", &people(&["Иван"])),
+            vec![Mention("Иван".into()), t("!")]
+        );
+        // The name must end at a word boundary.
+        assert_eq!(parse_inline("@Ivanov", &people(&names)), vec![t("@Ivanov")]);
+        assert_eq!(
+            parse_inline("@Ivan Petrovich", &people(&names)),
+            vec![Mention("Ivan".into()), t(" Petrovich")]
+        );
+    }
+
+    #[test]
+    fn mentions_channels_and_all() {
+        let who = Mentionable {
+            people: &["Ivan"],
+            channels: &["backend", "Ivan team"],
+        };
+        assert_eq!(
+            parse_inline("@backend, @Ivan team and @ALL!", &who),
+            vec![
+                ChannelMention("backend".into()),
+                t(", "),
+                ChannelMention("Ivan team".into()),
+                t(" and "),
+                MentionAll,
+                t("!")
+            ]
+        );
+        assert_eq!(
+            parse_inline("@backends @allow a@all", &who),
+            vec![t("@backends @allow a@all")]
+        );
+        assert_eq!(plain("hi @all"), "hi @all");
+    }
+
+    #[test]
+    fn detects_own_mentions() {
+        let who = Mentionable {
+            people: &["Ivan", "Anna"],
+            channels: &["backend"],
+        };
+        assert!(mentions_me("hi @Ivan", &who, "Ivan"));
+        assert!(!mentions_me("hi @Anna", &who, "Ivan"));
+        assert!(mentions_me("ping @backend", &who, "Ivan"));
+        assert!(mentions_me("@all release", &who, "Ivan"));
+        assert!(!mentions_me("ping @frontend", &who, "Ivan"));
+        assert!(!mentions_me("```\n@all\n```", &who, "Ivan"));
+        assert!(!mentions_me("@Ivan", &who, ""));
     }
 
     #[test]
@@ -227,7 +363,7 @@ mod tests {
     #[test]
     fn links() {
         assert_eq!(
-            parse_inline("see https://example.com/a?b=1, and [docs](https://e.org/x)", &[]),
+            parse_inline("see https://example.com/a?b=1, and [docs](https://e.org/x)", &NONE),
             vec![
                 t("see "),
                 Link {
@@ -242,11 +378,11 @@ mod tests {
             ]
         );
         assert_eq!(
-            parse_inline("[x](javascript:alert(1))", &[]),
+            parse_inline("[x](javascript:alert(1))", &NONE),
             vec![t("[x](javascript:alert(1))")]
         );
         assert_eq!(
-            parse_inline("(https://e.org/a)", &[]),
+            parse_inline("(https://e.org/a)", &NONE),
             vec![
                 t("("),
                 Link {
@@ -275,6 +411,6 @@ mod tests {
 
     #[test]
     fn code_keeps_markers_inside() {
-        assert_eq!(parse_inline("`**not bold**`", &[]), vec![Code("**not bold**".into())]);
+        assert_eq!(parse_inline("`**not bold**`", &NONE), vec![Code("**not bold**".into())]);
     }
 }

@@ -5,7 +5,7 @@ use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use mostik_core::markup::{Inline, parse_inline};
+use mostik_core::markup::{Inline, MENTION_ALL, Mentionable, parse_inline};
 use mostik_core::*;
 
 use crate::i18n::{Lang, tr};
@@ -2503,19 +2503,19 @@ fn threads_supported(chat: &ChatId) -> bool {
 }
 
 /// Message text: paragraphs with inline markup and code blocks.
-fn render_text(text: &str, names: &[&str], me_name: &str) -> AnyView {
+fn render_text(text: &str, who: &Mentionable, me_name: &str) -> AnyView {
     mostik_core::markup::parse_blocks(text)
         .into_iter()
         .map(|b| match b {
             mostik_core::markup::Block::Code(code) => view! { <pre class="code-block">{code}</pre> }.into_any(),
-            mostik_core::markup::Block::Text(t) => render_inline(&t, names, me_name),
+            mostik_core::markup::Block::Text(t) => render_inline(&t, who, me_name),
         })
         .collect_view()
         .into_any()
 }
 
-fn render_inline(text: &str, names: &[&str], me_name: &str) -> AnyView {
-    parse_inline(text, names)
+fn render_inline(text: &str, who: &Mentionable, me_name: &str) -> AnyView {
+    parse_inline(text, who)
         .into_iter()
         .map(|p| match p {
             Inline::Text(t) => view! { <span>{t}</span> }.into_any(),
@@ -2538,6 +2538,9 @@ fn render_inline(text: &str, names: &[&str], me_name: &str) -> AnyView {
                 let cls = if n == me_name { "mention me" } else { "mention" };
                 view! { <span class=cls>"@"{n}</span> }.into_any()
             }
+            // The user is in every public chat that can be mentioned, and in the chat for `@all`.
+            Inline::ChannelMention(n) => view! { <span class="mention me group">"@"{n}</span> }.into_any(),
+            Inline::MentionAll => view! { <span class="mention me group">"@"{MENTION_ALL}</span> }.into_any(),
         })
         .collect_view()
         .into_any()
@@ -2549,16 +2552,13 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
     let (author, names, me_name, me_id) = c.snap.with_untracked(|s| {
         (
             s.user(&msg.author).cloned(),
-            s.users.iter().map(|u| u.display_name.clone()).collect::<Vec<_>>(),
+            s.mention_names(),
             s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
             s.me.clone(),
         )
     });
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let mentions_me = parse_inline(&msg.text, &name_refs)
-        .iter()
-        .any(|p| matches!(p, Inline::Mention(n) if *n == me_name));
     let mine = msg.author == me_id;
+    let mentions_me = !mine && names.with(|who| mostik_core::markup::mentions_me(&msg.text, who, &me_name));
     let key = (msg.chat_id.clone(), msg.ts);
 
     let mut cls = String::from("msg");
@@ -2739,8 +2739,7 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                         view! { <InlineEditor msg=m_editor.clone()/> }.into_any()
                     } else {
                         {
-                            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-                            let body = render_text(&m_editor.text, &refs, &me_name);
+                            let body = names.with(|who| render_text(&m_editor.text, who, &me_name));
                             let edited = m_editor.edited.then(|| view! { <span class="edited">{tr().edited}</span> });
                             (!m_editor.text.is_empty() || m_editor.edited).then(|| view! { <div class="msg-text">{body}{edited}</div> }).into_any()
                         }
@@ -2785,7 +2784,7 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     let (author, names, me_name, chat) = c.snap.with_untracked(|s| {
         (
             s.user(&f.author).cloned(),
-            s.users.iter().map(|u| u.display_name.clone()).collect::<Vec<_>>(),
+            s.mention_names(),
             s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
             f.chat_id
                 .as_ref()
@@ -2793,7 +2792,6 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
                 .map(|ch| (ch.id.clone(), display_title(s, ch), ch.kind.clone())),
         )
     });
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let name = author
         .as_ref()
         .map(|u| u.display_name.clone())
@@ -2828,7 +2826,7 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     view! {
         <div class="fwd">
             <div class="fwd-head"><Avatar user=face size=20/><b>{name}</b></div>
-            {(!f.text.is_empty()).then(|| view! { <div class="msg-text">{render_text(&f.text, &name_refs, &me_name)}</div> })}
+            {(!f.text.is_empty()).then(|| view! { <div class="msg-text">{names.with(|who| render_text(&f.text, who, &me_name))}</div> })}
             <Attachments list=f.attachments.clone()/>
             {footer}
         </div>
@@ -3048,6 +3046,91 @@ fn insert_text(area: &web_sys::HtmlTextAreaElement, text: &str, drop_before: usi
     value
 }
 
+/// The name typed after `@` that ends at UTF-16 offset `caret`, for mention suggestions; may be empty.
+/// Names may contain spaces, so the query runs up to three words.
+fn mention_query_before(value: &str, caret: u32) -> Option<String> {
+    let before = &value[..utf16_to_byte(value, Some(caret))];
+    let at = before.rfind('@')?;
+    let query = &before[at + 1..];
+    let starts_word = before[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+    (starts_word
+        && query.chars().count() <= 40
+        && query.split(' ').count() <= 3
+        && !query.starts_with(' ')
+        && !query.contains("  ")
+        && !query.contains(['\n', '@']))
+    .then(|| query.to_owned())
+}
+
+/// `@name` before the cursor, for mention suggestions.
+fn mention_query(area: &web_sys::HtmlTextAreaElement) -> Option<String> {
+    let caret = area.selection_start().ok().flatten()?;
+    mention_query_before(&area.value(), caret)
+}
+
+/// What the composer suggests while typing: an emoji after `:` or a mention after `@`.
+#[derive(Clone)]
+enum Suggestion {
+    Emoji {
+        glyph: &'static str,
+        code: String,
+    },
+    Person(User),
+    /// Public group chat: mentions its members.
+    Channel(String),
+    /// `@all`: everyone in the chat.
+    All,
+}
+
+/// How well `name` matches the lowercase `query`: 0 — starts with it, 1 — one of the words does.
+fn mention_rank(name: &str, query: &str) -> Option<u8> {
+    let name = name.to_lowercase();
+    if name.starts_with(query) {
+        Some(0)
+    } else {
+        name.split_whitespace().any(|w| w.starts_with(query)).then_some(1)
+    }
+}
+
+/// Mention suggestions for `query` in `chat`: `@all` (not in direct chats), then people, then public chats.
+fn mention_suggestions(s: &Snapshot, chat: &ChatId, query: &str, limit: usize) -> Vec<Suggestion> {
+    let q = query.to_lowercase();
+    let mut out = vec![];
+    let group = s
+        .chat(chat)
+        .is_some_and(|ch| matches!(ch.kind, ChatKind::Group { .. } | ChatKind::Broadcast));
+    if group && MENTION_ALL.starts_with(&q) {
+        out.push(Suggestion::All);
+    }
+    let mut people: Vec<(u8, &User)> = s
+        .users
+        .iter()
+        .filter(|u| u.id != s.me && !u.display_name.is_empty())
+        .filter_map(|u| mention_rank(&u.display_name, &q).map(|r| (r, u)))
+        .collect();
+    people.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.display_name.cmp(&b.1.display_name)));
+    let mut channels: Vec<(u8, String)> = s
+        .mention_names()
+        .channels
+        .into_iter()
+        .filter_map(|n| mention_rank(&n, &q).map(|r| (r, n)))
+        .collect();
+    channels.sort();
+    channels.dedup();
+    // Keep room for chats when many people match.
+    let room = limit.saturating_sub(out.len());
+    let take_people = people.len().min(room.saturating_sub(channels.len().min(2)));
+    out.extend(
+        people
+            .into_iter()
+            .take(take_people)
+            .map(|(_, u)| Suggestion::Person(u.clone())),
+    );
+    let room = limit.saturating_sub(out.len());
+    out.extend(channels.into_iter().take(room).map(|(_, n)| Suggestion::Channel(n)));
+    out
+}
+
 /// `:code` before the cursor (two characters or more), for emoji suggestions, as in Slack.
 fn emoji_query(area: &web_sys::HtmlTextAreaElement) -> Option<String> {
     let caret = area.selection_start().ok().flatten()?;
@@ -3062,7 +3145,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     let area = NodeRef::<html::Textarea>::new();
     let parent = move || if thread { c.thread.get_untracked() } else { None };
     let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
-    let suggestions: RwSignal<Vec<(&'static str, String)>> = RwSignal::new(vec![]);
+    let suggestions: RwSignal<Vec<Suggestion>> = RwSignal::new(vec![]);
     let suggest_sel = RwSignal::new(0usize);
 
     // Chat draft: fill it in on opening, save it while typing (main composer only).
@@ -3140,18 +3223,31 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             }
         });
     };
-    // Picking a `:code` suggestion replaces the typed emoji code.
+    // Picking a suggestion replaces the typed `:code` or `@name`.
     let accept_suggestion = move |i: usize| {
-        let Some((glyph, code)) = suggestions.with_untracked(|s| s.get(i).cloned()) else {
+        let Some(pick) = suggestions.with_untracked(|s| s.get(i).cloned()) else {
             return;
         };
         if let Some(el) = area.get_untracked() {
-            let text = insert_text(
-                &el,
-                glyph,
-                code.len().min(emoji_query(&el).map_or(0, |q| q.chars().count())) + 1,
-            );
-            crate::emoji::remember(crate::emoji::Source::Text, glyph);
+            let text = match pick {
+                Suggestion::Emoji { glyph, code } => {
+                    crate::emoji::remember(crate::emoji::Source::Text, glyph);
+                    insert_text(
+                        &el,
+                        glyph,
+                        code.len().min(emoji_query(&el).map_or(0, |q| q.chars().count())) + 1,
+                    )
+                }
+                Suggestion::Person(_) | Suggestion::Channel(_) | Suggestion::All => {
+                    let name = match pick {
+                        Suggestion::Person(u) => u.display_name,
+                        Suggestion::Channel(n) => n,
+                        _ => MENTION_ALL.to_owned(),
+                    };
+                    let typed = mention_query(&el).map_or(0, |q| q.chars().count() + 1);
+                    insert_text(&el, &format!("@{name} "), typed)
+                }
+            };
             remember(&text);
             set_draft.set(text);
         }
@@ -3263,7 +3359,16 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         remember(&text);
                         set_draft.set(text);
                         ops::typing(c, c.current.get_untracked());
-                        let found = area.get_untracked().and_then(|el| emoji_query(&el)).map(|q| crate::emoji::suggest(&q, 8)).unwrap_or_default();
+                        let found = area.get_untracked().map(|el| {
+                            if let Some(q) = emoji_query(&el) {
+                                crate::emoji::suggest(&q, 8).into_iter().map(|(glyph, code)| Suggestion::Emoji { glyph, code }).collect()
+                            } else if let Some(q) = mention_query(&el) {
+                                let chat = c.current.get_untracked();
+                                c.snap.with_untracked(|s| mention_suggestions(s, &chat, &q, 8))
+                            } else {
+                                vec![]
+                            }
+                        }).unwrap_or_default();
                         suggest_sel.set(0);
                         suggestions.set(found);
                     }
@@ -3272,11 +3377,34 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 ></textarea>
                 <Show when=move || !suggestions.with(Vec::is_empty)>
                     <div class="emoji-suggest">
-                        {move || suggestions.get().into_iter().enumerate().map(|(i, (glyph, code))| view! {
-                            <button class=move || if suggest_sel.get() == i { "active" } else { "" }
-                                on:mousedown=move |e| { e.prevent_default(); accept_suggestion(i); }>
-                                <span class="glyph">{glyph}</span><span>{format!(":{code}:")}</span>
-                            </button>
+                        {move || suggestions.get().into_iter().enumerate().map(|(i, pick)| {
+                            let row = match pick {
+                                Suggestion::Emoji { glyph, code } => view! {
+                                    <span class="glyph">{glyph}</span><span>{format!(":{code}:")}</span>
+                                }.into_any(),
+                                Suggestion::Person(u) => {
+                                    let name = u.display_name.clone();
+                                    let title = u.title.clone().unwrap_or_default();
+                                    view! {
+                                        <span class="glyph"><Avatar user=u size=20/></span>
+                                        <span class="name">{name}</span><span class="hint">{title}</span>
+                                    }.into_any()
+                                }
+                                Suggestion::Channel(n) => view! {
+                                    <span class="glyph"><Icon icon=I::Hash size=16/></span>
+                                    <span class="name">{n}</span><span class="hint">{tr().mention_channel_hint}</span>
+                                }.into_any(),
+                                Suggestion::All => view! {
+                                    <span class="glyph">"@"</span>
+                                    <span class="name">{MENTION_ALL}</span><span class="hint">{tr().mention_all_hint}</span>
+                                }.into_any(),
+                            };
+                            view! {
+                                <button class=move || if suggest_sel.get() == i { "active" } else { "" }
+                                    on:mousedown=move |e| { e.prevent_default(); accept_suggestion(i); }>
+                                    {row}
+                                </button>
+                            }
                         }).collect_view()}
                     </div>
                 </Show>
@@ -4199,14 +4327,14 @@ fn ActivityList() -> impl IntoView {
         c.snap.with(|s| {
             let me = s.me.clone();
             let my_name = s.user(&me).map(|u| u.display_name.clone()).unwrap_or_default();
-            let mention = format!("@{my_name}");
+            let who = s.mention_names();
             let mut seen = HashSet::new();
             let mut out: Vec<(Message, ActivityKind)> = vec![];
             for m in s.messages.iter().chain(extra.iter()) {
                 if !seen.insert((m.chat_id.clone(), m.ts)) {
                     continue;
                 }
-                if m.author != me && !my_name.is_empty() && m.text.contains(&mention) {
+                if m.author != me && who.with(|w| mostik_core::markup::mentions_me(&m.text, w, &my_name)) {
                     out.push((m.clone(), ActivityKind::Mention));
                 } else if let Some(parent) = m.thread_parent
                     && m.author != me
@@ -5130,6 +5258,58 @@ mod tests {
         );
         assert_eq!(emoji_code_before("👍 :ok", 6).as_deref(), Some("ok"));
         assert_eq!(emoji_code_before("a:ok", 4), None);
+    }
+
+    #[test]
+    fn mention_query_runs_to_the_cursor() {
+        assert_eq!(mention_query_before("hi @", 4).as_deref(), Some(""));
+        assert_eq!(mention_query_before("hi @Ivan Pe", 11).as_deref(), Some("Ivan Pe"));
+        assert_eq!(mention_query_before("(@back", 6).as_deref(), Some("back"));
+        assert_eq!(mention_query_before("mail a@b", 8), None);
+        assert_eq!(mention_query_before("@one two three four", 19), None);
+        assert_eq!(mention_query_before("@a\nb", 4), None);
+    }
+
+    #[test]
+    fn mention_suggestions_order() {
+        let mut s = mostik_core::mock::demo();
+        let general = s
+            .chats
+            .iter()
+            .find(|ch| ch.kind == ChatKind::Group { public: true })
+            .unwrap()
+            .clone();
+        let picks = mention_suggestions(&s, &general.id, "", 50);
+        assert!(matches!(picks.first(), Some(Suggestion::All)));
+        assert!(
+            picks
+                .iter()
+                .any(|p| matches!(p, Suggestion::Channel(n) if *n == general.name))
+        );
+        assert!(!picks.iter().any(|p| matches!(p, Suggestion::Person(u) if u.id == s.me)));
+        // No `@all` in direct chats.
+        let direct = s
+            .chats
+            .iter()
+            .find(|ch| matches!(ch.kind, ChatKind::Direct { .. }))
+            .unwrap()
+            .id
+            .clone();
+        assert!(
+            !mention_suggestions(&s, &direct, "", 50)
+                .iter()
+                .any(|p| matches!(p, Suggestion::All))
+        );
+        // Private groups are not offered.
+        s.chats.retain(|ch| ch.kind != ChatKind::Group { public: true });
+        assert!(
+            !mention_suggestions(&s, &general.id, "", 50)
+                .iter()
+                .any(|p| matches!(p, Suggestion::Channel(_)))
+        );
+        assert_eq!(mention_rank("Ivan Petrov", "pe"), Some(1));
+        assert_eq!(mention_rank("Ivan Petrov", "iv"), Some(0));
+        assert_eq!(mention_rank("Ivan Petrov", "x"), None);
         assert_eq!(utf16_to_byte("👍x", Some(1)), "👍".len());
     }
 }

@@ -158,6 +158,8 @@ pub struct Tr {
     pub no_emoji_found: &'static str,
     pub pick_emoji: &'static str,
     pub emoji_btn: &'static str,
+    pub mention_all_hint: &'static str,
+    pub mention_channel_hint: &'static str,
     pub emoji_groups: [&'static str; 9],
     pub open_thread: &'static str,
     pub reply_in_thread: &'static str,
@@ -471,6 +473,8 @@ pub static RU: Tr = Tr {
     no_emoji_found: "Ничего не найдено",
     pick_emoji: "Выберите эмодзи",
     emoji_btn: "Эмодзи",
+    mention_all_hint: "Уведомить всех в этом чате",
+    mention_channel_hint: "Участники канала",
     emoji_groups: [
         "Смайлики и эмоции",
         "Люди и тело",
@@ -793,6 +797,8 @@ pub static EN: Tr = Tr {
     no_emoji_found: "No emoji found",
     pick_emoji: "Pick an emoji",
     emoji_btn: "Emoji",
+    mention_all_hint: "Notify everyone in this chat",
+    mention_channel_hint: "Channel members",
     emoji_groups: [
         "Smileys & Emotion",
         "People & Body",
