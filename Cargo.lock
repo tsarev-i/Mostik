@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "imagesize",
@@ -2931,14 +2931,14 @@ dependencies = [
 
 [[package]]
 name = "mostik-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "mostik-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "emojis",
@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-yandex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures-util",
