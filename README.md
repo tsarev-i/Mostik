@@ -1,4 +1,4 @@
-<img src="docs/design/app-icon.png" width="96" align="right" alt="Иконка Мостика: буква «м» в виде моста над водой">
+<img src="docs/design/app-icon.png" width="96" align="right" alt="Иконка Мостика: висячий мост, трос которого рисует букву «М»">
 
 # Мостик
 
