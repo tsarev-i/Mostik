@@ -67,7 +67,7 @@ until then Noto Sans is used.
 - Consecutive messages of one author within 5 minutes are grouped without an avatar; the time shows on hover.
 - Hovering a message shows the action bar: reaction, reply in thread, forward, "important", more.
 - The day separator is a centred pill that sticks to the top of the feed.
-- A collapsed sidebar section still shows the open chat and chats with unread messages.
+- A collapsed sidebar section still shows chats with unread messages; the open chat hides with the rest.
 - Sidebar section headers have no caret, as in Slack: on hover it shows in place of the section icon
   (the star of "Starred", the hash of "Channels", the speech bubbles of "Direct messages", a folder's
   emoji) or left of an icon-less title, and turns down over an expanded section. A section with an

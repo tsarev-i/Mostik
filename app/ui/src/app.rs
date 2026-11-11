@@ -2480,17 +2480,14 @@ fn SidebarSection(section: Section) -> impl IntoView {
                 </div>
                 </div>
                 {let section_id = section_id.clone(); move || {
-                    // As in Slack: a collapsed section still shows the open chat and chats with unread messages.
-                    // Found conversations show in collapsed sections too.
+                    // A collapsed section still shows chats with unread messages, the open chat included only
+                    // when it has them. Found conversations show in collapsed sections too.
                     let folded = collapsed.get() && !searching(c);
-                    let open = chat_in_pane(c);
                     visible
                         .get()
                         .into_iter()
                         .filter(|id| {
-                            !folded
-                                || open.as_ref() == Some(id)
-                                || c.snap.with(|s| s.chat(id).is_some_and(|ch| ch.unread > 0 && !ch.muted))
+                            !folded || c.snap.with(|s| s.chat(id).is_some_and(|ch| ch.unread > 0 && !ch.muted))
                         })
                         .map(|id| view! { <ChatRow id=id section=section_id.clone()/> })
                         .collect_view()
