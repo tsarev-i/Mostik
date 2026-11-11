@@ -572,6 +572,8 @@ pub struct PendingFile {
 }
 
 pub const FILES_EVENT: &str = "mostik://files";
+/// The custom emoji sets changed.
+pub const EMOJI_EVENT: &str = "mostik://emoji";
 /// The backend showed a notification: play the sound.
 /// The user clicked a message notification: open that message.
 pub const OPEN_EVENT: &str = "mostik://open";
@@ -826,4 +828,95 @@ pub async fn recommended_chats() -> Result<Vec<mostik_core::Chat>, String> {
 
 pub async fn join_chat(chat_id: &str) -> Result<mostik_core::Chat, String> {
     call("join_chat", ChatArgs { chat_id }).await
+}
+
+/// Custom emoji sets of the user's organizations (from the disk cache until the chats are read).
+pub async fn custom_emoji() -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
+    call("custom_emoji", ()).await
+}
+
+/// Picks an image for a new custom emoji.
+pub async fn pick_emoji_image() -> Result<Option<PendingFile>, String> {
+    call("pick_emoji_image", ()).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NewEmojiArgs<'a> {
+    emoji: NewEmoji<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NewEmoji<'a> {
+    path: &'a str,
+    name: &'a str,
+    org: Option<u64>,
+}
+
+/// Adds a custom emoji to the service chat of organization `org`; returns the new sets.
+pub async fn add_custom_emoji(
+    path: &str,
+    name: &str,
+    org: Option<u64>,
+) -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
+    call(
+        "add_custom_emoji",
+        NewEmojiArgs {
+            emoji: NewEmoji { path, name, org },
+        },
+    )
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmojiArgs<'a> {
+    chat_id: &'a str,
+    ts: Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+}
+
+/// Renames an own custom emoji; returns the new sets.
+pub async fn rename_custom_emoji(
+    chat_id: &str,
+    ts: Timestamp,
+    name: &str,
+) -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
+    call(
+        "rename_custom_emoji",
+        EmojiArgs {
+            chat_id,
+            ts,
+            name: Some(name),
+        },
+    )
+    .await
+}
+
+/// Deletes an own custom emoji; returns the new sets.
+pub async fn delete_custom_emoji(
+    chat_id: &str,
+    ts: Timestamp,
+) -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
+    call(
+        "delete_custom_emoji",
+        EmojiArgs {
+            chat_id,
+            ts,
+            name: None,
+        },
+    )
+    .await
+}
+
+/// A file the user has just picked, for a preview: the backend serves only picked files.
+pub fn local_file_url(path: &str) -> String {
+    file_url(&format!("local/{path}"), None)
+}
+
+/// Image of a custom emoji: the backend serves it from its disk cache.
+pub fn emoji_url(file_id: &str) -> String {
+    file_url(&format!("emoji/{file_id}"), None)
 }

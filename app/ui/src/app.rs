@@ -111,6 +111,10 @@ pub struct Ctx {
     pub sections: Memo<Vec<Section>>,
     /// The "New section" / "Rename section" dialog.
     pub folder_edit: RwSignal<Option<FolderEdit>>,
+    /// Custom emoji of the user's organizations.
+    pub custom: RwSignal<Vec<mostik_core::custom_emoji::EmojiSet>>,
+    /// The "Add custom emoji" dialog, opened from the emoji picker as in Slack.
+    pub adding_emoji: RwSignal<bool>,
 }
 
 /// What the section name dialog does.
@@ -420,6 +424,8 @@ pub fn App() -> impl IntoView {
         folders: folder_list,
         sections: Memo::new(move |_| snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f)))),
         folder_edit: RwSignal::new(None),
+        custom: RwSignal::new(vec![]),
+        adding_emoji: RwSignal::new(false),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -650,7 +656,9 @@ pub fn App() -> impl IntoView {
             c.me_menu.set(false);
             return;
         }
-        if c.confirm_delete.with_untracked(Option::is_some) {
+        if c.adding_emoji.get_untracked() {
+            c.adding_emoji.set(false);
+        } else if c.confirm_delete.with_untracked(Option::is_some) {
             c.confirm_delete.set(None);
         } else if c.confirm_leave.with_untracked(Option::is_some) {
             c.confirm_leave.set(None);
@@ -741,6 +749,7 @@ pub fn App() -> impl IntoView {
         </Show>
         {move || c.confirm_leave.get().map(|id| view! { <LeaveDialog id=id/> })}
         {move || c.folder_edit.get().map(|edit| view! { <FolderDialog edit=edit/> })}
+        {move || c.adding_emoji.get().then(|| view! { <AddEmojiDialog/> })}
         // Toasts stack at the bottom instead of covering each other.
         <div class="toasts">
             {move || c.error.get().map(|e| view! {
@@ -994,7 +1003,7 @@ pub fn org_key(s: &Snapshot, chosen: Option<u64>) -> String {
 }
 
 /// Current organization: the selected one, or the first if none is selected.
-fn current_org(c: Ctx) -> Option<Organization> {
+pub(crate) fn current_org(c: Ctx) -> Option<Organization> {
     let chosen = c.org.get();
     c.snap.with(|s| {
         s.organizations
@@ -2797,13 +2806,11 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     let original = shown.trim().to_owned();
     let text = RwSignal::new(shown);
     let busy = RwSignal::new(false);
-    let area = NodeRef::<html::Textarea>::new();
+    let area = NodeRef::<html::Div>::new();
+    let initial = text.get_untracked();
     Effect::new(move |_| {
         if let Some(el) = area.get() {
-            let _ = el.focus();
-            let n = utf16_len(&el.value());
-            let _ = el.set_selection_range(n, n);
-            autosize(&el);
+            place_caret(&el, &initial, utf16_len(&initial));
             // The editor is taller than the message: the last message's editor would go under
             // the composer. Once laid out, scroll it fully into view.
             request_animation_frame(move || {
@@ -2843,11 +2850,10 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     let save_key = save.clone();
     view! {
         <div class="inline-edit" on:click=|e| e.stop_propagation()>
-            <textarea node_ref=area rows="1" prop:value=move || text.get()
-                on:input=move |e| {
-                    text.set(event_target_value(&e));
+            <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
+                on:input=move |_| {
                     if let Some(el) = area.get_untracked() {
-                        autosize(&el);
+                        text.set(crate::editor::tidy(&el, &crate::custom::lookup(c)));
                         reveal_editor(&el);
                     }
                 }
@@ -2859,9 +2865,15 @@ fn InlineEditor(msg: Message) -> impl IntoView {
                             e.prevent_default();
                             save_key();
                         }
+                        "Enter" => {
+                            e.prevent_default();
+                            if let Some(el) = area.get_untracked() {
+                                text.set(insert_text(&el, "\n", 0));
+                            }
+                        }
                         _ => {}
                     }
-                }></textarea>
+                }></div>
             <div class="inline-edit-actions">
                 <button class="btn small" on:click=move |_| cancel()>{tr().cancel}</button>
                 <button class="btn small primary" disabled=move || busy.get() on:click=move |_| save()>{tr().save}</button>
@@ -2870,16 +2882,9 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     }
 }
 
-/// Field height by its content.
-fn autosize(el: &web_sys::HtmlTextAreaElement) {
-    let style = wasm_bindgen::JsCast::unchecked_ref::<web_sys::HtmlElement>(el).style();
-    let _ = style.set_property("height", "auto");
-    let _ = style.set_property("height", &format!("{}px", el.scroll_height()));
-}
-
 /// Scrolls the message list just enough for the whole in-place editor (text and buttons) to show,
 /// with the gap from `scroll-margin` in the CSS.
-fn reveal_editor(area: &web_sys::HtmlTextAreaElement) {
+fn reveal_editor(area: &web_sys::HtmlElement) {
     if let Ok(Some(editor)) = area.closest(".inline-edit") {
         let opts = web_sys::ScrollIntoViewOptions::new();
         opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
@@ -3168,7 +3173,7 @@ fn render_inline(text: &str, who: &Mentionable, me: Me) -> AnyView {
     parse_inline(text, who)
         .into_iter()
         .map(|p| match p {
-            Inline::Text(t) => view! { <span>{t}</span> }.into_any(),
+            Inline::Text(t) => custom_text(t),
             Inline::Bold(t) => view! { <b>{t}</b> }.into_any(),
             Inline::Italic(t) => view! { <i>{t}</i> }.into_any(),
             Inline::Strike(t) => view! { <s>{t}</s> }.into_any(),
@@ -3207,6 +3212,25 @@ fn render_inline(text: &str, who: &Mentionable, me: Me) -> AnyView {
             // The user is in every public chat that can be mentioned, and in the chat for `@all`.
             Inline::ChannelMention(n) => view! { <span class="mention me group">"@"{n}</span> }.into_any(),
             Inline::MentionAll => view! { <span class="mention me group">"@"{MENTION_ALL}</span> }.into_any(),
+        })
+        .collect_view()
+        .into_any()
+}
+
+/// Plain text with the custom emoji of its `:name:` codes as images.
+fn custom_text(t: String) -> AnyView {
+    let set = crate::custom::current(ctx());
+    let Some(set) = set.filter(|s| !s.emoji.is_empty() && t.contains(':')) else {
+        return view! { <span>{t}</span> }.into_any();
+    };
+    mostik_core::custom_emoji::split(&t, |n| set.by_name(n).is_some())
+        .into_iter()
+        .map(|p| match p {
+            mostik_core::custom_emoji::Piece::Text(x) => view! { <span>{x.to_owned()}</span> }.into_any(),
+            mostik_core::custom_emoji::Piece::Emoji(n) => set
+                .by_name(n)
+                .map(|e| crate::custom::image(e, "custom-emoji").into_any())
+                .unwrap_or_else(|| view! { <span>{format!(":{n}:")}</span> }.into_any()),
         })
         .collect_view()
         .into_any()
@@ -3319,12 +3343,22 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                 {list.into_iter().map(|r| {
                     let m = m.clone();
                     let kind = r.kind;
-                    let title = c.snap.with_untracked(|s| reaction_title(s, &r));
+                    let custom = crate::custom::by_kind(c, &m.chat_id, kind);
+                    let title = c.snap.with_untracked(|s| reaction_title(s, &r, custom.as_ref()));
+                    // Follows the set: it may arrive after the message, and an emoji may be renamed.
+                    let (chat, glyph) = (m.chat_id.clone(), r.emoji.clone());
+                    let glyph = move || match crate::custom::by_kind(c, &chat, kind) {
+                        Some(e) => crate::custom::image(&e, "custom-emoji").into_any(),
+                        None if mostik_core::custom_emoji::is_custom_reaction(kind) => {
+                            view! { <span class="emoji" title=tr().unknown_custom_emoji>"▫️"</span> }.into_any()
+                        }
+                        None => view! { <span class="emoji">{glyph.clone()}</span> }.into_any(),
+                    };
                     view! {
                         <button class=if r.mine { "reaction mine" } else { "reaction" }
                             title=title
                             on:click=move |_| ops::toggle_reaction(c, &m, kind)>
-                            <span class="emoji">{r.emoji}</span>
+                            {glyph}
                             <span class="count">{r.count}</span>
                         </button>
                     }
@@ -3458,7 +3492,7 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
 /// Forwarded message, like a "shared message" in Slack: a bar on the left, author, text and origin.
 /// Reaction tooltip: who reacted, as in Slack. Telemost names only the latest people, so the
 /// rest are counted; with nobody known it falls back to the reaction's name.
-fn reaction_title(s: &Snapshot, r: &Reaction) -> String {
+fn reaction_title(s: &Snapshot, r: &Reaction, custom: Option<&mostik_core::custom_emoji::CustomEmoji>) -> String {
     let names: Vec<String> = r
         .users
         .iter()
@@ -3470,7 +3504,10 @@ fn reaction_title(s: &Snapshot, r: &Reaction) -> String {
         .saturating_sub(u32::from(r.mine))
         .saturating_sub(names.len() as u32);
     if names.is_empty() && !r.mine {
-        return reactions::name(r.kind).unwrap_or("").to_owned();
+        return match custom {
+            Some(e) => mostik_core::custom_emoji::caption(&e.name),
+            None => reactions::name(r.kind).unwrap_or("").to_owned(),
+        };
     }
     tr().reacted(&names, more, r.mine)
 }
@@ -3603,6 +3640,7 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
 #[component]
 fn ReactionPicker(msg: Message) -> impl IntoView {
     let c = ctx();
+    let chat = msg.chat_id.clone();
     let on_pick = Callback::new(move |key: String| {
         c.picker.set(None);
         if let Ok(kind) = key.parse::<u64>() {
@@ -3611,7 +3649,7 @@ fn ReactionPicker(msg: Message) -> impl IntoView {
     });
     view! {
         <crate::emoji::EmojiPicker source=crate::emoji::Source::Reactions anchor=c.picker_at.get_untracked()
-            on_pick=on_pick on_close=Callback::new(move |_| c.picker.set(None))/>
+            custom=crate::custom::for_chat(c, &chat) can_add=c.live on_pick=on_pick on_close=Callback::new(move |_| c.picker.set(None))/>
     }
 }
 
@@ -3660,19 +3698,14 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool) -> impl IntoView {
     }
 }
 
-/// Selection of a textarea as UTF-16 offsets, the units the DOM selection API uses.
-fn selection(area: &web_sys::HtmlTextAreaElement) -> (Option<u32>, Option<u32>) {
-    (
-        area.selection_start().ok().flatten(),
-        area.selection_end().ok().flatten(),
-    )
+/// Selection of the message field as UTF-16 offsets of its text (see [`crate::editor`]).
+fn selection(area: &web_sys::HtmlElement) -> (Option<u32>, Option<u32>) {
+    crate::editor::selection(area)
 }
 
-/// Puts the caret at UTF-16 offset `caret`.
-fn place_caret(area: &web_sys::HtmlTextAreaElement, value: &str, caret: u32) {
-    area.set_value(value);
-    let _ = area.focus();
-    let _ = area.set_selection_range(caret, caret);
+/// Sets the text of the message field and puts the caret at UTF-16 offset `caret`.
+fn place_caret(area: &web_sys::HtmlElement, value: &str, caret: u32) {
+    crate::editor::set_text(area, value, caret, &crate::custom::lookup(ctx()));
 }
 
 /// Byte index in `s` of a UTF-16 offset; a missing or out-of-range offset means the end of the text.
@@ -3731,18 +3764,18 @@ fn emoji_code_before(value: &str, caret: u32) -> Option<String> {
 }
 
 /// Wraps the composer selection in Telemost markup markers.
-fn wrap_selection(area: &web_sys::HtmlTextAreaElement, before: &str, after: &str) -> String {
+fn wrap_selection(area: &web_sys::HtmlElement, before: &str, after: &str) -> String {
     let (start, end) = selection(area);
-    let (value, caret) = wrap_text(&area.value(), start, end, before, after);
+    let (value, caret) = wrap_text(&crate::editor::value(area), start, end, before, after);
     place_caret(area, &value, caret);
     value
 }
 
 /// Inserts `text` in place of the selection (or at the cursor); `drop_before` is how many characters before the cursor to remove
 /// (the typed `:code` when picking a suggestion).
-fn insert_text(area: &web_sys::HtmlTextAreaElement, text: &str, drop_before: usize) -> String {
+fn insert_text(area: &web_sys::HtmlElement, text: &str, drop_before: usize) -> String {
     let (start, end) = selection(area);
-    let (value, caret) = insert_into(&area.value(), start, end, text, drop_before);
+    let (value, caret) = insert_into(&crate::editor::value(area), start, end, text, drop_before);
     place_caret(area, &value, caret);
     value
 }
@@ -3764,9 +3797,9 @@ fn mention_query_before(value: &str, caret: u32) -> Option<String> {
 }
 
 /// `@name` before the cursor, for mention suggestions.
-fn mention_query(area: &web_sys::HtmlTextAreaElement) -> Option<String> {
-    let caret = area.selection_start().ok().flatten()?;
-    mention_query_before(&area.value(), caret)
+fn mention_query(area: &web_sys::HtmlElement) -> Option<String> {
+    let caret = selection(area).0?;
+    mention_query_before(&crate::editor::value(area), caret)
 }
 
 /// What the composer suggests while typing: an emoji after `:` or a mention after `@`.
@@ -3776,6 +3809,8 @@ enum Suggestion {
         glyph: &'static str,
         code: String,
     },
+    /// A custom emoji of the organization: inserted as its `:name:`.
+    Custom(mostik_core::custom_emoji::CustomEmoji),
     Person(User),
     /// Public group chat: mentions its members.
     Channel(String),
@@ -3832,9 +3867,9 @@ fn mention_suggestions(s: &Snapshot, chat: &ChatId, query: &str, limit: usize) -
 }
 
 /// `:code` before the cursor (two characters or more), for emoji suggestions, as in Slack.
-fn emoji_query(area: &web_sys::HtmlTextAreaElement) -> Option<String> {
-    let caret = area.selection_start().ok().flatten()?;
-    emoji_code_before(&area.value(), caret)
+fn emoji_query(area: &web_sys::HtmlElement) -> Option<String> {
+    let caret = selection(area).0?;
+    emoji_code_before(&crate::editor::value(area), caret)
 }
 
 #[component]
@@ -3842,30 +3877,30 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     let c = ctx();
     let (draft, set_draft) = signal(String::new());
     let sending = RwSignal::new(false);
-    let area = NodeRef::<html::Textarea>::new();
+    let area = NodeRef::<html::Div>::new();
     let parent = move || if thread { c.thread.get_untracked() } else { None };
     let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     let suggestions: RwSignal<Vec<Suggestion>> = RwSignal::new(vec![]);
     let suggest_sel = RwSignal::new(0usize);
 
-    // The field grows with the text up to its `max-height`, as in Slack: on every change of the
-    // text (typing, a restored draft, sending, formatting) and of the width, which rewraps the
-    // lines. WebKitGTK has no `field-sizing: content`.
-    let fit = move || {
-        request_animation_frame(move || {
-            if let Some(el) = area.get_untracked() {
-                autosize(&el);
-            }
-        })
-    };
+    // The field shows the draft: a restored draft, a sent message clearing it, formatting. Typing
+    // already shows, so the field is filled again only when its text differs, or when the emoji set
+    // arrives and turns codes into images. The caret stays where it was.
     Effect::new(move |_| {
-        draft.track();
-        c.sidebar_w.track();
-        c.thread_w.track();
-        fit();
+        let text = draft.get();
+        let lookup = crate::custom::lookup(c);
+        let Some(el) = area.get() else { return };
+        let shown = crate::editor::value(&el);
+        if shown == text {
+            crate::editor::tidy(&el, &lookup);
+            return;
+        }
+        let focused = document().active_element().is_some_and(|a| a == **el);
+        crate::editor::render(&el, &text, &lookup);
+        if focused {
+            crate::editor::set_caret(&el, utf16_len(&text));
+        }
     });
-    let resize = window_event_listener(ev::resize, move |_| fit());
-    on_cleanup(move || resize.remove());
 
     // Chat draft: fill it in on opening, save it while typing (main composer only).
     Effect::new(move |_| {
@@ -3957,6 +3992,11 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         code.len().min(emoji_query(&el).map_or(0, |q| q.chars().count())) + 1,
                     )
                 }
+                Suggestion::Custom(e) => {
+                    let code = mostik_core::custom_emoji::caption(&e.name);
+                    crate::emoji::remember(crate::emoji::Source::Text, &code);
+                    insert_text(&el, &code, emoji_query(&el).map_or(0, |q| q.chars().count()) + 1)
+                }
                 Suggestion::Person(_) | Suggestion::Channel(_) | Suggestion::All => {
                     let name = match pick {
                         Suggestion::Person(u) => {
@@ -4007,6 +4047,15 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             "Enter" if (enter_sends() && !ev.shift_key() && !ev.ctrl_key()) || (!enter_sends() && ev.ctrl_key()) => {
                 ev.prevent_default();
                 submit();
+            }
+            // A line break of our own: the browser would put the new line in a block.
+            "Enter" => {
+                ev.prevent_default();
+                if let Some(el) = area.get_untracked() {
+                    let text = insert_text(&el, "\n", 0);
+                    remember(&text);
+                    set_draft.set(text);
+                }
             }
             // ↑ in an empty field edits your last message, as in Slack.
             "ArrowUp" if draft.with_untracked(String::is_empty) => {
@@ -4073,19 +4122,27 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
                     <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>
                 </div>
-                <textarea
+                <div
+                    class="editor"
                     node_ref=area
-                    rows="1"
-                    placeholder=placeholder
-                    prop:value=move || draft.get()
-                    on:input=move |ev| {
-                        let text = event_target_value(&ev);
+                    contenteditable="plaintext-only"
+                    role="textbox"
+                    aria-multiline="true"
+                    data-placeholder=placeholder
+                    on:input=move |_| {
+                        let Some(text) = area.get_untracked().map(|el| crate::editor::tidy(&el, &crate::custom::lookup(c))) else { return };
                         remember(&text);
                         set_draft.set(text);
                         ops::typing(c, c.current.get_untracked());
                         let found = area.get_untracked().map(|el| {
                             if let Some(q) = emoji_query(&el) {
-                                crate::emoji::suggest(&q, 8).into_iter().map(|(glyph, code)| Suggestion::Emoji { glyph, code }).collect()
+                                // Custom emoji first, as in Slack, leaving room for the standard ones.
+                                let standard = crate::emoji::suggest(&q, 8);
+                                let mut found: Vec<Suggestion> = crate::custom::suggest(c, &q, 8).into_iter().map(Suggestion::Custom).collect();
+                                found.truncate(8usize.saturating_sub(standard.len()).max(4));
+                                found.extend(standard.into_iter().map(|(glyph, code)| Suggestion::Emoji { glyph, code }));
+                                found.truncate(8);
+                                found
                             } else if let Some(q) = mention_query(&el) {
                                 let chat = c.current.get_untracked();
                                 c.snap.with_untracked(|s| mention_suggestions(s, &chat, &q, 8))
@@ -4098,13 +4155,17 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     }
                     on:keydown=on_key
                     on:blur=move |_| set_timeout(move || suggestions.set(vec![]), Duration::from_millis(150))
-                ></textarea>
+                ></div>
                 <Show when=move || !suggestions.with(Vec::is_empty)>
                     <div class="emoji-suggest">
                         {move || suggestions.get().into_iter().enumerate().map(|(i, pick)| {
                             let row = match pick {
                                 Suggestion::Emoji { glyph, code } => view! {
                                     <span class="glyph">{glyph}</span><span>{format!(":{code}:")}</span>
+                                }.into_any(),
+                                Suggestion::Custom(e) => view! {
+                                    <span class="glyph">{crate::custom::image(&e, "custom-emoji")}</span>
+                                    <span>{mostik_core::custom_emoji::caption(&e.name)}</span>
                                 }.into_any(),
                                 Suggestion::Person(u) => {
                                     let name = u.display_name.clone();
@@ -4155,6 +4216,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     </button>
                     {move || emoji_at.get().map(|at| view! {
                         <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
+                            custom=crate::custom::for_chat(c, &c.current.get_untracked()) can_add=c.live
                             on_close=Callback::new(move |_| emoji_at.set(None))
                             on_pick=Callback::new(move |glyph: String| {
                                 emoji_at.set(None);
@@ -5547,6 +5609,7 @@ pub enum PrefTab {
     Accessibility,
     Advanced,
     Updates,
+    Emoji,
 }
 
 /// "Preferences" modelled on Slack's Preferences (only what applies to Telemost).
@@ -5563,6 +5626,7 @@ fn PreferencesDialog() -> impl IntoView {
         (PrefTab::MarkRead, I::Check, tr().p_mark_as_read),
         (PrefTab::Accessibility, I::Users, tr().p_accessibility),
         (PrefTab::Advanced, I::Kebab, tr().p_advanced),
+        (PrefTab::Emoji, I::Smile, tr().custom_emoji),
         (PrefTab::Updates, I::Download, tr().p_updates),
     ];
     view! {
@@ -5593,6 +5657,7 @@ fn PreferencesDialog() -> impl IntoView {
                             PrefTab::Accessibility => view! { <PrefAccessibility/> }.into_any(),
                             PrefTab::Advanced => view! { <PrefAdvanced/> }.into_any(),
                             PrefTab::Updates => view! { <PrefUpdates/> }.into_any(),
+                            PrefTab::Emoji => view! { <PrefEmoji/> }.into_any(),
                         }}
                     </section>
                 </div>
@@ -5841,6 +5906,216 @@ fn PrefUpdates() -> impl IntoView {
         <p class="pref-hint">{tr().p_auto_update_hint}</p>
         <h3 class="pref-h">{tr().version(env!("CARGO_PKG_VERSION"))}</h3>
         {status}
+    }
+}
+
+/// Custom emoji of the organization, as in Slack's "Customize workspace": "Add emoji" opens the
+/// same dialog as the emoji picker; your own can be renamed or deleted.
+#[component]
+fn PrefEmoji() -> impl IntoView {
+    let c = ctx();
+    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    // The emoji being renamed (its message time) with the new name, and the one to confirm deleting.
+    let renaming: RwSignal<Option<(Timestamp, String)>> = RwSignal::new(None);
+    let deleting: RwSignal<Option<Timestamp>> = RwSignal::new(None);
+    let done = move |r: Result<Vec<mostik_core::custom_emoji::EmojiSet>, String>| match r {
+        Ok(sets) => {
+            c.custom.set(sets);
+            renaming.set(None);
+            deleting.set(None);
+        }
+        Err(e) => error.set(Some(e)),
+    };
+    let row = move |e: mostik_core::custom_emoji::CustomEmoji, chat: ChatId, taken: bool| {
+        let (me, author) = c.snap.with_untracked(|s| {
+            let author = s
+                .user(&e.owner)
+                .filter(|u| u.has_name())
+                .map_or_else(|| tr().unknown_user.to_owned(), |u| u.display_name.clone());
+            (s.me.clone(), author)
+        });
+        let mine = e.owner == me;
+        let ts = e.ts;
+        let code = mostik_core::custom_emoji::caption(&e.name);
+        let old = e.name.clone();
+        let (chat_r, chat_d) = (chat.clone(), chat);
+        let save = move || {
+            let Some((_, n)) = renaming.get_untracked() else { return };
+            let chat = chat_r.clone();
+            spawn_local(async move { done(bridge::rename_custom_emoji(&chat.0, ts, n.trim()).await) });
+        };
+        let save_click = save.clone();
+        let remove = move |_| {
+            let chat = chat_d.clone();
+            spawn_local(async move { done(bridge::delete_custom_emoji(&chat.0, ts).await) });
+        };
+        let actions = mine.then(|| view! {
+            <span class="emoji-actions">
+                {move || match (renaming.get().is_some_and(|(t, _)| t == ts), deleting.get() == Some(ts)) {
+                    (true, _) => {
+                        let save = save_click.clone();
+                        view! {
+                            <button class="btn small" on:click=move |_| renaming.set(None)>{tr().cancel}</button>
+                            <button class="btn primary small" on:click=move |_| save()>{tr().save}</button>
+                        }.into_any()
+                    }
+                    (_, true) => {
+                        let remove = remove.clone();
+                        view! {
+                            <button class="btn small" on:click=move |_| deleting.set(None)>{tr().cancel}</button>
+                            <button class="btn danger small" on:click=remove>{tr().delete}</button>
+                        }.into_any()
+                    }
+                    _ => {
+                        let old = old.clone();
+                        view! {
+                            <button class="btn small" on:click=move |_| { deleting.set(None); renaming.set(Some((ts, old.clone()))) }>{tr().emoji_rename}</button>
+                            <button class="btn small" on:click=move |_| { renaming.set(None); deleting.set(Some(ts)) }>{tr().delete}</button>
+                        }.into_any()
+                    }
+                }}
+            </span>
+        });
+        let label = move || match renaming.get().filter(|(t, _)| *t == ts) {
+            Some((_, n)) => {
+                let save = save.clone();
+                view! {
+                    <input class="text-input emoji-name-input" prop:value=n
+                        on:input=move |ev| renaming.set(Some((ts, event_target_value(&ev))))
+                        on:keydown=move |ev: ev::KeyboardEvent| if ev.key() == "Enter" { ev.prevent_default(); save() }/>
+                }
+                .into_any()
+            }
+            None => view! { <span class="emoji-code">{code.clone()}</span> }.into_any(),
+        };
+        view! {
+            <div class="emoji-row">
+                {crate::custom::image(&e, "emoji-preview")}
+                <span class="emoji-label">
+                    {label}
+                    <span class="emoji-author">{format!("{} {author}", tr().emoji_author)}</span>
+                    {taken.then(|| view! { <span class="emoji-taken">{tr().emoji_taken}</span> })}
+                </span>
+                {actions}
+            </div>
+        }
+    };
+    let list = move || {
+        let me = c.snap.with(|s| s.me.clone());
+        match crate::custom::current(c) {
+            Some(set) if !set.emoji.is_empty() || set.taken.iter().any(|e| e.owner == me) => {
+                let chat = set.chat_id.clone();
+                let taken: Vec<_> = set.taken.into_iter().filter(|e| e.owner == me).collect();
+                // Your own first, newest on top; then the others', newest on top.
+                let mut emoji = set.emoji;
+                emoji.sort_by_key(|e| (e.owner != me, std::cmp::Reverse(e.ts)));
+                view! {
+                    <div class="emoji-list">
+                        {taken.into_iter().map(|e| row(e, chat.clone(), true)).collect_view()}
+                        {emoji.into_iter().map(|e| row(e, chat.clone(), false)).collect_view()}
+                    </div>
+                }
+                .into_any()
+            }
+            _ => view! { <p class="pref-hint flush">{tr().no_custom_emoji}</p> }.into_any(),
+        }
+    };
+    view! {
+        <h3>{tr().custom_emoji}</h3>
+        <p class="pref-hint flush">{tr().custom_emoji_hint}</p>
+        {(!c.live).then(|| view! { <p class="pref-error">{tr().emoji_offline}</p> })}
+        <div class="pref-actions">
+            <button class="btn primary small" disabled=!c.live on:click=move |_| c.adding_emoji.set(true)>{tr().add_emoji}</button>
+        </div>
+        {move || error.get().map(|e| view! { <p class="pref-error">{e}</p> })}
+        {list}
+    }
+}
+
+/// "Add custom emoji", as in Slack: opened by "Add emoji" at the bottom of the emoji picker.
+/// The emoji goes to the organization's service chat and shows up in the picker's custom section.
+#[component]
+fn AddEmojiDialog() -> impl IntoView {
+    let c = ctx();
+    let file: RwSignal<Option<bridge::PendingFile>> = RwSignal::new(None);
+    let name = RwSignal::new(String::new());
+    let busy = RwSignal::new(false);
+    let error: RwSignal<Option<String>> = RwSignal::new(None);
+    let close = move || c.adding_emoji.set(false);
+    let pick = move |_| {
+        spawn_local(async move {
+            match bridge::pick_emoji_image().await {
+                Ok(Some(f)) => {
+                    if name.with_untracked(|n| n.trim().is_empty()) {
+                        name.set(mostik_core::custom_emoji::name_from_file(&f.name));
+                    }
+                    file.set(Some(f));
+                    error.set(None);
+                }
+                Ok(None) => {}
+                Err(e) => error.set(Some(e)),
+            }
+        });
+    };
+    let save = move || {
+        if !c.live {
+            return error.set(Some(tr().emoji_offline.into()));
+        }
+        let Some(f) = file.get_untracked() else { return };
+        let n = name.get_untracked().trim().trim_matches(':').to_owned();
+        let org = current_org(c).map(|o| o.id);
+        busy.set(true);
+        error.set(None);
+        spawn_local(async move {
+            match bridge::add_custom_emoji(&f.path, &n, org).await {
+                Ok(sets) => {
+                    c.custom.set(sets);
+                    close();
+                }
+                Err(e) => error.set(Some(e)),
+            }
+            busy.set(false);
+        });
+    };
+    let ready =
+        move || !busy.get() && file.with(Option::is_some) && name.with(|n| !n.trim().trim_matches(':').is_empty());
+    view! {
+        <div class="modal-backdrop" on:click=move |_| close()>
+            <div class="modal add-emoji" on:click=|ev| ev.stop_propagation()>
+                <header>
+                    <h2>{tr().add_emoji_title}</h2>
+                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+                </header>
+                <p class="muted">{tr().custom_emoji_hint}</p>
+                <label class="field-label">{tr().emoji_upload_step}</label>
+                <div class="add-emoji-upload">
+                    <div class="add-emoji-preview">
+                        {move || file.get().map(|f| view! { <img src=bridge::local_file_url(&f.path) alt=""/> })}
+                    </div>
+                    <div>
+                        <p class="muted">{tr().emoji_image_hint}</p>
+                        <button class="btn small" disabled=move || busy.get() on:click=pick>
+                            {move || if file.with(Option::is_some) { tr().emoji_change_image } else { tr().emoji_choose_image }}
+                        </button>
+                    </div>
+                </div>
+                <label class="field-label">{tr().emoji_name_step}</label>
+                <div class="name-input"><span>":"</span>
+                    <input class="text-input bare" placeholder=tr().emoji_name_ph maxlength="40" prop:value=move || name.get()
+                        on:input=move |e| name.set(event_target_value(&e))
+                        on:keydown=move |e: ev::KeyboardEvent| if e.key() == "Enter" && ready() { e.prevent_default(); save() }/>
+                    <span>":"</span>
+                </div>
+                <p class="muted">{tr().emoji_name_hint}</p>
+                {move || error.get().map(|e| view! { <p class="dialog-error">{e}</p> })}
+                <div class="modal-actions">
+                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                    <button class="btn primary" disabled=move || !ready() on:click=move |_| save()>
+                        {move || if busy.get() { tr().emoji_adding } else { tr().save }}
+                    </button>
+                </div>
+            </div>
+        </div>
     }
 }
 

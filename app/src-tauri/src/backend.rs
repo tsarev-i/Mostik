@@ -28,6 +28,8 @@ use tokio::sync::Mutex;
 
 use crate::{call, login, store};
 
+pub mod service;
+
 /// UA of the embedded WebKitGTK; the unofficial client label is appended to it.
 const WEBVIEW_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15";
@@ -104,6 +106,12 @@ struct Shared {
     /// Replies in threads of unknown standing that wait for the list to be fetched again, to
     /// notify about the ones the user turns out to follow.
     thread_wait: Vec<(Message, Option<User>)>,
+    /// Mostik service chats (see [`service`]): their events never reach the UI.
+    service: BTreeSet<String>,
+    /// The service chats of the chat list, for the sync after the connection.
+    service_chats: Vec<service::ServiceChat>,
+    /// The user's organizations.
+    orgs: Vec<u64>,
 }
 
 /// In-memory attachment cache: showing an image again does not hit the network.
@@ -232,6 +240,7 @@ pub struct AppState {
     reconnecting: AtomicBool,
     heartbeat_running: AtomicBool,
     diag_events: Arc<AtomicUsize>,
+    pub service: service::State,
 }
 
 async fn live(state: &AppState) -> Result<Arc<Live>, String> {
@@ -573,6 +582,22 @@ pub async fn serve_file(app: &AppHandle, path: &str, query: Option<&str>) -> Res
     if id.is_empty() || id.contains("..") {
         return Err("bad file identifier".into());
     }
+    if let Some(emoji) = id.strip_prefix("emoji/") {
+        return service::serve(app, emoji).await;
+    }
+    // A preview of a file the user picked (the image of a new custom emoji); no other files.
+    if let Some(path) = id.strip_prefix("local/") {
+        let state = app.state::<AppState>();
+        if !state.allowed_files.lock().is_ok_and(|a| a.contains(path)) {
+            return Err("not a picked file".into());
+        }
+        let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+        let kind = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_owned();
+        return Ok((bytes, kind));
+    }
     let size = query
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("size=")))
         .filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
@@ -841,6 +866,7 @@ async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar, signed_in: b
             let live = Arc::new(live);
             *state.live.lock().await = Some(live.clone());
             start_heartbeat(app);
+            service::start(app.clone(), live.clone());
             Ok(Boot::Ready { snapshot })
         }
         Err(ConnectError::Unauthorized) => {
@@ -892,8 +918,9 @@ pub async fn followed_threads(app: AppHandle, state: tauri::State<'_, AppState>)
 
 /// Parses the followed threads and records them as the ones whose replies notify.
 fn remember_threads(live: &Live, v: &Value) -> (Vec<mostik_core::FollowedThread>, Vec<User>) {
-    let (threads, users) = convert::followed_threads(v, Some(&live.me));
+    let (mut threads, users) = convert::followed_threads(v, Some(&live.me));
     if let Ok(mut sh) = live.shared.lock() {
+        threads.retain(|t| !sh.service.contains(&t.parent.chat_id.0));
         sh.followed = threads
             .iter()
             .map(|t| (t.parent.chat_id.0.clone(), t.parent.ts))
@@ -1031,6 +1058,9 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             let Some(ev) = convert::from_push(&body, me.as_ref()) else {
                 return;
             };
+            if service::swallows(app, shared, &ev) {
+                return;
+            }
             if let LiveEvent::Status(p) = &ev
                 && me.as_ref() == Some(&p.user)
                 && let Ok(mut sh) = shared.lock()
@@ -1108,6 +1138,15 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
             }
             _ => tokio::time::sleep(Duration::from_millis(500)).await,
         }
+    }
+    if let Some((chat, _)) = &fetched
+        && service::is_service_chat(chat)
+    {
+        if let Ok(mut sh) = shared.lock() {
+            sh.pending.remove(&chat_id);
+        }
+        service::adopt(&app, &shared, chat);
+        return;
     }
     let held = {
         let Ok(mut sh) = shared.lock() else { return };
@@ -2028,6 +2067,7 @@ pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<
         .into_iter()
         .flatten()
         .filter_map(|c| rpc_chat(c, &live.me))
+        .filter(|c| !service::is_service_chat(c))
         .collect())
 }
 
@@ -2414,7 +2454,10 @@ async fn reconnect_loop(app: AppHandle) {
         let mut probe = json!({});
         match connect_inner(&app, &state, jar, &mut probe).await {
             Ok((snapshot, live)) => {
-                *state.live.lock().await = Some(Arc::new(live));
+                let live = Arc::new(live);
+                *state.live.lock().await = Some(live.clone());
+                // Changes to the service chat made while offline.
+                service::start(app.clone(), live);
                 let _ = app.emit(EVENT, &LiveEvent::Connection { online: true });
                 let _ = app.emit(SNAPSHOT_EVENT, &snapshot);
                 break;
@@ -2556,6 +2599,12 @@ async fn connect_inner(
         .to_owned();
 
     let mut data = convert::from_history(&list, Some(&me_id));
+    let service_chats = if me_id.0 == "me" {
+        vec![]
+    } else {
+        service::detect(app, &mut web, &list, &me_id).await
+    };
+    probe["service_chats"] = json!(service_chats.len());
     // The chat with oneself, as in Slack: create it if it does not exist yet (the call is idempotent).
     let notes_id = convert::notes_chat_id(&me_id);
     if me_id.0 != "me" && !data.chats.iter().any(|c| c.id == notes_id) {
@@ -2621,8 +2670,12 @@ async fn connect_inner(
         }
         Err(e) => probe["buckets"] = err_json(e),
     }
+    let service_chats = service::hide(&mut snapshot, service_chats);
     if let Ok(mut sh) = shared.lock() {
         sh.me = Some(me_id.clone());
+        sh.service = service_chats.iter().map(|s| s.id.clone()).collect();
+        sh.service_chats = service_chats;
+        sh.orgs = snapshot.organizations.iter().map(|o| o.id).collect();
         // Pushes that arrived while connecting may already be newer than the history.
         for (chat, (ts, seq)) in last {
             let entry = sh.last.entry(chat).or_default();

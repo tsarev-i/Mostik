@@ -61,10 +61,20 @@ until then Noto Sans is used.
 - A mention of yourself is highlighted with a background and a bar on the left; "important" gets a green label
   (the counterpart of "Saved" in Slack).
 - Enter sends, Shift+Enter inserts a line break.
+- The message field is a plain-text `contenteditable` block rather than a textarea, so custom emoji show
+  as images while its text keeps them as `:name:`. Custom emoji are added with "Add emoji" at the bottom
+  of the emoji picker, as in Slack, or in Preferences → Custom emoji, which also lists them and renames or
+  deletes your own; in the picker an own one is deleted with a right click.
 
 ## Differences from Slack dictated by Telemost
 
-- Reactions come only from the Telemost set, no custom emoji.
+- Telemost has no custom emoji, so Mostik clients share them through the service chat `mostik-shared` of
+  an organization: a public group marked `mostik:shared:v1` in its description, which Mostik hides, mutes
+  and keeps read. One emoji is one image message there with the caption `:name:`; only its author can rename
+  or delete it, and anything else in the chat is ignored. Texts carry them as `:name:`; a custom reaction is a
+  Telemost reaction of Mostik's own type (`0x4D000000` + the message number), since Telemost stores any
+  32-bit type. The official client shows the text and an empty reaction.
+- Telemost keeps one reaction per person on a message: a new one replaces the previous one.
 - Markup: bold, italic, strikethrough, underline, code, links and code blocks. Lists and quotes are not supported.
 - A call opens in its own window, like a huddle: the Telemost meeting page, titled "Call · #channel", with
   the current call shown at the bottom of the sidebar (where, and "Leave") and the header call button

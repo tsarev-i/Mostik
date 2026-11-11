@@ -29,6 +29,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 futures-util = "0.3"
 imagesize = "0.13"
+# Custom emoji: still images are scaled down to 128 px and posted as PNG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "windows-native"] }
 mime_guess = "2"
 mostik-core.workspace = true

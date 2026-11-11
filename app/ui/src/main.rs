@@ -2,6 +2,8 @@
 
 mod app;
 mod bridge;
+mod custom;
+mod editor;
 mod emoji;
 mod folders;
 mod hidden;

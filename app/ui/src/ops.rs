@@ -1402,6 +1402,14 @@ pub fn subscribe(c: Ctx) {
             reconnected(c, snapshot)
         })
         .await;
+        bridge::listen(
+            bridge::EMOJI_EVENT,
+            move |sets: Vec<mostik_core::custom_emoji::EmojiSet>| c.custom.set(sets),
+        )
+        .await;
+        if let Ok(sets) = bridge::custom_emoji().await {
+            c.custom.set(sets);
+        }
         bridge::listen(bridge::UPDATE_EVENT, move |status: bridge::UpdateStatus| {
             c.update.set(status)
         })
