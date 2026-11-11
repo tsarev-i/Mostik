@@ -3,6 +3,7 @@
 mod app;
 mod bridge;
 mod emoji;
+mod folders;
 mod hidden;
 mod i18n;
 mod icons;

@@ -11,7 +11,7 @@ use mostik_core::*;
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
 use crate::settings::{ColorMode, NotifyMode, Settings, SidebarFilter, SidebarSort, THEME_SWATCHES, THEMES};
-use crate::{bridge, hidden, ops, order, time};
+use crate::{bridge, folders, hidden, ops, order, time};
 
 /// Window state shared by all components.
 #[derive(Clone, Copy)]
@@ -105,6 +105,20 @@ pub struct Ctx {
     pub deleted: RwSignal<HashSet<(ChatId, Timestamp)>>,
     /// Chats hidden from the sidebar with "×", kept between runs.
     pub hidden: RwSignal<hidden::Hidden>,
+    /// Own sidebar sections, kept between runs.
+    pub folders: RwSignal<folders::Folders>,
+    /// The sidebar sections: the Telemost ones with the folders.
+    pub sections: Memo<Vec<Section>>,
+    /// The "New section" / "Rename section" dialog.
+    pub folder_edit: RwSignal<Option<FolderEdit>>,
+}
+
+/// What the section name dialog does.
+#[derive(Clone, PartialEq)]
+pub enum FolderEdit {
+    /// Creates a section, moving the chat into it.
+    New(Option<ChatId>),
+    Rename(String),
 }
 
 /// A sidebar chat held with the mouse button.
@@ -116,10 +130,18 @@ pub struct ChatDrag {
     pub from: (f64, f64),
     /// The pointer moved far enough: it is a drag, not a click.
     pub active: bool,
-    /// Drop place: next to this chat, after it with `true`.
-    pub target: Option<(ChatId, bool)>,
+    /// Where the chat would go.
+    pub target: Option<DropAt>,
     /// Already dropped: the click that follows the button release must not open the chat.
     pub dropped: bool,
+}
+
+/// Drop place of a dragged chat: a section and, among its rows, next to this chat (after it with
+/// `true`); an empty section has no rows.
+#[derive(Clone, PartialEq)]
+pub struct DropAt {
+    pub section: String,
+    pub anchor: Option<(ChatId, bool)>,
 }
 
 /// Open right-click menu: the point that was clicked and what for.
@@ -315,6 +337,7 @@ fn empty_snapshot() -> Snapshot {
 pub fn App() -> impl IntoView {
     let live = bridge::available();
     let snap = RwSignal::new(empty_snapshot());
+    let folder_list = RwSignal::new(folders::load());
     let c = Ctx {
         snap,
         current: RwSignal::new(ChatId(String::new())),
@@ -382,6 +405,9 @@ pub fn App() -> impl IntoView {
         picked: RwSignal::new(Default::default()),
         deleted: RwSignal::new(Default::default()),
         hidden: RwSignal::new(hidden::load()),
+        folders: folder_list,
+        sections: Memo::new(move |_| snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f)))),
+        folder_edit: RwSignal::new(None),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -425,6 +451,7 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| c.drafts.with(save_drafts));
     Effect::new(move |_| c.chat_order.with(order::save));
     Effect::new(move |_| c.hidden.with(hidden::save));
+    Effect::new(move |_| c.folders.with(folders::save));
     // A hidden chat that got something new is an ordinary chat again.
     Effect::new(move |_| {
         if c.hidden.with(|h| h.is_empty()) {
@@ -578,6 +605,8 @@ pub fn App() -> impl IntoView {
             c.confirm_delete.set(None);
         } else if c.confirm_leave.with_untracked(Option::is_some) {
             c.confirm_leave.set(None);
+        } else if c.folder_edit.with_untracked(Option::is_some) {
+            c.folder_edit.set(None);
         } else if c.browsing.get_untracked() {
             c.browsing.set(false);
         } else if c.forwarding.with_untracked(Option::is_some) {
@@ -662,6 +691,7 @@ pub fn App() -> impl IntoView {
             <DeleteDialog/>
         </Show>
         {move || c.confirm_leave.get().map(|id| view! { <LeaveDialog id=id/> })}
+        {move || c.folder_edit.get().map(|edit| view! { <FolderDialog edit=edit/> })}
         // Toasts stack at the bottom instead of covering each other.
         <div class="toasts">
             {move || c.error.get().map(|e| view! {
@@ -842,24 +872,39 @@ fn user_menu_items(c: Ctx, id: UserId) -> impl IntoView {
 /// Section header right-click menu: mark all read, collapse or expand sections.
 fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
     let unread = c
-        .snap
-        .with_untracked(|s| {
-            s.sections.iter().find(|sec| sec.id == id).map(|sec| {
-                sec.chats
-                    .iter()
-                    .filter(|ch| s.chat(ch).is_some_and(|ch| ch.unread > 0))
-                    .cloned()
-                    .collect::<Vec<_>>()
+        .sections
+        .with_untracked(|list| {
+            list.iter().find(|sec| sec.id == id).map(|sec| {
+                c.snap.with_untracked(|s| {
+                    sec.chats
+                        .iter()
+                        .filter(|ch| s.chat(ch).is_some_and(|ch| ch.unread > 0))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
             })
         })
         .unwrap_or_default();
     let all: Vec<String> = c
-        .snap
-        .with_untracked(|s| s.sections.iter().map(|sec| sec.id.clone()).collect());
+        .sections
+        .with_untracked(|list| list.iter().map(|sec| sec.id.clone()).collect());
     let collapsed = c.collapsed.with_untracked(|set| set.contains(&id));
     let toggle_id = id.clone();
     let custom = c.settings.with_untracked(|s| s.sidebar_sort == SidebarSort::Custom)
         && c.chat_order.with_untracked(|o| o.contains_key(&id));
+    // An own section can be renamed and deleted: its chats go back to their sections.
+    let folder = folders::is_folder(&id).then(|| {
+        let (rename_id, delete_id) = (id.clone(), id.clone());
+        view! {
+            <div class="menu-sep"></div>
+            <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::Rename(rename_id.clone()))); }>{tr().rename_section}</button>
+            <button class="danger" on:click=move |_| {
+                close_menus(c);
+                c.folders.update(|f| f.retain(|f| f.id != delete_id));
+                c.collapsed.update(|set| { set.remove(&delete_id); });
+            }>{tr().delete_section}</button>
+        }
+    });
     let reset = custom.then(|| {
         let id = id.clone();
         view! {
@@ -881,6 +926,9 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
         <button on:click=move |_| { close_menus(c); c.collapsed.set(all.iter().cloned().collect()); }>{tr().collapse_all}</button>
         <button on:click=move |_| { close_menus(c); c.collapsed.set(HashSet::new()); }>{tr().expand_all}</button>
         {reset.map(|r| view! { <div class="menu-sep"></div>{r} })}
+        <div class="menu-sep"></div>
+        <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::New(None))); }>{tr().create_section}</button>
+        {folder}
     }
 }
 
@@ -1050,6 +1098,7 @@ fn sidebar_menu_items(c: Ctx) -> impl IntoView {
         } else {
             view! { <button on:click=move |_| pick(|s| s.hide_muted = true)>{tr().hide_muted}</button> }.into_any()
         }}
+        <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::New(None))); }>{tr().create_section}</button>
     }
 }
 
@@ -1073,6 +1122,7 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
     let (leave_id, star_id, mute_id, read_id, open_id, hide_id) =
         (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
     let notes = kind == ChatKind::Notes;
+    let move_to = (!notes).then(|| move_to_section_items(c, id.clone()));
     let copy = move |_| {
         close_menus(c);
         let _ = window().navigator().clipboard().write_text(&title);
@@ -1106,6 +1156,7 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
         <button on:click=move |_| { close_menus(c); ops::toggle_star(c, star_id.clone()); }>
             {if starred { tr().unstar } else { tr().star }}
         </button>
+        {move_to}
         {(!notes).then(|| view! {
             <button on:click=move |_| { close_menus(c); ops::hide_chat(c, hide_id.clone()); }>{tr().hide_chat}</button>
         })}
@@ -1129,6 +1180,63 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
         })}
     }
     .into_any()
+}
+
+/// "Move to section" submenu of a chat: its own Telemost section, the folders and a new one.
+fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
+    let sub_open = RwSignal::new(false);
+    let home = c
+        .snap
+        .with_untracked(|s| s.chat(&id).map(folders::home_section))
+        .unwrap_or("channels");
+    let (list, current) = c.folders.with_untracked(|f| {
+        (
+            f.iter().map(|f| (f.id.clone(), f.name.clone())).collect::<Vec<_>>(),
+            folders::folder_of(f, &id).map(|f| f.id.clone()),
+        )
+    });
+    let item = {
+        let id = id.clone();
+        move |to: Option<String>, label: String| {
+            let on = to == current;
+            let id = id.clone();
+            view! {
+                <button class="menu-radio" on:click=move |_| {
+                    close_menus(c);
+                    c.folders.update(|f| folders::move_chat(f, &id, to.as_deref(), None));
+                }>
+                    <span class="menu-tick">{on.then(|| view! { <Icon icon=I::Check size=14/> })}</span>
+                    <span>{label}</span>
+                </button>
+            }
+        }
+    };
+    let targets: Vec<(Option<String>, String)> = std::iter::once((None, tr().section(home, "")))
+        .chain(list.into_iter().map(|(fid, name)| (Some(fid), name)))
+        .collect();
+    let items = move || {
+        targets
+            .iter()
+            .map(|(to, label)| item(to.clone(), label.clone()))
+            .collect_view()
+    };
+    view! {
+        <div class="me-sub" on:mouseenter=move |_| sub_open.set(true) on:mouseleave=move |_| sub_open.set(false)>
+            <button class="me-sub-btn" on:click=move |_| sub_open.update(|v| *v = !*v)>
+                <span>{tr().move_to_section}</span><Icon icon=I::ChevronRight size=14/>
+            </button>
+            <Show when=move || sub_open.get()>
+                <div class="me-submenu">
+                    {items.clone()}
+                    <div class="menu-sep"></div>
+                    <button on:click={
+                        let id = id.clone();
+                        move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::New(Some(id.clone())))); }
+                    }>{tr().new_section_item}</button>
+                </div>
+            </Show>
+        </div>
+    }
 }
 
 /// Search result row.
@@ -1856,8 +1964,8 @@ fn Sidebar() -> impl IntoView {
                     </button>
                 </div>
                 <For
-                    each=move || c.snap.with(|s| s.sections.clone())
-                    key=|sec| (sec.id.clone(), sec.chats.clone())
+                    each=move || c.sections.get()
+                    key=|sec| (sec.id.clone(), sec.title.clone(), sec.chats.clone())
                     children=move |sec: Section| view! { <SidebarSection section=sec/> }
                 />
             </div>
@@ -1945,13 +2053,24 @@ fn SidebarSection(section: Section) -> impl IntoView {
             })
         })
     };
-    let always = section_id == "channels" || section_id == "dms";
+    let always = section_id == "channels" || section_id == "dms" || folders::is_folder(&section_id);
+    // An empty section, or one whose chats are elsewhere in the list, takes a dragged chat whole.
+    let drop_into = {
+        let id = section_id.clone();
+        Memo::new(move |_| {
+            c.chat_drag.with(|d| {
+                d.as_ref().is_some_and(|d| {
+                    d.active && !d.dropped && d.target.as_ref().is_some_and(|t| t.section == id && t.anchor.is_none())
+                })
+            })
+        })
+    };
     let empty = Memo::new(move |_| visible.with(Vec::is_empty));
     move || {
         (always || !empty.get()).then(|| {
         let section_id = section_id.clone();
         view! {
-            <div class="sb-section" data-section=section_id.clone()>
+            <div class="sb-section" class:drop-into=move || drop_into.get() data-section=section_id.clone()>
                 <div class="sb-section-head">
                 <button class="sb-section-title" on:click=toggle.clone() on:contextmenu={
                     let id = section.id.clone();
@@ -2017,6 +2136,18 @@ fn SidebarSection(section: Section) -> impl IntoView {
 /// unless the user dragged them; chats new to a custom order go on top (in "Starred", at the bottom).
 fn section_order(c: Ctx, s: &Snapshot, section_id: &str, chats: &[ChatId]) -> Vec<ChatId> {
     let starred = section_id == "starred";
+    // A folder keeps its own order in place of the custom one.
+    if folders::is_folder(section_id) {
+        let mut list = chats.to_vec();
+        match c.settings.with(|st| st.sidebar_sort) {
+            SidebarSort::Alphabetical => {
+                list.sort_by_cached_key(|id| s.chat(id).map(|ch| chat_title(s, ch).to_lowercase()))
+            }
+            SidebarSort::Recency => list.sort_by_key(|id| std::cmp::Reverse(s.chat(id).map_or(0, |ch| ch.last_ts))),
+            SidebarSort::Custom => {}
+        }
+        return list;
+    }
     match c.settings.with(|st| st.sidebar_sort) {
         SidebarSort::Alphabetical if !starred => {
             let mut list = chats.to_vec();
@@ -2033,29 +2164,56 @@ fn section_order(c: Ctx, s: &Snapshot, section_id: &str, chats: &[ChatId]) -> Ve
     }
 }
 
-/// Where a dragged chat would land: next to the row under the pointer, before or after it.
-fn drop_target(section: &str, y: f64) -> Option<(ChatId, bool)> {
-    let rows = document()
-        .query_selector_all(&format!(".sb-section[data-section=\"{section}\"] .sb-row[data-chat]"))
+/// Whether a chat dragged out of its section may be dropped into section `to`: its own section
+/// (a new place there), a folder, or from a folder back to the Telemost section of its kind.
+/// "Starred" is Telemost's own and neither takes nor gives chats.
+fn accepts(c: Ctx, d: &ChatDrag, to: &str) -> bool {
+    if to == d.section {
+        return true;
+    }
+    if d.section == "starred" || to == "starred" {
+        return false;
+    }
+    folders::is_folder(to)
+        || (folders::is_folder(&d.section)
+            && c.snap.with_untracked(|s| s.chat(&d.chat).map(folders::home_section)) == Some(to))
+}
+
+/// Where a dragged chat would land: the section under the pointer and, among its rows, next to
+/// the row under the pointer, before or after it. Back to its Telemost section it goes whole:
+/// the place there is up to that section's order.
+fn drop_target(c: Ctx, d: &ChatDrag, y: f64) -> Option<DropAt> {
+    let as_element = |n: web_sys::Node| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(n).ok();
+    let sections = document()
+        .query_selector_all(".sb-scroll .sb-section[data-section]")
         .ok()?;
-    let mut last = None;
-    for i in 0..rows.length() {
-        let Some(el) = rows
-            .item(i)
-            .and_then(|n| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(n).ok())
-        else {
-            continue;
-        };
+    let el = (0..sections.length())
+        .filter_map(|i| sections.item(i).and_then(as_element))
+        .find(|el| {
+            let r = el.get_bounding_client_rect();
+            y >= r.top() && y < r.bottom()
+        })?;
+    let section = el.get_attribute("data-section")?;
+    if !accepts(c, d, &section) {
+        return None;
+    }
+    if section != d.section && !folders::is_folder(&section) {
+        return Some(DropAt { section, anchor: None });
+    }
+    let rows = el.query_selector_all(".sb-row[data-chat]").ok()?;
+    let mut anchor = None;
+    for el in (0..rows.length()).filter_map(|i| rows.item(i).and_then(as_element)) {
         let Some(id) = el.get_attribute("data-chat").map(ChatId) else {
             continue;
         };
         let r = el.get_bounding_client_rect();
         if y < r.top() + r.height() / 2.0 {
-            return Some((id, false));
+            anchor = Some((id, false));
+            break;
         }
-        last = Some(id);
+        anchor = Some((id, true));
     }
-    last.map(|id| (id, true))
+    Some(DropAt { section, anchor })
 }
 
 /// Pointer move with a sidebar chat held: starts the drag after a few pixels, then tracks the drop place
@@ -2081,7 +2239,7 @@ fn chat_drag_to(c: Ctx, e: &ev::MouseEvent) {
             el.set_scroll_top(el.scroll_top() + 12);
         }
     }
-    let target = drop_target(&d.section, y);
+    let target = drop_target(c, &d, y);
     if !d.active || d.target != target {
         c.chat_drag.set(Some(ChatDrag {
             active: true,
@@ -2106,13 +2264,22 @@ fn chat_drop(c: Ctx) {
         ..d.clone()
     }));
     set_timeout(move || c.chat_drag.set(None), Duration::ZERO);
-    let Some((anchor, after)) = d.target else { return };
+    let Some(DropAt { section: to, anchor }) = d.target else {
+        return;
+    };
+    // Into a folder, or out of one back home.
+    if to != d.section {
+        let into = folders::is_folder(&to).then_some(to.as_str());
+        let anchor = anchor.as_ref().map(|(id, after)| (id, *after));
+        c.folders.update(|f| folders::move_chat(f, &d.chat, into, anchor));
+        return;
+    }
+    let Some((anchor, after)) = anchor else { return };
     let current = untrack(|| {
-        c.snap.with(|s| {
-            s.sections
-                .iter()
+        c.sections.with(|list| {
+            list.iter()
                 .find(|sec| sec.id == d.section)
-                .map(|sec| section_order(c, s, &sec.id, &sec.chats))
+                .map(|sec| c.snap.with(|s| section_order(c, s, &sec.id, &sec.chats)))
         })
     });
     let Some(current) = current else { return };
@@ -2125,26 +2292,37 @@ fn chat_drop(c: Ctx) {
     let switching = c.settings.with_untracked(|s| s.sidebar_sort != SidebarSort::Custom);
     let shown: Vec<(String, Vec<ChatId>, bool)> = if switching {
         untrack(|| {
-            c.snap.with(|s| {
-                s.sections
-                    .iter()
-                    .filter(|sec| sec.id != d.section)
-                    .map(|sec| {
-                        let order = section_order(c, s, &sec.id, &sec.chats);
-                        // Without a saved order the custom one is the Telemost order, `sec.chats`.
-                        let telemost = order == sec.chats;
-                        (sec.id.clone(), order, telemost)
-                    })
-                    .collect()
+            c.sections.with(|list| {
+                c.snap.with(|s| {
+                    list.iter()
+                        .filter(|sec| sec.id != d.section)
+                        .map(|sec| {
+                            let order = section_order(c, s, &sec.id, &sec.chats);
+                            // Without a saved order the custom one is the Telemost order, `sec.chats`.
+                            let telemost = order == sec.chats;
+                            (sec.id.clone(), order, telemost)
+                        })
+                        .collect()
+                })
             })
         })
     } else {
         Vec::new()
     };
+    // A folder's order is its own list; the Telemost sections keep theirs in `chat_order`.
+    let (in_folders, in_sections): (Vec<_>, Vec<_>) = std::iter::once((d.section.clone(), moved, false))
+        .chain(shown)
+        .partition(|(id, _, _)| folders::is_folder(id));
+    if !in_folders.is_empty() {
+        c.folders.update(|f| {
+            for (id, order, _) in &in_folders {
+                folders::reorder(f, id, order);
+            }
+        });
+    }
     c.chat_order.update(|o| {
-        o.insert(d.section, moved);
-        for (id, order, telemost) in shown {
-            if telemost {
+        for (id, order, telemost) in in_sections {
+            if telemost && id != d.section {
                 o.remove(&id);
             } else {
                 o.insert(id, order);
@@ -2229,7 +2407,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                     if d.chat == id {
                         " dragging"
                     } else {
-                        match &d.target {
+                        match d.target.as_ref().and_then(|t| t.anchor.as_ref()) {
                             Some((t, false)) if t == &id => " drop-before",
                             Some((t, true)) if t == &id => " drop-after",
                             _ => "",
@@ -5757,6 +5935,84 @@ fn LeaveDialog(id: ChatId) -> impl IntoView {
                 <div class="modal-actions">
                     <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
                     <button class="btn danger" on:click=confirm>{tr().leave_channel}</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+/// "New section" / "Rename section": the name of an own sidebar section.
+#[component]
+fn FolderDialog(edit: FolderEdit) -> impl IntoView {
+    let c = ctx();
+    let close = move || c.folder_edit.set(None);
+    let renaming = matches!(edit, FolderEdit::Rename(_));
+    let initial = match &edit {
+        FolderEdit::Rename(id) => c
+            .folders
+            .with_untracked(|f| f.iter().find(|f| &f.id == id).map(|f| f.name.clone()))
+            .unwrap_or_default(),
+        FolderEdit::New(_) => String::new(),
+    };
+    let name = RwSignal::new(initial);
+    let field = NodeRef::<html::Input>::new();
+    Effect::new(move |_| {
+        if let Some(el) = field.get() {
+            // Once the value is in: the old name is selected, ready to be typed over.
+            set_timeout(
+                move || {
+                    let _ = el.focus();
+                    el.select();
+                },
+                Duration::ZERO,
+            );
+        }
+    });
+    let submit = move || {
+        let text = name.get_untracked().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        close();
+        match edit.clone() {
+            FolderEdit::Rename(id) => c.folders.update(|f| {
+                if let Some(f) = f.iter_mut().find(|f| f.id == id) {
+                    f.name = text;
+                }
+            }),
+            FolderEdit::New(chat) => c.folders.update(|f| {
+                let id = folders::new_id(f, js_sys::Date::now() as u64);
+                f.push(folders::Folder {
+                    id: id.clone(),
+                    name: text,
+                    chats: vec![],
+                });
+                if let Some(chat) = chat {
+                    folders::move_chat(f, &chat, Some(&id), None);
+                }
+            }),
+        }
+    };
+    let on_enter = submit.clone();
+    view! {
+        <div class="modal-backdrop" on:click=move |_| close()>
+            <div class="modal" on:click=|ev| ev.stop_propagation()>
+                <header><h2>{if renaming { tr().rename_section } else { tr().new_section_title }}</h2></header>
+                <label class="field-label">{tr().section_name}</label>
+                <input class="text-input" node_ref=field maxlength="80" placeholder=tr().section_name_ph
+                    prop:value=move || name.get()
+                    on:input=move |e| name.set(event_target_value(&e))
+                    on:keydown=move |e: ev::KeyboardEvent| {
+                        if e.key() == "Enter" {
+                            e.prevent_default();
+                            on_enter();
+                        }
+                    }/>
+                <div class="modal-actions">
+                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                    <button class="btn primary" disabled=move || name.with(|n| n.trim().is_empty()) on:click=move |_| submit()>
+                        {if renaming { tr().save } else { tr().create }}
+                    </button>
                 </div>
             </div>
         </div>
