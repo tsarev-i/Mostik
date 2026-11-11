@@ -568,6 +568,48 @@ pub fn profiles(v: &Value) -> Vec<UserProfile> {
         .collect()
 }
 
+/// Own GUID from the chat list of a `history` response, for when `whoami` has failed: the chat
+/// with oneself (`<me>_<me>`), otherwise the only GUID that every direct chat shares.
+pub fn own_guid(history: &Value) -> Option<UserId> {
+    let pairs: Vec<(&str, &str)> = history
+        .get("Chats")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| s(c, &["ChatId"]))
+        .filter(|id| !id.contains('/'))
+        .filter_map(|id| id.split_once('_'))
+        .filter(|(a, b)| !a.is_empty() && !b.is_empty())
+        .collect();
+    if let Some((a, _)) = pairs.iter().find(|(a, b)| a == b) {
+        return Some(UserId((*a).to_owned()));
+    }
+    let (a, b) = *pairs.first()?;
+    let shared: Vec<&str> = [a, b]
+        .into_iter()
+        .filter(|g| pairs.iter().all(|(x, y)| x == g || y == g))
+        .collect();
+    match shared[..] {
+        [g] => Some(UserId(g.to_owned())),
+        _ => None,
+    }
+}
+
+/// A `whoami`-shaped answer built from one's own directory profile, for when `whoami` has failed.
+pub fn whoami_from_profile(me: &UserId, profile: Option<&UserProfile>) -> Value {
+    let mut info = serde_json::json!({ "Guid": me.0 });
+    if let Some(p) = profile {
+        info["DisplayName"] = Value::from(p.display_name.as_str());
+        if let Some(a) = &p.avatar {
+            info["AvatarId"] = Value::from(a.as_str());
+        }
+        if let Some(o) = &p.organization {
+            info["OrganizationInfos"] = serde_json::json!([{ "OrganizationName": o }]);
+        }
+    }
+    serde_json::json!({ "UserInfo": info })
+}
+
 /// Members from the `get_chat_members` response: the same records as `get_users_data`, plus `role`.
 pub fn members(v: &Value) -> Vec<ChatMember> {
     let roles: BTreeMap<String, String> = v
@@ -662,6 +704,41 @@ pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn own_guid_from_the_notes_chat_or_the_shared_member() {
+        let chats = |ids: &[&str]| json!({ "Chats": ids.iter().map(|id| json!({ "ChatId": id })).collect::<Vec<_>>() });
+        let me = Some(UserId("me".into()));
+        assert_eq!(own_guid(&chats(&["0/0/g", "a_me", "me_me"])), me);
+        assert_eq!(own_guid(&chats(&["a_me", "me_b", "0/0/g"])), me);
+        // One direct chat says nothing about which side is ours.
+        assert_eq!(own_guid(&chats(&["a_me", "0/0/g"])), None);
+        assert_eq!(own_guid(&chats(&["0/0/g"])), None);
+    }
+
+    #[test]
+    fn whoami_from_the_directory_profile() {
+        let me = UserId("me".into());
+        let profile = UserProfile {
+            id: me.clone(),
+            display_name: "Ivan".into(),
+            email: None,
+            position: None,
+            department: None,
+            organization: Some("Org".into()),
+            nickname: None,
+            avatar: Some("1/abc".into()),
+        };
+        let who = whoami_from_profile(&me, Some(&profile));
+        assert_eq!(who.pointer("/UserInfo/Guid"), Some(&json!("me")));
+        assert_eq!(who.pointer("/UserInfo/DisplayName"), Some(&json!("Ivan")));
+        assert_eq!(who.pointer("/UserInfo/AvatarId"), Some(&json!("1/abc")));
+        assert_eq!(
+            who.pointer("/UserInfo/OrganizationInfos/0/OrganizationName"),
+            Some(&json!("Org"))
+        );
+        assert_eq!(whoami_from_profile(&me, None), json!({ "UserInfo": { "Guid": "me" } }));
+    }
 
     #[test]
     fn kinds_by_id() {
