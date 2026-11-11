@@ -1742,7 +1742,9 @@ button.ws-tile { cursor: pointer; }
 .rail-badge { position: absolute; top: -6px; right: -10px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #cd2553; color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; }
 /* “Browse channels”. */
 .browse-modal { width: min(640px, 92vw); }
-.browse-modal header .btn { margin-left: auto; margin-right: 8px; }
+/* As in Slack: the title, "Create a channel" and "×" in one row, the search field below it. */
+.browse-modal header { gap: 8px; margin-bottom: 16px; }
+.browse-modal header .btn { margin-left: auto; height: 32px; padding: 0 12px; font-size: 14px; }
 .browse-list { margin-top: 12px; max-height: 60vh; overflow-y: auto; }
 .browse-row { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--border); }
 .browse-icon { width: 20px; display: grid; place-items: center; color: var(--text-muted); }
