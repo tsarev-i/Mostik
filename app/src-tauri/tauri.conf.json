@@ -39,5 +39,16 @@
       "icons/icon.png",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEyQjhDMTZGQzJEMTE2QTgKUldTb0Z0SENiOEc0RW1Id2J6MDM5K3BMeEp4WEpTT2k1aTdSK2sxVXlpUFhjMHFnV2tIbjZ0VTgK",
+      "endpoints": [
+        "https://github.com/tsarev-i/Mostik/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

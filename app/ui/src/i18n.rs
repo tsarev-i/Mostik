@@ -186,6 +186,14 @@ pub struct Tr {
     pub preferences: &'static str,
     // About
     pub about_title: &'static str,
+    pub update_button: &'static str,
+    pub p_updates: &'static str,
+    pub p_auto_update: &'static str,
+    pub p_auto_update_hint: &'static str,
+    pub update_unsupported: &'static str,
+    pub up_to_date: &'static str,
+    pub check_updates: &'static str,
+    pub checking_updates: &'static str,
     pub about_bold: &'static str,
     pub about_trademarks: &'static str,
     pub about_protocol: &'static str,
@@ -493,6 +501,14 @@ pub static RU: Tr = Tr {
     active: "В сети",
     preferences: "Настройки",
     about_title: "О Мостике",
+    update_button: "Обновить",
+    p_updates: "Обновления",
+    p_auto_update: "Проверять обновления автоматически",
+    p_auto_update_hint: "Мостик проверяет релизы на GitHub при запуске и раз в 4 часа и показывает кнопку «Обновить» в верхней панели. Без вашего клика ничего не устанавливается.",
+    update_unsupported: "Обновлять себя умеют только AppImage и версия, установленная установщиком для Windows.",
+    up_to_date: "У вас последняя версия.",
+    check_updates: "Проверить обновления",
+    checking_updates: "Проверяем…",
     about_bold: "Мостик — неофициальный клиент Яндекс Телемоста.",
     about_trademarks: "Приложение не создано, не поддерживается и не одобрено ООО «Яндекс». «Яндекс» и «Телемост» — товарные знаки их правообладателя.",
     about_protocol: "Мостик работает с вашей учётной записью через тот же протокол, что и веб-клиент Телемоста. Пароль вы вводите только на странице Яндекс ID, приложение его не видит.",
@@ -802,6 +818,14 @@ pub static EN: Tr = Tr {
     active: "Active",
     preferences: "Preferences",
     about_title: "About Mostik",
+    update_button: "Update",
+    p_updates: "Updates",
+    p_auto_update: "Check for updates automatically",
+    p_auto_update_hint: "Mostik checks GitHub releases at startup and every 4 hours and shows an Update button in the top bar. Nothing is installed until you click it.",
+    update_unsupported: "Only the AppImage and the version installed with the Windows setup can update themselves.",
+    up_to_date: "You are on the latest version.",
+    check_updates: "Check for updates",
+    checking_updates: "Checking…",
     about_bold: "Mostik is an unofficial Yandex Telemost client.",
     about_trademarks: "The app is not made, supported or endorsed by Yandex LLC. “Yandex” and “Telemost” are trademarks of their owner.",
     about_protocol: "Mostik works with your account through the same protocol as the Telemost web client. You enter your password only on the Yandex ID page; the app never sees it.",
@@ -1122,6 +1146,26 @@ impl Tr {
         match self.lang {
             Lang::Ru => format!("Выйти из «{org}»"),
             Lang::En => format!("Sign out of {org}"),
+        }
+    }
+
+    /// The "Update" button tooltip and the line above it in Preferences.
+    pub fn update_available(&self, v: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Доступна новая версия {v}. Мостик установит её и перезапустится."),
+            Lang::En => format!("Version {v} is available. Mostik will install it and restart."),
+        }
+    }
+
+    /// The "Update" button while the new version downloads and installs.
+    pub fn updating(&self, percent: Option<u8>) -> String {
+        let word = match self.lang {
+            Lang::Ru => "Обновление",
+            Lang::En => "Updating",
+        };
+        match percent {
+            Some(p) => format!("{word} {p}%"),
+            None => format!("{word}…"),
         }
     }
 

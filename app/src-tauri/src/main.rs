@@ -5,6 +5,7 @@
 mod backend;
 mod login;
 mod store;
+mod update;
 mod webview;
 
 use tauri::menu::{Menu, MenuItem};
@@ -69,7 +70,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(backend::AppState::default())
+        .manage(update::UpdateState::default())
         .register_asynchronous_uri_scheme_protocol("mostikfile", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let path = request.uri().path().to_owned();
@@ -104,6 +107,7 @@ fn main() {
             if let Some(main) = app.get_webview_window("main") {
                 webview::harden(&main);
             }
+            update::start(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -147,6 +151,10 @@ fn main() {
             backend::send_files,
             backend::presence,
             backend::set_status,
+            update::update_status,
+            update::install_update,
+            update::set_auto_update,
+            update::check_update,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Mostik");

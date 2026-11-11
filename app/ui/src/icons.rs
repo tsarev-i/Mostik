@@ -44,6 +44,7 @@ pub enum I {
     CodeBlock,
     X,
     Gear,
+    Download,
 }
 
 fn paths(i: I) -> &'static str {
@@ -124,6 +125,9 @@ fn paths(i: I) -> &'static str {
             r#"<path d="m10 9-3 3 3 3"/><path d="m14 15 3-3-3-3"/><rect x="3" y="3" width="18" height="18" rx="2"/>"#
         }
         I::X => r#"<path d="M18 6 6 18"/><path d="m6 6 12 12"/>"#,
+        I::Download => {
+            r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>"#
+        }
     }
 }
 

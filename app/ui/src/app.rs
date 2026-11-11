@@ -21,6 +21,8 @@ pub struct Ctx {
     pub thread: RwSignal<Option<Timestamp>>,
     pub collapsed: RwSignal<HashSet<String>>,
     pub about: RwSignal<bool>,
+    /// New version of Mostik: the "Update" button in the top bar.
+    pub update: RwSignal<bridge::UpdateStatus>,
     /// `true` means data from Telemost (in Tauri), `false` means demo data in a browser.
     pub live: bool,
     pub phase: RwSignal<Phase>,
@@ -296,6 +298,7 @@ pub fn App() -> impl IntoView {
         thread: RwSignal::new(None),
         collapsed: RwSignal::new(HashSet::new()),
         about: RwSignal::new(false),
+        update: RwSignal::new(bridge::UpdateStatus::None),
         live,
         phase: RwSignal::new(Phase::Loading(tr().connecting)),
         online: RwSignal::new(true),
@@ -361,6 +364,7 @@ pub fn App() -> impl IntoView {
         if c.live {
             spawn_local(async move {
                 let _ = bridge::set_preferences(&st).await;
+                let _ = bridge::set_auto_update(st.auto_update).await;
             });
         }
     });
@@ -1185,11 +1189,43 @@ fn TopBar() -> impl IntoView {
                 </Show>
             </div>
             <div class="topbar-right">
+                <UpdateButton/>
                 <button class="tb-btn" title=tr().about on:click=move |_| c.about.set(true)>
                     <Icon icon=I::Help/>
                 </button>
             </div>
         </header>
+    }
+}
+
+/// "Update" in the top bar, as in Slack: shown when a new release is out; a click installs it
+/// and restarts the app.
+#[component]
+fn UpdateButton() -> impl IntoView {
+    let c = ctx();
+    move || {
+        match c.update.get() {
+        _ if !c.settings.with(|s| s.auto_update) => None,
+        bridge::UpdateStatus::None | bridge::UpdateStatus::Unsupported => None,
+        bridge::UpdateStatus::Available { version } => Some(
+            view! {
+                <button class="update-btn" title=tr().update_available(&version) on:click=move |_| ops::install_update(c)>
+                    <Icon icon=I::Download size=15/>
+                    {tr().update_button}
+                </button>
+            }
+            .into_any(),
+        ),
+        bridge::UpdateStatus::Installing { version, percent } => Some(
+            view! {
+                <button class="update-btn" disabled=true title=tr().update_available(&version)>
+                    <span class="update-spinner"></span>
+                    {tr().updating(percent)}
+                </button>
+            }
+            .into_any(),
+        ),
+    }
     }
 }
 
@@ -4469,6 +4505,7 @@ pub enum PrefTab {
     Home,
     Accessibility,
     Advanced,
+    Updates,
 }
 
 /// "Preferences" modelled on Slack's Preferences (only what applies to Telemost).
@@ -4485,6 +4522,7 @@ fn PreferencesDialog() -> impl IntoView {
         (PrefTab::MarkRead, I::Check, tr().p_mark_as_read),
         (PrefTab::Accessibility, I::Users, tr().p_accessibility),
         (PrefTab::Advanced, I::Kebab, tr().p_advanced),
+        (PrefTab::Updates, I::Download, tr().p_updates),
     ];
     view! {
         <div class="modal-backdrop" on:click=move |_| c.prefs.set(false)>
@@ -4513,6 +4551,7 @@ fn PreferencesDialog() -> impl IntoView {
                             PrefTab::MarkRead => view! { <PrefMarkRead/> }.into_any(),
                             PrefTab::Accessibility => view! { <PrefAccessibility/> }.into_any(),
                             PrefTab::Advanced => view! { <PrefAdvanced/> }.into_any(),
+                            PrefTab::Updates => view! { <PrefUpdates/> }.into_any(),
                         }}
                     </section>
                 </div>
@@ -4694,6 +4733,73 @@ fn PrefMarkRead() -> impl IntoView {
         <h3>{tr().p_when_view}</h3>
         {radio(c, "read", tr().p_read_on_open, true, g, set)}
         {radio(c, "read", tr().p_leave_unread, false, g, set)}
+    }
+}
+
+/// "Updates": the background check switch, the installed version, a manual check and the install.
+#[component]
+fn PrefUpdates() -> impl IntoView {
+    let c = ctx();
+    // Result of the last manual check: `Some(Ok)` is "up to date", `Some(Err)` the error text.
+    let checked: RwSignal<Option<Result<(), String>>> = RwSignal::new(None);
+    let checking = RwSignal::new(false);
+    let check = move |_| {
+        checking.set(true);
+        checked.set(None);
+        spawn_local(async move {
+            let result = bridge::check_update().await;
+            checking.set(false);
+            match result {
+                Ok(status) => {
+                    c.update.set(status);
+                    checked.set(Some(Ok(())));
+                }
+                Err(e) => checked.set(Some(Err(e))),
+            }
+        });
+    };
+    let status = move || {
+        let status = if c.live {
+            c.update.get()
+        } else {
+            bridge::UpdateStatus::Unsupported
+        };
+        match status {
+            bridge::UpdateStatus::Unsupported => view! { <p class="pref-hint flush">{tr().update_unsupported}</p> }.into_any(),
+            bridge::UpdateStatus::Available { version } => view! {
+                <p>{tr().update_available(&version)}</p>
+                <div class="pref-actions">
+                    <button class="btn primary small" on:click=move |_| ops::install_update(c)>{tr().update_button}</button>
+                </div>
+            }
+            .into_any(),
+            bridge::UpdateStatus::Installing { percent, .. } => view! {
+                <div class="pref-actions">
+                    <button class="btn primary small" disabled=true>{tr().updating(percent)}</button>
+                </div>
+            }
+            .into_any(),
+            bridge::UpdateStatus::None => view! {
+                {move || match checked.get() {
+                    Some(Ok(())) => Some(view! { <p>{tr().up_to_date}</p> }.into_any()),
+                    Some(Err(e)) => Some(view! { <p class="pref-error">{e}</p> }.into_any()),
+                    None => None,
+                }}
+                <div class="pref-actions">
+                    <button class="btn small" disabled=move || checking.get() on:click=check>
+                        {move || if checking.get() { tr().checking_updates } else { tr().check_updates }}
+                    </button>
+                </div>
+            }
+            .into_any(),
+        }
+    };
+    view! {
+        <h3>{tr().p_updates}</h3>
+        {checkbox(c, tr().p_auto_update, |s| s.auto_update, |s, v| s.auto_update = v)}
+        <p class="pref-hint">{tr().p_auto_update_hint}</p>
+        <h3 class="pref-h">{tr().version(env!("CARGO_PKG_VERSION"))}</h3>
+        {status}
     }
 }
 

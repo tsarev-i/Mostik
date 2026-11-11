@@ -92,6 +92,24 @@ pub const EVENT: &str = "mostik://event";
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 /// The session expired while the app was running: show the login screen with this reason.
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
+/// A new [`UpdateStatus`]: an update was found or is being installed.
+pub const UPDATE_EVENT: &str = "mostik://update";
+
+/// Mirror of the backend `update::UpdateStatus`.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UpdateStatus {
+    #[default]
+    None,
+    Unsupported,
+    Available {
+        version: String,
+    },
+    Installing {
+        version: String,
+        percent: Option<u8>,
+    },
+}
 
 #[derive(Serialize)]
 struct NoArgs {}
@@ -164,6 +182,29 @@ pub async fn login() -> Result<Boot, String> {
 
 pub async fn logout() -> Result<(), String> {
     call("logout", NoArgs {}).await
+}
+
+pub async fn update_status() -> Result<UpdateStatus, String> {
+    call("update_status", NoArgs {}).await
+}
+
+#[derive(Serialize)]
+struct AutoUpdateArgs {
+    enabled: bool,
+}
+
+pub async fn set_auto_update(enabled: bool) -> Result<(), String> {
+    call("set_auto_update", AutoUpdateArgs { enabled }).await
+}
+
+/// Checks for a new version now.
+pub async fn check_update() -> Result<UpdateStatus, String> {
+    call("check_update", NoArgs {}).await
+}
+
+/// Installs the found update and restarts the app; returns only on failure.
+pub async fn install_update() -> Result<(), String> {
+    call("install_update", NoArgs {}).await
 }
 
 pub async fn history(

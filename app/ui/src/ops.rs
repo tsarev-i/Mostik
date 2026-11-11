@@ -856,6 +856,23 @@ pub fn subscribe(c: Ctx) {
             open_chat(c, current);
         })
         .await;
+        bridge::listen(bridge::UPDATE_EVENT, move |status: bridge::UpdateStatus| {
+            c.update.set(status)
+        })
+        .await;
+        // The first check may have finished before the subscription.
+        if let Ok(status) = bridge::update_status().await {
+            c.update.set(status);
+        }
+    });
+}
+
+/// Installs the available update; the app restarts on success, so only an error comes back.
+pub fn install_update(c: Ctx) {
+    spawn_local(async move {
+        if let Err(e) = bridge::install_update().await {
+            c.error.set(Some(e));
+        }
     });
 }
 
