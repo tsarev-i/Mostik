@@ -61,7 +61,7 @@ pub struct Settings {
     pub theme: String,
     pub notify: NotifyMode,
     pub notify_preview: bool,
-    /// Notification sound: `chime`, `drop`, `knock` or `none`.
+    /// Notification sound, one of [`mostik_core::NOTIFICATION_SOUNDS`].
     pub sound: String,
     pub inline_media: bool,
     pub clock24: bool,
@@ -119,10 +119,15 @@ fn storage() -> Option<web_sys::Storage> {
 
 impl Settings {
     pub fn load() -> Self {
-        storage()
+        let mut s: Self = storage()
             .and_then(|s| s.get_item(KEY).ok().flatten())
             .and_then(|v| serde_json::from_str(&v).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A sound an older version offered and this one does not.
+        if !mostik_core::NOTIFICATION_SOUNDS.contains(&s.sound.as_str()) {
+            s.sound = Self::default().sound;
+        }
+        s
     }
 
     pub fn save(&self) {

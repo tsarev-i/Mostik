@@ -326,7 +326,6 @@ pub struct Tr {
     pub for_your_org: &'static str,
     pub status_presets: [(&'static str, &'static str); 5],
     pub p_sound: &'static str,
-    pub sound_names: [&'static str; 4],
     pub attach: &'static str,
     pub only_in_app_files: &'static str,
     pub remove_file: &'static str,
@@ -659,7 +658,6 @@ pub static RU: Tr = Tr {
         ("🏡", "Работаю из дома"),
     ],
     p_sound: "Звук уведомления",
-    sound_names: ["Колокольчик", "Капля", "Тук-тук", "Без звука"],
     attach: "Прикрепить файл",
     only_in_app_files: "Отправка файлов работает только в приложении",
     remove_file: "Убрать файл",
@@ -992,7 +990,6 @@ pub static EN: Tr = Tr {
         ("🏡", "Working remotely"),
     ],
     p_sound: "Notification sound",
-    sound_names: ["Chime", "Drop", "Knock", "None"],
     attach: "Attach a file",
     only_in_app_files: "Sending files works only in the desktop app",
     remove_file: "Remove file",
@@ -1067,6 +1064,24 @@ impl Tr {
             _ => fallback,
         }
         .to_owned()
+    }
+
+    /// Name of a notification sound by its id.
+    pub fn sound_name(&self, id: &str) -> &'static str {
+        let (ru, en) = match id {
+            "chime" => ("Перезвон", "Chime"),
+            "bell" => ("Колокольчик", "Bell"),
+            "marimba" => ("Маримба", "Marimba"),
+            "drop" => ("Капля", "Drop"),
+            "pop" => ("Пузырёк", "Pop"),
+            "knock" => ("Тук-тук", "Knock"),
+            "glass" => ("Стекло", "Glass"),
+            _ => ("Без звука", "None"),
+        };
+        match self.lang {
+            Lang::Ru => ru,
+            Lang::En => en,
+        }
     }
 
     pub fn notify_level(&self, level: NotifyLevel) -> &'static str {

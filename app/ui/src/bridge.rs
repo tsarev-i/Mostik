@@ -393,10 +393,11 @@ pub fn file_url(file_id: &str, size: Option<&str>) -> String {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PrefsArgs {
+struct PrefsArgs<'a> {
     notify: &'static str,
     preview: bool,
     lang: &'static str,
+    sound: &'a str,
 }
 
 /// Passes to the backend what affects notifications and the tray.
@@ -413,9 +414,20 @@ pub async fn set_preferences(s: &crate::settings::Settings) -> Result<(), String
             notify,
             preview: s.notify_preview,
             lang: s.lang.code(),
+            sound: &s.sound,
         },
     )
     .await
+}
+
+#[derive(Serialize)]
+struct SoundArgs<'a> {
+    id: &'a str,
+}
+
+/// Plays a notification sound (the backend plays them).
+pub async fn play_sound(id: &str) -> Result<(), String> {
+    call("play_sound", SoundArgs { id }).await
 }
 
 #[derive(Serialize)]
@@ -558,7 +570,6 @@ pub struct PendingFile {
 
 pub const FILES_EVENT: &str = "mostik://files";
 /// The backend showed a notification: play the sound.
-pub const SOUND_EVENT: &str = "mostik://sound";
 /// The user clicked a message notification: open that message.
 pub const OPEN_EVENT: &str = "mostik://open";
 

@@ -9,6 +9,7 @@ mod call;
 #[cfg(target_os = "linux")]
 mod cdp;
 mod login;
+mod sound;
 mod store;
 mod update;
 mod webview;
@@ -176,6 +177,7 @@ fn main() {
             backend::open_yandex_id,
             backend::save_file,
             backend::test_notification,
+            backend::play_sound,
             backend::followed_threads,
             backend::mark_thread_read,
             backend::set_preferences,

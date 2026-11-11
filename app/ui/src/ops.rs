@@ -1067,6 +1067,15 @@ fn split_message_link(url: &str) -> Option<(&str, Timestamp)> {
     Some((chat, ts.trim_end_matches('/').parse().ok()?))
 }
 
+/// Plays a notification sound; the demo in a browser stays silent.
+pub fn play_sound(c: Ctx, id: String) {
+    if c.live {
+        spawn_local(async move {
+            let _ = bridge::play_sound(&id).await;
+        });
+    }
+}
+
 /// What a chat notifies about: everything, mentions only or nothing.
 pub fn set_notify_level(c: Ctx, id: ChatId, level: NotifyLevel) {
     spawn_local(async move {
@@ -1290,10 +1299,6 @@ pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
 pub fn subscribe(c: Ctx) {
     spawn_local(async move {
         bridge::listen(bridge::EVENT, move |ev: LiveEvent| handle_event(c, ev)).await;
-        bridge::listen(bridge::SOUND_EVENT, move |_: serde_json::Value| {
-            crate::sound::play(&c.settings.with_untracked(|s| s.sound.clone()));
-        })
-        .await;
         bridge::listen(bridge::OPEN_EVENT, move |t: bridge::OpenTarget| {
             jump_to_message(c, t.chat_id, t.ts, t.thread_parent);
         })

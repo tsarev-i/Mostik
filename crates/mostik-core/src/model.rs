@@ -417,6 +417,10 @@ impl ThreadSummary {
     }
 }
 
+/// Notification sounds the preferences offer, in their order there; `none` is silence.
+/// The desktop app has a file for each of the others (rendered by `scripts/sounds.py`).
+pub const NOTIFICATION_SOUNDS: [&str; 8] = ["chime", "bell", "marimba", "drop", "pop", "knock", "glass", "none"];
+
 /// What a chat notifies about, as in Slack: everything, mentions only or nothing. Telemost
 /// keeps it in the `chat_mutings` bucket as `{mute, mute_mentions}`; its web client only
 /// switches `mute`, which here is "mentions only".

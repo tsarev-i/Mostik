@@ -153,6 +153,8 @@ pub struct Prefs {
     pub notify: String,
     pub preview: bool,
     pub english: bool,
+    /// Notification sound, one of [`mostik_core::NOTIFICATION_SOUNDS`].
+    pub sound: String,
 }
 
 impl Default for Prefs {
@@ -163,6 +165,7 @@ impl Default for Prefs {
         Self {
             notify: "all".into(),
             preview: true,
+            sound: "chime".into(),
             english,
         }
     }
@@ -1215,8 +1218,13 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
     if let Err(e) = builder.show() {
         eprintln!("notification not shown: {e}");
     }
-    // The UI plays the sound (the one chosen in the preferences).
-    let _ = app.emit("mostik://sound", ());
+    crate::sound::play(&prefs.sound);
+}
+
+/// Plays a notification sound: the preview in the preferences.
+#[tauri::command]
+pub fn play_sound(id: String) {
+    crate::sound::play(&id);
 }
 
 /// A person's profile for the "Profile" panel.
@@ -2174,13 +2182,21 @@ pub fn set_zoom(app: AppHandle, scale: f64) -> Result<(), String> {
 
 /// Settings from the UI that the backend needs: notifications, previews and language.
 #[tauri::command]
-pub fn set_preferences(app: AppHandle, state: tauri::State<'_, AppState>, notify: String, preview: bool, lang: String) {
+pub fn set_preferences(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    notify: String,
+    preview: bool,
+    lang: String,
+    sound: Option<String>,
+) {
     let english = lang == "en";
     if let Ok(mut p) = state.prefs.lock() {
         *p = Prefs {
             notify,
             preview,
             english,
+            sound: sound.unwrap_or_else(|| p.sound.clone()),
         };
     }
     if let Some(items) = app.try_state::<TrayItems>() {

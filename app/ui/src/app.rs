@@ -5156,7 +5156,7 @@ fn PrefNotifications() -> impl IntoView {
         if !c.live {
             return c.error.set(Some(tr().only_in_app_notifications.into()));
         }
-        crate::sound::play(&c.settings.with_untracked(|s| s.sound.clone()));
+        ops::play_sound(c, c.settings.with_untracked(|s| s.sound.clone()));
         spawn_local(async move {
             if let Err(e) = bridge::test_notification().await {
                 c.error.set(Some(e));
@@ -5175,11 +5175,11 @@ fn PrefNotifications() -> impl IntoView {
         <h3 class="pref-h">{tr().p_sound}</h3>
         <select class="pref-select" on:change=move |e| {
             let v = event_target_value(&e);
-            crate::sound::play(&v);
+            ops::play_sound(c, v.clone());
             c.settings.update(|s| s.sound = v);
         }>
-            {crate::sound::SOUNDS.into_iter().enumerate().map(|(i, id)| view! {
-                <option value=id selected=move || c.settings.with(|s| s.sound == id)>{tr().sound_names[i]}</option>
+            {mostik_core::NOTIFICATION_SOUNDS.into_iter().map(|id| view! {
+                <option value=id selected=move || c.settings.with(|s| s.sound == id)>{tr().sound_name(id)}</option>
             }).collect_view()}
         </select>
         <p class="pref-hint">{tr().p_notify_explain}</p>
