@@ -257,21 +257,44 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
     }))
 }
 
-/// Telemost's system message about a call in the chat:
-/// `SystemMessage{ChatId, MeetingStartedMessage | MeetingEndedMessage: {MeetingId}}`,
-/// where `MeetingId` is the meeting link. The author is whoever started or ended the call.
+/// Telemost's note about a call in the chat:
+/// - `SystemMessage{ChatId, MeetingStartedMessage | MeetingEndedMessage: {MeetingId}}` for a
+///   group call, `PersonalMeetingEndedMessage: {MeetingId, CallType, Reason}` for a direct one;
+///   the author is whoever started or ended the call;
+/// - `MeetingCallingMessage{IncomingCall: {MeetingInfo: {ChatId, MeetingId, CreateTimestamp}}}`:
+///   a direct call ringing. It repeats every 5 s while the call rings and history never has it;
+///   all repeats become one note at the meeting's creation time, without a sequence number.
 fn call_note(sm: &Value) -> Option<Message> {
-    let sys = sm.pointer("/ClientMessage/SystemMessage")?;
+    #[derive(Clone, Copy)]
+    enum Kind {
+        Started,
+        Ringing,
+        Ended,
+    }
     let info = &sm["ServerMessageInfo"];
-    let (started, meeting) = match (sys.get("MeetingStartedMessage"), sys.get("MeetingEndedMessage")) {
-        (Some(m), _) => (true, m),
-        (None, Some(m)) => (false, m),
-        (None, None) => return None,
+    let (chat, ts, kind, meeting) = if let Some(sys) = sm.pointer("/ClientMessage/SystemMessage") {
+        let (kind, meeting) = [
+            ("MeetingStartedMessage", Kind::Started),
+            ("PersonalMeetingStartedMessage", Kind::Started),
+            ("MeetingEndedMessage", Kind::Ended),
+            ("PersonalMeetingEndedMessage", Kind::Ended),
+        ]
+        .into_iter()
+        .find_map(|(name, kind)| sys.get(name).map(|m| (kind, m)))?;
+        (s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, kind, meeting)
+    } else {
+        let meeting = sm.pointer("/ClientMessage/MeetingCallingMessage/IncomingCall/MeetingInfo")?;
+        (
+            s(meeting, &["ChatId"])?,
+            n(meeting, &["CreateTimestamp"])?,
+            Kind::Ringing,
+            meeting,
+        )
     };
     let url = meeting_url(s(meeting, &["MeetingId"])?);
     Some(Message {
-        chat_id: ChatId(s(sys, &["ChatId"])?.to_owned()),
-        ts: n(info, &["Timestamp"])?,
+        chat_id: ChatId(chat.to_owned()),
+        ts,
         author: UserId(s(info, &["From", "Guid"]).unwrap_or_default().to_owned()),
         text: String::new(),
         thread_parent: None,
@@ -282,12 +305,19 @@ fn call_note(sm: &Value) -> Option<Message> {
         seq_no: n(info, &["SeqNo"]).unwrap_or(0),
         attachments: vec![],
         forwarded: vec![],
-        call: Some(if started {
-            CallNote::Started { url }
-        } else {
-            CallNote::Ended { url }
+        call: Some(match kind {
+            Kind::Started => CallNote::Started { url },
+            Kind::Ringing => CallNote::Ringing { url },
+            Kind::Ended => CallNote::Ended { url },
         }),
     })
+}
+
+/// Whether the push repeats a notification already sent (`IsSilent`), like the ringing of a call
+/// every 5 s: it updates the state but must not notify again.
+pub fn is_silent(body: &Value) -> bool {
+    let sm = body.get("ServerMessage").unwrap_or(body);
+    sm.pointer("/ClientMessage/IsSilent").and_then(Value::as_bool) == Some(true)
 }
 
 /// A meeting link from a `MeetingId`, which is either the link itself or the bare meeting number.
@@ -1058,6 +1088,48 @@ mod tests {
         let joined = json!({"ClientMessage": {"SystemMessage": {"ChatId": "0/0/abc", "UserAction": 0}},
             "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 8}});
         assert_eq!(from_push(&joined, None), None);
+    }
+
+    #[test]
+    fn direct_calls_are_call_notes() {
+        let chat = "aa_bb";
+        let url = "https://telemost.360.yandex.ru/j/42";
+        // The ringing repeats every 5 s with `IsSilent`; every repeat is the same note.
+        let ring = |silent: bool, sent: u64| {
+            json!({"ClientMessage": {"IsSilent": silent, "MeetingCallingMessage": {
+                    "IncomingCall": {"CallSettings": {"Mic": true}, "MeetingInfo": {"ChatId": chat,
+                        "CreateTimestamp": 100, "MeetingId": url, "Version": 1}},
+                    "RingingId": "r1"}, "NotificationBehaviour": 2},
+                "ServerMessageInfo": {"From": {"DisplayName": "Boris", "Guid": "bb"}, "Timestamp": sent}})
+        };
+        for (silent, sent) in [(false, 150), (true, 5_000_150)] {
+            assert_eq!(is_silent(&ring(silent, sent)), silent);
+            match from_push(&ring(silent, sent), Some(&UserId("aa".into()))) {
+                Some(LiveEvent::Upsert { message, author, .. }) => {
+                    assert_eq!(message.chat_id, ChatId(chat.into()));
+                    assert_eq!((message.ts, message.seq_no, message.author.0.as_str()), (100, 0, "bb"));
+                    assert_eq!(message.call, Some(CallNote::Ringing { url: url.into() }));
+                    assert!(message.is_ringing());
+                    assert_eq!(author.map(|a| a.display_name), Some("Boris".into()));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        let ended = json!({"ClientMessage": {"NotificationBehaviour": 2, "SystemMessage": {"ChatId": chat,
+                "IncrementUnreadCounter": true, "PayloadId": "p",
+                "PersonalMeetingEndedMessage": {"CallType": 1, "MeetingId": url, "Reason": 3}}},
+            "ServerMessageInfo": {"From": {"Guid": "bb"}, "SeqNo": 50, "Timestamp": 900}});
+        match from_push(&ended, None) {
+            Some(LiveEvent::Upsert { message, .. }) => {
+                assert_eq!((message.ts, message.seq_no), (900, 50));
+                assert_eq!(message.call, Some(CallNote::Ended { url: url.into() }));
+                assert!(!message.is_ringing());
+            }
+            other => panic!("{other:?}"),
+        }
+        let rang_off = json!({"ClientMessage": {"MeetingCallingMessage": {"RingingEnded": {}, "RingingId": "r1"}},
+            "ServerMessageInfo": {"From": {"Guid": "11111111-1111-1111-1111-111111111111"}, "Timestamp": 950}});
+        assert_eq!(from_push(&rang_off, None), None);
     }
 
     #[test]

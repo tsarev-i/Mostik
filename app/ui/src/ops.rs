@@ -80,8 +80,9 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
         let viewing = current == m.chat_id
             && document_visible()
             && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
-        // Only an unread feed message from someone else can add a mention.
-        let counts = !mine && !viewing && m.thread_parent.is_none();
+        // Only an unread feed message from someone else can add a mention. A ringing call is not
+        // a message: Telemost counts only the note that the call ended.
+        let counts = !mine && !viewing && m.thread_parent.is_none() && !m.is_ringing();
         let mentioned = counts && s.mentions_me(&m.text);
         if let Some(parent) = m.thread_parent {
             if let Some(p) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == parent) {
@@ -343,9 +344,10 @@ async fn load_latest(c: Ctx, id: &ChatId) {
             let full = !page.more;
             c.snap.update(|s| {
                 learn_users(s, page.users);
+                // History never has a ringing call: it stays, or "Join" would go.
                 let old: Vec<Message> = s
                     .messages
-                    .extract_if(.., |m| &m.chat_id == id && m.thread_parent.is_none())
+                    .extract_if(.., |m| &m.chat_id == id && m.thread_parent.is_none() && !m.is_ringing())
                     .collect();
                 s.messages
                     .extend(page.messages.into_iter().map(|m| keep_known(m, &old)));

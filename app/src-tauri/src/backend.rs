@@ -1004,7 +1004,9 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             if let LiveEvent::Upsert { message, mentioned, .. } = &ev {
                 learn_mentions(app, shared, message, mentioned);
             }
+            // A call rings with a push every 5 s: only the first one notifies.
             if let LiveEvent::Upsert { message, author, .. } = &ev
+                && !convert::is_silent(&body)
                 && reply_notifies_now(app, shared, message, author.as_ref())
             {
                 notify(app, shared, message, author.as_ref());
@@ -1196,7 +1198,8 @@ fn mentions_me(sh: &Shared, m: &Message) -> bool {
 fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>) {
     let Ok(mut sh) = shared.lock() else { return };
     // A thread reply lives in the thread chat: its time and number mean nothing in the parent chat.
-    if m.thread_parent.is_none() {
+    // A ringing call is not a message in the chat: the read marker cannot point at it.
+    if m.thread_parent.is_none() && !m.is_ringing() {
         let entry = sh.last.entry(m.chat_id.0.clone()).or_default();
         if m.ts > entry.0 {
             *entry = (m.ts, m.seq_no.max(entry.1));
@@ -1245,7 +1248,9 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         Some(chat) if chat != &who => format!("{who} · {chat}"),
         _ => who,
     };
-    let body: String = if m.call.is_some() {
+    let body: String = if m.is_ringing() {
+        text(app, "📞 Входящий звонок", "📞 Incoming call").to_owned()
+    } else if m.call.is_some() {
         text(app, "📞 Начался созвон", "📞 A call started").to_owned()
     } else if prefs.preview {
         with_names(&sh, |names| mostik_core::markup::plain(&m.text, names))

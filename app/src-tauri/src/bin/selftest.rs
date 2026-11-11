@@ -6,6 +6,8 @@
 //!
 //! Run: `cargo run -p mostik-app --features selftest --bin mostik-selftest` (needs a session saved by Mostik).
 //! `-- --threads` only prints the format of thread chat IDs (read-only).
+//! `-- --listen` prints every raw push as JSON until stopped (read-only; includes message texts).
+//! `-- --dump [list | <chat id>]` prints the raw chat list or the latest page of a chat (read-only).
 
 #[allow(dead_code)]
 #[path = "../store.rs"]
@@ -96,7 +98,18 @@ async fn run() -> Res<()> {
 
     let pushes: Arc<Mutex<Vec<Value>>> = Arc::default();
     let sink = pushes.clone();
+    let listen = std::env::args().any(|a| a == "--listen");
     let xiva = XivaClient::connect(web.jar(), &ua, &page.puid, move |inc| {
+        if listen {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            match &inc {
+                Incoming::Push { event, body } => println!("{}", json!({ "t": now, "event": event, "body": body })),
+                Incoming::Text(t) => println!("{}", json!({ "t": now, "text": t })),
+                Incoming::Closed => println!("{}", json!({ "t": now, "closed": true })),
+            }
+        }
         if let Incoming::Push { body, .. } = inc
             && let Ok(mut p) = sink.lock()
         {
@@ -110,6 +123,22 @@ async fn run() -> Res<()> {
         .await
         .ok_or("no Xiva subscription")?;
 
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--dump") {
+        let req: Value = match args.get(i + 1).map(String::as_str) {
+            Some("list") | None => serde_json::to_value(wire::chat_list(0)).map_err(|e| e.to_string())?,
+            Some(chat) => serde_json::to_value(HistoryRequest::page(chat, 30, None)).map_err(|e| e.to_string())?,
+        };
+        let v = xiva.call("history", &req, 40).await.map_err(|e| e.to_string())?;
+        println!("{v}");
+        return Ok(());
+    }
+    if listen {
+        println!("listening, subscription {sub}");
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        }
+    }
     if std::env::args().any(|a| a == "--threads") {
         return threads(&xiva).await;
     }

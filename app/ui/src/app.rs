@@ -2610,8 +2610,9 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
         }
         let grouped = !new_day && continues_group(prev.as_ref(), &m);
         let row = match &m.call {
-            Some(CallNote::Started { url }) => {
-                started = Some((url.clone(), m.ts));
+            Some(note @ (CallNote::Started { .. } | CallNote::Ringing { .. })) => {
+                // A ringing call may never be answered: its end shows no duration.
+                started = matches!(note, CallNote::Started { .. }).then(|| (note.url().to_owned(), m.ts));
                 let live = last_call == Some(m.ts);
                 view! { <CallRow msg=m.clone() live=live since=None/> }.into_any()
             }
@@ -2637,7 +2638,12 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
 #[component]
 fn CallRow(msg: Message, live: bool, since: Option<Timestamp>) -> impl IntoView {
     let c = ctx();
-    let started = matches!(msg.call, Some(CallNote::Started { .. }));
+    let started = matches!(msg.call, Some(CallNote::Started { .. } | CallNote::Ringing { .. }));
+    let title = match msg.call {
+        Some(CallNote::Ringing { .. }) => tr().call_incoming,
+        Some(CallNote::Started { .. }) => tr().call_started,
+        _ => tr().call_ended,
+    };
     let author = c.snap.with_untracked(|s| s.user(&msg.author).cloned());
     let who = started.then(|| {
         let name = author
@@ -2665,7 +2671,7 @@ fn CallRow(msg: Message, live: bool, since: Option<Timestamp>) -> impl IntoView 
         <div class="msg call-note" class:ended=!started data-ts=msg.ts.to_string()>
             <span class="call-note-icon"><span class="call-note-badge"><Icon icon=I::Headphones size=16/></span></span>
             <div class="call-note-body">
-                <span class="call-note-title">{if started { tr().call_started } else { tr().call_ended }}</span>
+                <span class="call-note-title">{title}</span>
                 {who.map(|w| view! { <span class="call-note-sep">"·"</span>{w} })}
                 <span class="msg-time">{time::hm(msg.ts)}</span>
                 {lasted.map(|l| view! { <span class="call-note-sep">"·"</span><span class="call-note-meta">{l}</span> })}
@@ -4515,7 +4521,7 @@ fn DmList() -> impl IntoView {
                 let me = c.snap.with(|s| s.me.clone());
                 let preview = last.as_ref().map(|m| {
                     if let Some(note) = &m.call {
-                        return format!("📞 {}", if matches!(note, CallNote::Started { .. }) { tr().call_started } else { tr().call_ended });
+                        return format!("📞 {}", match note { CallNote::Started { .. } => tr().call_started, CallNote::Ringing { .. } => tr().call_incoming, CallNote::Ended { .. } => tr().call_ended });
                     }
                     let text = c.snap.with(|s| s.plain(&m.text));
                     let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", c.snap.with(|s| s.plain(&m.forwarded[0].text))) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };

@@ -199,12 +199,37 @@ pub struct Message {
     pub call: Option<CallNote>,
 }
 
+impl Message {
+    /// A direct call ringing: a note that only a push brings (history never has it), so it has no
+    /// sequence number, must not count as unread and must survive reloading the chat history.
+    pub fn is_ringing(&self) -> bool {
+        matches!(self.call, Some(CallNote::Ringing { .. }))
+    }
+}
+
 /// A call in the chat started or ended, like Slack's huddle messages. `url` is the meeting link.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CallNote {
-    Started { url: String },
-    Ended { url: String },
+    Started {
+        url: String,
+    },
+    /// Someone is calling the user in a direct chat; it ends with `Ended` like a started call.
+    Ringing {
+        url: String,
+    },
+    Ended {
+        url: String,
+    },
+}
+
+impl CallNote {
+    /// The meeting link.
+    pub fn url(&self) -> &str {
+        match self {
+            CallNote::Started { url } | CallNote::Ringing { url } | CallNote::Ended { url } => url,
+        }
+    }
 }
 
 /// A thread the user follows (wrote in, started or was mentioned in), like Slack's "Threads".
@@ -372,7 +397,7 @@ impl Snapshot {
         }
         last.into_iter()
             .filter_map(|(chat, (_, note))| match note {
-                CallNote::Started { url } => Some((chat.clone(), url.clone())),
+                CallNote::Started { url } | CallNote::Ringing { url } => Some((chat.clone(), url.clone())),
                 CallNote::Ended { .. } => None,
             })
             .collect()
