@@ -350,6 +350,88 @@ pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
     out
 }
 
+/// A piece of the message field's text, for showing markup as it will look while keeping the
+/// text as is: the pieces put together give the text back exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditSpan<'a> {
+    Plain(&'a str),
+    /// Text between markers; `kind` says which markup.
+    Marked {
+        kind: Mark,
+        open: &'a str,
+        inner: &'a str,
+        close: &'a str,
+    },
+}
+
+/// Markup kinds of [`EditSpan::Marked`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Bold,
+    Italic,
+    Strike,
+    Underline,
+    Code,
+    CodeBlock,
+    Link,
+}
+
+const EDIT_PAIRS: &[(&str, Mark)] = &[
+    ("`", Mark::Code),
+    ("**", Mark::Bold),
+    ("__", Mark::Italic),
+    ("~~", Mark::Strike),
+    ("++", Mark::Underline),
+];
+
+/// Splits the text of the message field into plain text and marked spans, the same markup as
+/// [`parse_blocks`] and [`parse_inline`] read.
+pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
+    let mut out = Vec::new();
+    let mut plain_start = 0;
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        let mut found = None;
+        if let Some(after) = rest.strip_prefix("```")
+            && let Some(end) = after.find("```")
+        {
+            found = Some((Mark::CodeBlock, "```", end, "```"));
+        }
+        if found.is_none() {
+            for (marker, kind) in EDIT_PAIRS {
+                if let Some(after) = rest.strip_prefix(marker)
+                    && let Some(end) = after.find(marker)
+                    && end > 0
+                {
+                    found = Some((*kind, *marker, end, *marker));
+                    break;
+                }
+            }
+        }
+        let span = match found {
+            Some((kind, open, end, close)) => Some((kind, open, &rest[open.len()..open.len() + end], close)),
+            None => md_link(rest).map(|(t, _, len)| (Mark::Link, "[", &rest[1..1 + t.len()], &rest[1 + t.len()..len])),
+        };
+        let Some((kind, open, inner, close)) = span else {
+            i += rest.chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        if plain_start < i {
+            out.push(EditSpan::Plain(&text[plain_start..i]));
+        }
+        let open = &rest[..open.len()];
+        let close = &rest[open.len() + inner.len()..open.len() + inner.len() + close.len()];
+        out.push(EditSpan::Marked { kind, open, inner, close });
+        i += open.len() + inner.len() + close.len();
+        plain_start = i;
+    }
+    if plain_start < text.len() {
+        out.push(EditSpan::Plain(&text[plain_start..]));
+    }
+    out
+}
+
 /// Text without markup, for previews in search, notifications and dialogs; `who` names the
 /// people mentioned as `@<guid>`.
 pub fn plain(text: &str, who: &Mentionable) -> String {
@@ -417,6 +499,35 @@ fn flush(out: &mut Vec<Inline>, plain: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn edit_spans_give_the_text_back() {
+        for text in [
+            "a **b** c __d__ ~~e~~ ++f++ `g` [h](https://x.y) i",
+            "```\nfn x() {}\n``` after",
+            "**** ** unclosed __x",
+            "Привет, **мир** 👋",
+            "",
+        ] {
+            let joined: String = edit_spans(text)
+                .iter()
+                .map(|s| match s {
+                    EditSpan::Plain(t) => t.to_string(),
+                    EditSpan::Marked { open, inner, close, .. } => format!("{open}{inner}{close}"),
+                })
+                .collect();
+            assert_eq!(joined, text);
+        }
+    }
+
+    #[test]
+    fn edit_spans_find_markup() {
+        let spans = edit_spans("a **b** [c](https://x.y)");
+        assert_eq!(spans[0], EditSpan::Plain("a "));
+        assert_eq!(spans[1], EditSpan::Marked { kind: Mark::Bold, open: "**", inner: "b", close: "**" });
+        assert_eq!(spans[3], EditSpan::Marked { kind: Mark::Link, open: "[", inner: "c", close: "](https://x.y)" });
+        assert_eq!(edit_spans("****"), vec![EditSpan::Plain("****")]);
+    }
+
     use super::Inline::*;
     use super::*;
 

@@ -72,7 +72,10 @@ until then Noto Sans is used.
   (the counterpart of "Saved" in Slack).
 - Enter sends, Shift+Enter inserts a line break.
 - The message field is a plain-text `contenteditable` block rather than a textarea, so custom emoji show
-  as images while its text keeps them as `:name:`. Custom emoji are added with "Add emoji" at the bottom
+  as images while its text keeps them as `:name:`, and markup shows as it will look (bold as bold) with
+  its markers hidden, as in Slack; the formatting buttons toggle it. Editing a message, as in Slack,
+  hides the author line and shows the field with the formatting bar at its bottom and "Cancel" /
+  "Save changes" under it. Custom emoji are added with "Add emoji" at the bottom
   of the emoji picker, as in Slack, or in Preferences → Custom emoji, which also lists them and renames or
   deletes your own; in the picker an own one is deleted with a right click.
 

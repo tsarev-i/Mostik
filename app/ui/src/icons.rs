@@ -42,6 +42,7 @@ pub enum I {
     Link,
     Code,
     CodeBlock,
+    Enter,
     X,
     Gear,
     Headphones,
@@ -124,6 +125,7 @@ fn paths(i: I) -> &'static str {
             r#"<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>"#
         }
         I::Code => r#"<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>"#,
+        I::Enter => r#"<polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>"#,
         I::CodeBlock => {
             r#"<path d="m10 9-3 3 3 3"/><path d="m14 15 3-3-3-3"/><rect x="3" y="3" width="18" height="18" rx="2"/>"#
         }

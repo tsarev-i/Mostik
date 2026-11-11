@@ -2850,49 +2850,54 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     let save_key = save.clone();
     view! {
         <div class="inline-edit" on:click=|e| e.stop_propagation()>
-            <FormatBar on_fmt=Callback::new(move |(before, after)| {
-                if let Some(el) = area.get_untracked() {
-                    text.set(wrap_selection(&el, before, after));
-                }
-            })/>
-            <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
-                on:input=move |_| {
-                    if let Some(el) = area.get_untracked() {
-                        text.set(crate::editor::tidy(&el, &crate::custom::lookup(c)));
-                        reveal_editor(&el);
-                    }
-                }
-                on:keydown=move |e: ev::KeyboardEvent| {
-                    if e.is_composing() { return; }
-                    match e.key().as_str() {
-                        "Escape" => { e.prevent_default(); e.stop_propagation(); cancel(); }
-                        "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
-                            e.prevent_default();
-                            save_key();
+            <div class="inline-edit-box">
+                <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
+                    on:input=move |_| {
+                        if let Some(el) = area.get_untracked() {
+                            text.set(crate::editor::tidy(&el, &crate::custom::lookup(c)));
+                            reveal_editor(&el);
                         }
-                        "Enter" => {
-                            e.prevent_default();
-                            if let Some(el) = area.get_untracked() {
-                                text.set(insert_text(&el, "\n", 0));
+                    }
+                    on:keydown=move |e: ev::KeyboardEvent| {
+                        if e.is_composing() { return; }
+                        match e.key().as_str() {
+                            "Escape" => { e.prevent_default(); e.stop_propagation(); cancel(); }
+                            "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
+                                e.prevent_default();
+                                save_key();
                             }
+                            "Enter" => {
+                                e.prevent_default();
+                                if let Some(el) = area.get_untracked() {
+                                    text.set(insert_text(&el, "\n", 0));
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                    }></div>
+                <FormatBar on_fmt=Callback::new(move |(before, after)| {
+                    if let Some(el) = area.get_untracked() {
+                        text.set(wrap_selection(&el, before, after));
                     }
-                }></div>
+                })/>
+            </div>
             <div class="inline-edit-actions">
                 <button class="btn small" on:click=move |_| cancel()>{tr().cancel}</button>
-                <button class="btn small primary" disabled=move || busy.get() on:click=move |_| save()>{tr().save}</button>
+                <button class="btn small primary" disabled=move || busy.get() on:click=move |_| save()>
+                    <Icon icon=I::Enter size=14/>{tr().save_changes}
+                </button>
             </div>
         </div>
     }
 }
 
-/// Formatting buttons over a message field: each wraps the selection in Telemost markup markers.
+/// Formatting buttons of a message field: each wraps the selection in Telemost markup markers or
+/// takes them off. A press keeps the focus and selection in the field.
 #[component]
 fn FormatBar(on_fmt: Callback<(&'static str, &'static str)>) -> impl IntoView {
     let fmt = move |before: &'static str, after: &'static str| move |_| on_fmt.run((before, after));
     view! {
-        <div class="composer-toolbar">
+        <div class="composer-toolbar" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
             <button class="fmt" title=tr().fmt_bold on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
             <button class="fmt" title=tr().fmt_italic on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
             <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
@@ -3750,13 +3755,30 @@ fn utf16_len(s: &str) -> u32 {
     s.encode_utf16().count() as u32
 }
 
-/// `value` with the `start..end` selection wrapped in `before`/`after`, and the caret after the wrapped text.
-fn wrap_text(value: &str, start: Option<u32>, end: Option<u32>, before: &str, after: &str) -> (String, u32) {
+/// `value` with the `start..end` selection wrapped in `before`/`after`, or unwrapped when it already
+/// is (the markers right around it or at its edges), as Slack's formatting buttons toggle.
+/// Returns the new value and the selection over the same text.
+fn wrap_text(value: &str, start: Option<u32>, end: Option<u32>, before: &str, after: &str) -> (String, u32, u32) {
     let start = utf16_to_byte(value, start);
     let end = utf16_to_byte(value, end).max(start);
-    let head = format!("{}{before}{}", &value[..start], &value[start..end]);
-    let caret = utf16_len(&head);
-    (format!("{head}{after}{}", &value[end..]), caret)
+    let selected = &value[start..end];
+    let (head, tail) = (&value[..start], &value[end..]);
+    // The caret at the end of formatted text: the button ends the formatting, the caret moves past the marker.
+    if start == end && !after.is_empty() && tail.starts_with(after) && !head.ends_with(before) {
+        let caret = utf16_len(head) + utf16_len(after);
+        return (value.to_owned(), caret, caret);
+    }
+    let (head, selected, tail, wrap) = if head.ends_with(before) && tail.starts_with(after) {
+        (&head[..head.len() - before.len()], selected, &tail[after.len()..], false)
+    } else if selected.len() >= before.len() + after.len() && selected.starts_with(before) && selected.ends_with(after) {
+        (head, &selected[before.len()..selected.len() - after.len()], tail, false)
+    } else {
+        (head, selected, tail, true)
+    };
+    let (open, close) = if wrap { (before, after) } else { ("", "") };
+    let from = utf16_len(head) + utf16_len(open);
+    let to = from + utf16_len(selected);
+    (format!("{head}{open}{selected}{close}{tail}"), from, to)
 }
 
 /// `value` with `text` in place of the `start..end` selection; `drop_before` characters before the
@@ -3790,8 +3812,9 @@ fn emoji_code_before(value: &str, caret: u32) -> Option<String> {
 /// Wraps the composer selection in Telemost markup markers.
 fn wrap_selection(area: &web_sys::HtmlElement, before: &str, after: &str) -> String {
     let (start, end) = selection(area);
-    let (value, caret) = wrap_text(&crate::editor::value(area), start, end, before, after);
-    place_caret(area, &value, caret);
+    let (value, from, to) = wrap_text(&crate::editor::value(area), start, end, before, after);
+    place_caret(area, &value, to);
+    crate::editor::set_selection(area, from, to);
     value
 }
 
@@ -6483,16 +6506,27 @@ mod tests {
     }
 
     #[test]
+    fn formatting_toggles() {
+        // Selected text between the markers, the markers selected too, and an empty pair.
+        assert_eq!(wrap_text("a **b** c", Some(4), Some(5), "**", "**"), ("a b c".to_owned(), 2, 3));
+        assert_eq!(wrap_text("a **b** c", Some(2), Some(7), "**", "**"), ("a b c".to_owned(), 2, 3));
+        assert_eq!(wrap_text("a **** c", Some(4), Some(4), "**", "**"), ("a  c".to_owned(), 2, 2));
+        assert_eq!(wrap_text("a b c", Some(2), Some(3), "~~", "~~"), ("a ~~b~~ c".to_owned(), 4, 5));
+        // At the end of bold text: the caret leaves it.
+        assert_eq!(wrap_text("a **b** c", Some(5), Some(5), "**", "**"), ("a **b** c".to_owned(), 7, 7));
+    }
+
+    #[test]
     fn selection_offsets_are_utf16() {
         // "👍" is two UTF-16 units: "world" spans 9..14.
         let value = "👍 hello world";
         assert_eq!(
             wrap_text(value, Some(9), Some(14), "**", "**"),
-            ("👍 hello **world**".to_owned(), 16)
+            ("👍 hello **world**".to_owned(), 11, 16)
         );
         assert_eq!(
             wrap_text(value, None, None, "`", "`"),
-            ("👍 hello world``".to_owned(), 15)
+            ("👍 hello world``".to_owned(), 15, 15)
         );
         assert_eq!(
             insert_into(value, Some(2), Some(2), "😀", 0),
