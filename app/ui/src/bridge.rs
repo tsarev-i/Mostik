@@ -176,6 +176,8 @@ struct EditArgs<'a> {
     ts: Timestamp,
     text: &'a str,
     thread: Option<Timestamp>,
+    /// The message has more than text: the backend resends all of it.
+    whole: bool,
 }
 
 #[derive(Serialize)]
@@ -314,6 +316,7 @@ pub async fn edit_message(m: &Message, text: &str) -> Result<(), String> {
             ts: m.ts,
             text,
             thread: m.thread_parent,
+            whole: !m.attachments.is_empty() || !m.forwarded.is_empty(),
         },
     )
     .await

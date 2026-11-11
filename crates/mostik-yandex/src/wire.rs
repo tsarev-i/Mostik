@@ -136,6 +136,34 @@ pub fn edit_text(chat_id: &str, ts: u64, payload_id: &str, text: &str) -> Value 
     msg
 }
 
+/// Edit of a message with more than text (a gallery, a file, forwarded messages): the whole
+/// original `Plain` with the new text, as the web client sends it. A `Plain` with only `Text`
+/// would turn such a message into plain text and drop its images and files.
+pub fn edit_whole(original: &Value, chat_id: &str, ts: u64, text: &str) -> Value {
+    let mut plain = original.clone();
+    if !plain.is_object() {
+        plain = json!({});
+    }
+    plain["ChatId"] = json!(chat_id);
+    plain["Timestamp"] = json!(ts);
+    if plain.get("Gallery").is_some() {
+        plain["Gallery"]["Text"] = json!(text);
+    } else {
+        plain["Text"] = json!({ "MessageText": text });
+    }
+    let mentioned = mostik_core::markup::mentioned_ids(text);
+    match plain.as_object_mut() {
+        Some(o) if mentioned.is_empty() => {
+            o.remove("MentionedUserIds");
+        }
+        Some(o) => {
+            o.insert("MentionedUserIds".into(), json!(mentioned));
+        }
+        None => {}
+    }
+    json!({ "Plain": plain })
+}
+
 /// Delete: `Plain` with only `ChatId` and `Timestamp`.
 pub fn delete(chat_id: &str, ts: u64) -> Value {
     json!({ "Plain": { "ChatId": chat_id, "Timestamp": ts } })
@@ -211,6 +239,25 @@ mod tests {
         assert!(edit["Plain"].get("MentionedUserIds").is_none());
         assert_eq!(edit_text("c", 42, "p", &text)["Plain"]["MentionedUserIds"], json!([id]));
         assert_eq!(delete("c", 42), json!({"Plain": {"ChatId": "c", "Timestamp": 42}}));
+    }
+
+    #[test]
+    fn whole_edit_keeps_the_gallery_and_the_files() {
+        let items =
+            json!([{"Image": {"FileInfo": {"Id2": "file/x", "Name": "a.png", "Size": 3}, "Width": 1, "Height": 1}}]);
+        let gallery = json!({"ChatId": "c", "PayloadId": "p", "Gallery": {"Items": items, "Text": "old"},
+            "MentionedUserIds": ["gone"]});
+        let edit = edit_whole(&gallery, "c", 42, "new");
+        assert_eq!(
+            edit,
+            json!({"Plain": {"ChatId": "c", "PayloadId": "p", "Timestamp": 42, "Gallery": {"Items": items, "Text": "new"}}})
+        );
+        let id = "aaaa0001-0000-4000-8000-000000000001";
+        let forward = json!({"ChatId": "c", "ForwardedMessages": [{"x": 1}], "Text": {"MessageText": "old"}});
+        let edit = edit_whole(&forward, "c", 7, &format!("@{id}"));
+        assert_eq!(edit["Plain"]["ForwardedMessages"], json!([{"x": 1}]));
+        assert_eq!(edit["Plain"]["Text"]["MessageText"], format!("@{id}"));
+        assert_eq!(edit["Plain"]["MentionedUserIds"], json!([id]));
     }
 
     #[test]

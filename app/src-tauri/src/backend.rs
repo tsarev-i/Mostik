@@ -477,6 +477,8 @@ pub async fn send_message(
     })
 }
 
+/// Edits the text of a message. `whole`: the message has images, files or forwarded messages,
+/// so the edit resends all of it with the new text; a text-only edit would drop them.
 #[tauri::command]
 pub async fn edit_message(
     state: tauri::State<'_, AppState>,
@@ -484,12 +486,40 @@ pub async fn edit_message(
     ts: Timestamp,
     text: String,
     thread: Option<Timestamp>,
+    whole: Option<bool>,
 ) -> Result<(), String> {
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    push(&live, wire::edit_text(&target, ts, &request_id(), &text))
+    let msg = if whole.unwrap_or(false) {
+        let original = original_plain(&live, &target, ts).await?;
+        wire::edit_whole(&original, &target, ts, &text)
+    } else {
+        wire::edit_text(&target, ts, &request_id(), &text)
+    };
+    push(&live, msg).await.map(|_| ())
+}
+
+/// The `Plain` of message `ts` in chat `target` as Telemost keeps it, like the web client's
+/// `requestMessage`: the one message before `ts + 1`.
+async fn original_plain(live: &Live, target: &str, ts: Timestamp) -> Result<Value, String> {
+    let page = live
+        .xiva
+        .call(
+            "history",
+            &HistoryRequest::page(target, 1, Some(ts + 1)),
+            HISTORY_TIMEOUT_S,
+        )
         .await
-        .map(|_| ())
+        .map_err(|e| e.to_string())?;
+    page.pointer("/Chats/0/Messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|m| m.get("ServerMessage").unwrap_or(m))
+        .find(|m| m.pointer("/ServerMessageInfo/Timestamp").and_then(Value::as_u64) == Some(ts))
+        .and_then(|m| m.pointer("/ClientMessage/Plain"))
+        .cloned()
+        .ok_or_else(|| "Telemost did not return the message being edited".to_owned())
 }
 
 #[tauri::command]
