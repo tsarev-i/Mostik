@@ -533,16 +533,50 @@ impl Chat {
     pub fn set_notify_level(&mut self, level: NotifyLevel) {
         (self.muted, self.mute_mentions) = level.flags();
     }
+
+    /// The emoji a group or channel name starts with (see [`split_chat_icon`]).
+    pub fn icon(&self) -> Option<&str> {
+        match self.kind {
+            ChatKind::Group { .. } | ChatKind::Broadcast => split_chat_icon(&self.name).0,
+            ChatKind::Direct { .. } | ChatKind::Notes => None,
+        }
+    }
 }
 
-/// Display name of a chat: the peer's name for a direct chat.
+/// A group name may start with its emoji, as `⚠️|Test`: Telemost has no chat icons, so the emoji
+/// is shown in place of `#`, like the emoji of a section in Slack, and the rest as the name.
+pub fn split_chat_icon(name: &str) -> (Option<&str>, &str) {
+    if let Some((icon, rest)) = name.split_once('|') {
+        let (icon, rest) = (icon.trim(), rest.trim());
+        // Emoji only: no letters, digits or ASCII, and short (one emoji, maybe with modifiers).
+        let emoji = !icon.is_empty()
+            && icon.chars().count() <= 10
+            && icon
+                .chars()
+                .all(|c| !c.is_ascii() && !c.is_alphanumeric() && !c.is_whitespace());
+        if emoji && !rest.is_empty() {
+            return (Some(icon), rest);
+        }
+    }
+    (None, name)
+}
+
+/// A group name for plain text, such as a notification: `⚠️ Test` for `⚠️|Test`.
+pub fn group_label(name: &str) -> String {
+    match split_chat_icon(name) {
+        (Some(emoji), rest) => format!("{emoji} {rest}"),
+        (None, name) => name.to_owned(),
+    }
+}
+
+/// Display name of a chat: the peer's name for a direct chat, a group name without its emoji.
 pub fn chat_title(snapshot: &Snapshot, chat: &Chat) -> String {
     match &chat.kind {
         ChatKind::Direct { peer } => snapshot
             .user(peer)
             .map(|u| u.display_name.clone())
             .unwrap_or_else(|| chat.name.clone()),
-        _ => chat.name.clone(),
+        _ => split_chat_icon(&chat.name).1.to_owned(),
     }
 }
 
@@ -557,6 +591,25 @@ pub fn continues_group(prev: Option<&Message>, next: &Message) -> bool {
         Some(p) if p.call.is_some() => false,
         Some(p) => p.author == next.author && next.ts.saturating_sub(p.ts) < GROUPING_WINDOW_MCS,
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod chat_icon_tests {
+    use super::*;
+
+    #[test]
+    fn group_name_with_emoji() {
+        assert_eq!(split_chat_icon("⚠️|Test"), (Some("⚠️"), "Test"));
+        assert_eq!(split_chat_icon("🚀 | Релизы"), (Some("🚀"), "Релизы"));
+        assert_eq!(split_chat_icon("👩‍💻|dev"), (Some("👩‍💻"), "dev"));
+        // Not an emoji, or nothing after it: the name stays whole.
+        assert_eq!(split_chat_icon("a|b"), (None, "a|b"));
+        assert_eq!(split_chat_icon("Отдел|Продажи"), (None, "Отдел|Продажи"));
+        assert_eq!(split_chat_icon("⚠️|"), (None, "⚠️|"));
+        assert_eq!(split_chat_icon("plain"), (None, "plain"));
+        assert_eq!(group_label("⚠️|Test"), "⚠️ Test");
+        assert_eq!(group_label("a|b"), "a|b");
     }
 }
 

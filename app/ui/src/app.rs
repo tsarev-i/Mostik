@@ -1242,7 +1242,7 @@ fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
 /// Search result row.
 #[derive(Clone)]
 enum Hit {
-    Chat(ChatId, String, ChatKind),
+    Chat(ChatId, String, Mark),
     Person(User),
     Message(Message, String),
 }
@@ -1411,7 +1411,7 @@ fn HistoryMenu(on_close: Callback<()>) -> impl IntoView {
                 .into_iter()
                 .filter_map(|id| {
                     s.chat(&id)
-                        .map(|ch| (id, display_title(s, ch), ch.kind.clone(), chat_face(s, ch)))
+                        .map(|ch| (id, display_title(s, ch), Mark::of(ch), chat_face(s, ch)))
                 })
                 .collect::<Vec<_>>()
         })
@@ -1505,7 +1505,7 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                 .chats
                 .iter()
                 .filter(|ch| !matches!(ch.kind, ChatKind::Direct { .. }))
-                .map(|ch| (ch.id.clone(), display_title(s, ch), ch.kind.clone()))
+                .map(|ch| (ch.id.clone(), display_title(s, ch), Mark::of(ch)))
                 .filter(|(_, t, _)| t.to_lowercase().contains(&q))
                 .take(6)
                 .map(|(id, t, k)| Hit::Chat(id, t, k))
@@ -1881,8 +1881,28 @@ pub(crate) fn display_title(s: &Snapshot, ch: &Chat) -> String {
     }
 }
 
-fn kind_icon(kind: &ChatKind, size: u32) -> AnyView {
-    match kind {
+/// What marks a chat in lists: its kind, or the emoji its group name starts with (`⚠️|Test`).
+#[derive(Clone, PartialEq)]
+struct Mark {
+    kind: ChatKind,
+    emoji: Option<String>,
+}
+
+impl Mark {
+    fn of(ch: &Chat) -> Self {
+        Mark {
+            kind: ch.kind.clone(),
+            emoji: ch.icon().map(str::to_owned),
+        }
+    }
+}
+
+fn kind_icon(mark: &Mark, size: u32) -> AnyView {
+    if let Some(emoji) = &mark.emoji {
+        return view! { <span class="chat-emoji" style=format!("font-size:{size}px")>{emoji.clone()}</span> }
+            .into_any();
+    }
+    match &mark.kind {
         ChatKind::Group { public: true } => view! { <Icon icon=I::Hash size=size/> }.into_any(),
         ChatKind::Group { public: false } => view! { <Icon icon=I::Lock size=size/> }.into_any(),
         ChatKind::Broadcast => view! { <Icon icon=I::Megaphone size=size/> }.into_any(),
@@ -2467,7 +2487,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                 Some(u) => {
                     view! { <span class="sb-icon face"><Avatar user=u size=20 presence=true/></span> }.into_any()
                 }
-                None => view! { <span class="sb-icon">{kind_icon(&ch.kind, 15)}</span> }.into_any(),
+                None => view! { <span class="sb-icon">{kind_icon(&Mark::of(&ch), 15)}</span> }.into_any(),
             };
             let you =
                 matches!(ch.kind, ChatKind::Notes).then(|| view! { <span class="sb-you">{tr().you_short}</span> });
@@ -2544,11 +2564,11 @@ fn ChannelHeader() -> impl IntoView {
                         }
                         None if matches!(ch.kind, ChatKind::Group { .. }) => view! {
                             <button class="ch-person" title=tr().about_channel on:click=move |_| c.details.set(Some(DetailsTab::About))>
-                                <span class="ch-kind">{kind_icon(&ch.kind, 18)}</span><span>{title}</span><Icon icon=I::ChevronDown size=14/>
+                                <span class="ch-kind">{kind_icon(&Mark::of(&ch), 18)}</span><span>{title}</span><Icon icon=I::ChevronDown size=14/>
                             </button>
                         }
                         .into_any(),
-                        None => view! { <span class="ch-kind">{kind_icon(&ch.kind, 18)}</span><span>{title}</span> }.into_any(),
+                        None => view! { <span class="ch-kind">{kind_icon(&Mark::of(&ch), 18)}</span><span>{title}</span> }.into_any(),
                     })}
                 </div>
                 <div class="ch-actions">
@@ -2885,7 +2905,7 @@ fn ChannelIntro() -> impl IntoView {
                 view! {
                     <div class="intro">
                         <div class="intro-title">
-                            <span class="ch-kind">{kind_icon(&ch.kind, 26)}</span>
+                            <span class="ch-kind">{kind_icon(&Mark::of(&ch), 26)}</span>
                             <span>{title}</span>
                         </div>
                         <p>{text}</p>
@@ -3814,7 +3834,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 .map(|ch| match ch.kind {
                     ChatKind::Direct { .. } => tr().message_to_person(&chat_title(s, ch)),
                     ChatKind::Notes => tr().note_placeholder.to_owned(),
-                    _ => tr().message_to_channel(&ch.name),
+                    _ => tr().message_to_channel(split_chat_icon(&ch.name).1),
                 })
                 .unwrap_or_default()
         })
@@ -4323,9 +4343,9 @@ fn BrowseChannelsDialog() -> impl IntoView {
         };
         view! {
             <div class="browse-row">
-                <span class="browse-icon">{kind_icon(&ch.kind, 16)}</span>
+                <span class="browse-icon">{kind_icon(&Mark::of(&ch), 16)}</span>
                 <span class="dm-body">
-                    <span class="dm-name">{ch.name.clone()}</span>
+                    <span class="dm-name">{split_chat_icon(&ch.name).1.to_owned()}</span>
                     <span class="dm-preview">
                         {joined.then(|| view! { <span class="joined">"✓ "{tr().joined}" · "</span> })}
                         {tr().members_count(ch.member_count)}
@@ -4397,7 +4417,7 @@ fn ForwardDialog(msg: Message) -> impl IntoView {
             list.sort_by_key(|ch| std::cmp::Reverse(ch.last_ts));
             list.into_iter()
                 .take(8)
-                .map(|ch| (ch.id.clone(), display_title(s, ch), ch.kind.clone(), chat_face(s, ch)))
+                .map(|ch| (ch.id.clone(), display_title(s, ch), Mark::of(ch), chat_face(s, ch)))
                 .collect::<Vec<_>>()
         })
     });
@@ -4716,13 +4736,19 @@ fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
     let me = c.snap.with_untracked(|s| s.me.clone());
     let picker_chat = chat_id.clone();
     let exclude = Signal::derive(move || members.with(|m| m.iter().map(|x| x.profile.id.clone()).collect()));
-    let title = move || name.get();
+    let title = move || name.with(|n| split_chat_icon(n).1.to_owned());
     let (save2, leave2, change_add, change_rm) = (save.clone(), leave.clone(), change.clone(), change);
     view! {
         <div class="modal-backdrop" on:click=move |_| close()>
             <div class="modal details" on:click=|ev| ev.stop_propagation()>
                 <header>
-                    <h2 class="details-title">{kind.as_ref().map(|k| kind_icon(k, 20))}<span>{title}</span></h2>
+                    <h2 class="details-title">
+                        {move || kind.clone().map(|kind| {
+                            let emoji = name.with(|n| split_chat_icon(n).0.map(str::to_owned));
+                            kind_icon(&Mark { kind, emoji }, 20)
+                        })}
+                        <span>{title}</span>
+                    </h2>
                     <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
                 </header>
                 <nav class="ch-tabs modal-tabs">
@@ -5182,7 +5208,7 @@ fn DraftsView() -> impl IntoView {
                 .filter(|(_, t)| !t.trim().is_empty())
                 .filter_map(|(id, t)| {
                     s.chat(&id)
-                        .map(|ch| (id.clone(), display_title(s, ch), chat_face(s, ch), ch.kind.clone(), t))
+                        .map(|ch| (id.clone(), display_title(s, ch), chat_face(s, ch), Mark::of(ch), t))
                 })
                 .collect::<Vec<_>>()
         })

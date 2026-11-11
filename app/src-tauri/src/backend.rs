@@ -1089,7 +1089,7 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
                     .map(|u| u.display_name.clone())
                     .or_else(|| sh.names.get(&peer.0).cloned())
                     .unwrap_or_default(),
-                _ => chat.name.clone(),
+                _ => mostik_core::group_label(&chat.name),
             },
             None => String::new(),
         };
@@ -1670,7 +1670,8 @@ pub async fn leave_chat(state: tauri::State<'_, AppState>, chat_id: String) -> R
     if let Ok(mut sh) = live.shared.lock()
         && let Some(name) = sh.titles.remove(&chat_id)
     {
-        sh.channels.retain(|c| c != &name);
+        // Titles keep a group's emoji as `⚠️ Test`, the channel list its raw name `⚠️|Test`.
+        sh.channels.retain(|c| mostik_core::group_label(c) != name);
     }
     Ok(())
 }
@@ -1679,7 +1680,8 @@ pub async fn leave_chat(state: tauri::State<'_, AppState>, chat_id: String) -> R
 /// `@channel` mentions if it is public.
 fn note_chat(live: &Live, chat: &mostik_core::Chat) {
     let Ok(mut sh) = live.shared.lock() else { return };
-    sh.titles.insert(chat.id.0.clone(), chat.name.clone());
+    sh.titles
+        .insert(chat.id.0.clone(), mostik_core::group_label(&chat.name));
     let public = chat.kind == ChatKind::Group { public: true };
     if public && !chat.name.is_empty() && !sh.channels.contains(&chat.name) {
         sh.channels.push(chat.name.clone());
@@ -2569,8 +2571,11 @@ async fn connect_inner(
             if ch.muted {
                 sh.muted.insert(ch.id.0.clone(), ch.notify_level());
             }
-            sh.titles
-                .insert(ch.id.0.clone(), mostik_core::chat_title(&snapshot, ch));
+            let title = match ch.kind {
+                ChatKind::Group { .. } | ChatKind::Broadcast => mostik_core::group_label(&ch.name),
+                _ => mostik_core::chat_title(&snapshot, ch),
+            };
+            sh.titles.insert(ch.id.0.clone(), title);
         }
         for u in snapshot.users.iter().filter(|u| u.has_name()) {
             sh.names.insert(u.id.0.clone(), u.display_name.clone());

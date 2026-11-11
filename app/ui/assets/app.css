@@ -328,6 +328,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .sb-icon { width: 20px; display: grid; place-items: center; flex: none; opacity: 0.85; }
 .sb-icon.face { opacity: 1; }
+/* The emoji a group name starts with (`⚠️|Test`), in place of `#`. */
+.chat-emoji { display: inline-grid; place-items: center; line-height: 1; }
+.sb-icon:has(> .chat-emoji) { opacity: 1; }
 .sb-icon.add {
   width: 20px;
   height: 20px;
