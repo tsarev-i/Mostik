@@ -643,6 +643,7 @@ pub fn App() -> impl IntoView {
             Phase::Login { reason } => view! { <LoginScreen reason=reason/> }.into_any(),
             }
         }}
+        <HoverTip/>
         <Show when=move || c.about.get()>
             <AboutDialog/>
         </Show>
@@ -1551,7 +1552,7 @@ fn Rail() -> impl IntoView {
             <button class=move || if me().is_some_and(|u| u.status.is_some()) { "rail-me with-status" } else { "rail-me" }
                 title=tr().profile_and_prefs on:click=move |_| c.me_menu.update(|v| *v = !*v)>
                 {move || me().and_then(|u| u.status).map(|st| {
-                    view! { <span class="rail-status" title=status_text(&st)>{status_icon(&st, 18)}</span> }
+                    view! { <span class="rail-status" data-tip=status_tip(&st)>{status_icon(&st, 18)}</span> }
                 })}
                 {move || me().map(|u| view! { <Avatar user=u size=36 presence=true/> })}
             </button>
@@ -1593,10 +1594,97 @@ fn presence_class(u: &User) -> &'static str {
     }
 }
 
-/// Status emoji after the name (with the status text in a tooltip).
+/// Status emoji after the name, with the status text in a hover tip.
 fn status_badge(u: &User) -> Option<AnyView> {
     let st = u.status.clone()?;
-    Some(view! { <span class="status-emoji" title=status_text(&st)>{status_icon(&st, 14)}</span> }.into_any())
+    Some(view! { <span class="status-emoji" data-tip=status_tip(&st)>{status_icon(&st, 14)}</span> }.into_any())
+}
+
+/// The hover tip of a status: its emoji and text. An emoji alone has nothing more to say.
+fn status_tip(st: &CustomStatus) -> Option<String> {
+    let text = status_text(st);
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(if st.in_meeting {
+        text
+    } else {
+        format!("{} {text}", st.emoji).trim().to_owned()
+    })
+}
+
+/// A hover tip in place of the native `title`, as in Slack: it appears at once, above an
+/// element with `data-tip` (below it near the top of the window) and stays inside the window.
+#[component]
+fn HoverTip() -> impl IntoView {
+    #[derive(Clone, PartialEq)]
+    struct Tip {
+        text: String,
+        x: f64,
+        y: f64,
+        below: bool,
+    }
+    let tip = RwSignal::new(None::<Tip>);
+    let hide = move || {
+        if tip.with_untracked(Option::is_some) {
+            tip.set(None);
+        }
+    };
+    let _over = window_event_listener(ev::mouseover, move |e| {
+        let el = e
+            .target()
+            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
+            .and_then(|el| el.closest("[data-tip]").ok().flatten());
+        let Some((el, text)) = el.and_then(|el| el.get_attribute("data-tip").map(|t| (el, t))) else {
+            return hide();
+        };
+        let r = el.get_bounding_client_rect();
+        let below = r.top() < 48.0;
+        let next = Tip {
+            text,
+            x: r.left() + r.width() / 2.0,
+            y: if below { r.bottom() + 6.0 } else { r.top() - 6.0 },
+            below,
+        };
+        if tip.with_untracked(|t| t.as_ref() != Some(&next)) {
+            tip.set(Some(next));
+        }
+    });
+    let _out = window_event_listener(ev::mouseout, move |e| {
+        // The pointer left the window.
+        if e.related_target().is_none() {
+            hide();
+        }
+    });
+    let _down = window_event_listener(ev::mousedown, move |_| hide());
+    let _wheel = window_event_listener(ev::wheel, move |_| hide());
+    let node = NodeRef::<html::Div>::new();
+    // Shifts the tip back inside the window when the element is near its edge.
+    Effect::new(move |_| {
+        tip.track();
+        let Some(div) = node.get() else { return };
+        let div: &web_sys::HtmlElement = &div;
+        let _ = div.style().set_property("margin-left", "0px");
+        let r = div.get_bounding_client_rect();
+        let width = window().inner_width().ok().and_then(|w| w.as_f64()).unwrap_or(0.0);
+        let shift = if r.left() < 8.0 {
+            8.0 - r.left()
+        } else if r.right() > width - 8.0 {
+            width - 8.0 - r.right()
+        } else {
+            0.0
+        };
+        let _ = div.style().set_property("margin-left", &format!("{shift:.0}px"));
+    });
+    move || {
+        tip.get().map(|t| {
+            view! {
+                <div class="hover-tip" class:below=t.below node_ref=node style=format!("left:{:.0}px;top:{:.0}px", t.x, t.y)>
+                    {t.text}
+                </div>
+            }
+        })
+    }
 }
 
 /// The status emoji; Telemost's "In meeting" is a green headphones icon, like a Slack huddle.
@@ -2266,10 +2354,12 @@ fn ChannelHeader() -> impl IntoView {
                         // In a direct chat the name opens the peer's profile, as in Slack.
                         Some(u) => {
                             let id = u.id.clone();
+                            let status = status_badge(&u);
                             view! {
                                 <button class="ch-person" on:click=move |_| ops::open_profile(c, id.clone())>
                                     <span class="ch-face"><Avatar user=u size=24 presence=true/></span>
                                     <span>{title}</span>
+                                    {status}
                                 </button>
                             }
                             .into_any()
@@ -4617,6 +4707,7 @@ fn DmList() -> impl IntoView {
         <div class="dm-list">
             <div class="dm-list-title">{tr().sec_dms}</div>
             {move || rows.get().into_iter().map(|(ch, title, face, last)| {
+                let status = face.as_ref().and_then(status_badge);
                 let id = ch.id.clone();
                 let ctx_id = ch.id.clone();
                 let selected = c.current.with(|cur| cur == &id);
@@ -4642,7 +4733,7 @@ fn DmList() -> impl IntoView {
                         {face.map(|u| view! { <Avatar user=u size=36 presence=true/> })}
                         <span class="dm-body">
                             <span class="dm-top">
-                                <span class="dm-name">{title}{(ch.kind == ChatKind::Notes).then(|| view! { <span class="sb-you">{tr().you_short}</span> })}</span>
+                                <span class="dm-name">{title}{(ch.kind == ChatKind::Notes).then(|| view! { <span class="sb-you">{tr().you_short}</span> })}{status}</span>
                                 <span class="dm-time">{when}</span>
                             </span>
                             <span class="dm-preview">{preview}</span>
@@ -5696,6 +5787,22 @@ fn AboutDialog() -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_tip_shows_text() {
+        let st = |emoji: &str, text: &str, in_meeting| CustomStatus {
+            emoji: emoji.into(),
+            text: text.into(),
+            in_meeting,
+        };
+        assert_eq!(status_tip(&st("🏖", "Vacation", false)).as_deref(), Some("🏖 Vacation"));
+        assert_eq!(status_tip(&st("", "Busy", false)).as_deref(), Some("Busy"));
+        assert_eq!(status_tip(&st("👾", "", false)), None);
+        assert_eq!(
+            status_tip(&st("📞", "На встрече", true)).as_deref(),
+            Some(tr().in_meeting)
+        );
+    }
 
     #[test]
     fn selection_offsets_are_utf16() {

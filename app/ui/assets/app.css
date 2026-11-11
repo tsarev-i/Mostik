@@ -1579,6 +1579,27 @@ button:disabled { opacity: 0.4; cursor: default; }
   border-color: transparent;
 }
 .status-emoji { margin-left: 4px; font-size: 14px; line-height: 1; cursor: default; }
+/* Hover tip of an element with `data-tip` (a status), shown at once like Slack's. */
+.hover-tip {
+  position: fixed;
+  z-index: 100;
+  transform: translate(-50%, -100%);
+  max-width: 260px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #1d1c1d;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.hover-tip.below { transform: translate(-50%, 0); }
 /* Telemost's "In meeting" status: green headphones, like a Slack huddle. */
 .status-meeting { display: inline-flex; vertical-align: -2px; color: var(--online); }
 .me-menu > .me-status-btn {
