@@ -1664,8 +1664,7 @@ fn Sidebar() -> impl IntoView {
     }
 }
 
-/// The current call at the bottom of the sidebar, like the Slack huddle bar: where it is,
-/// a button that brings the call window back and "Leave".
+/// The current call at the bottom of the sidebar, like the Slack huddle bar: where it is and "Leave".
 #[component]
 fn CallBar() -> impl IntoView {
     let c = ctx();
@@ -1686,15 +1685,10 @@ fn CallBar() -> impl IntoView {
                             <span class="call-label">{call.label.clone()}</span>
                         </span>
                     </button>
-                    <div class="call-actions">
-                        <button class="call-btn" title=tr().call_show on:click=move |_| ops::focus_call(c)>
-                            <Icon icon=I::Window size=16/>
-                        </button>
-                        <button class="call-btn leave" title=tr().call_leave on:click=move |_| ops::leave_call(c)>
-                            <Icon icon=I::PhoneOff size=16/>
-                            <span>{tr().call_leave}</span>
-                        </button>
-                    </div>
+                    <button class="call-btn leave" title=tr().call_leave on:click=move |_| ops::leave_call(c)>
+                        <Icon icon=I::PhoneOff size=16/>
+                        <span>{tr().call_leave}</span>
+                    </button>
                 </div>
             }
         })

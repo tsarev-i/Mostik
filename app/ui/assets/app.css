@@ -1241,7 +1241,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   margin: 8px;
   padding: 8px;
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 8px;
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.28);
@@ -1249,6 +1249,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   color: var(--sidebar-text);
 }
 .call-where {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1285,7 +1286,6 @@ button:disabled { opacity: 0.4; cursor: default; }
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.call-actions { display: flex; align-items: center; gap: 6px; }
 .call-btn {
   height: 28px;
   min-width: 32px;
@@ -1301,7 +1301,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-weight: 700;
 }
 .call-btn:hover { background: rgba(255, 255, 255, 0.16); }
-.call-btn.leave { margin-left: auto; background: #e01e5a; }
+.call-btn.leave { flex: none; background: #e01e5a; }
 .call-btn.leave:hover { background: #c41a50; }
 .sb-pencil { margin-left: auto; opacity: 0.8; display: grid; place-items: center; }
 .sb-draft-count { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 12px; opacity: 0.8; }

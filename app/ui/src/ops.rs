@@ -566,7 +566,7 @@ pub fn start_call(c: Ctx, chat: ChatId) {
     });
 }
 
-/// "Show" in the sidebar call bar.
+/// The call button of a chat whose call is already open: bring its window back.
 pub fn focus_call(c: Ctx) {
     spawn_local(async move {
         if let Err(e) = bridge::focus_call().await {

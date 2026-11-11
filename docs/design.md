@@ -67,7 +67,7 @@ until then Noto Sans is used.
 - Reactions come only from the Telemost set, no custom emoji.
 - Markup: bold, italic, strikethrough, underline, code, links and code blocks. Lists and quotes are not supported.
 - A call opens in its own window, like a huddle: the Telemost meeting page, titled "Call · #channel", with
-  the current call shown at the bottom of the sidebar ("Show the window", "Leave") and the header call button
+  the current call shown at the bottom of the sidebar (where, and "Leave") and the header call button
   turned green. The window shows only the meeting page (`/private-join/<id>`, the iframe of the messenger's
   `/j/<id>`), without the messenger and the Yandex 360 bar. Leaving the meeting closes the window, and a
   leftover "In meeting" status is cleared. WebKitGTK has no WebRTC, so on Linux the window is an

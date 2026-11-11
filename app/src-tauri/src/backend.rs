@@ -1256,7 +1256,8 @@ pub async fn start_call(
     call::open(&app, &url, info, live.web.jar()).await
 }
 
-/// "Show" in the sidebar call bar: the call window comes to the front.
+/// The call window comes to the front (where the desktop lets an app raise its windows:
+/// Windows and X11 do, Wayland compositors usually do not).
 #[tauri::command]
 pub async fn focus_call(app: AppHandle) {
     call::focus(&app).await;
