@@ -34,7 +34,7 @@
 
 - Linux: `Mostik_*_amd64.AppImage`, перед первым запуском `chmod +x`.
 - Windows: установщик `Mostik_*_x64-setup.exe`.
-- macOS (Apple Silicon и Intel): образ `Mostik_*_universal.dmg`, перетащите Мостик в «Программы».
+- macOS (только Apple Silicon, M1 и новее): образ `Mostik_*_aarch64.dmg`, перетащите Мостик в «Программы».
   Сборка не подписана сертификатом Apple, поэтому при первом запуске macOS его блокирует:
   разрешите запуск в «Системные настройки -> Конфиденциальность и безопасность -> Всё равно открыть»
   или выполните `xattr -dr com.apple.quarantine /Applications/Mostik.app`.

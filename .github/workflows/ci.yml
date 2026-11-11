@@ -1,6 +1,6 @@
 # dev and pull requests: build and tests on Linux.
-# main: the same, then bundles in parallel (AppImage for Linux, NSIS setup for Windows, a universal
-# .app and DMG for macOS) and a GitHub release tagged vX.Y.Z with the bundles attached.
+# main: the same, then bundles in parallel (AppImage for Linux, NSIS setup for Windows, an Apple
+# Silicon .app and DMG for macOS) and a GitHub release tagged vX.Y.Z with the bundles attached.
 #
 # macOS bundles are signed ad hoc (signingIdentity "-" in tauri.conf.json), without an Apple
 # Developer ID: Gatekeeper asks the user to allow the first launch.
@@ -124,12 +124,12 @@ jobs:
             os: ubuntu-22.04
           - platform: windows
             os: windows-2025
-          # One universal (Apple Silicon + Intel) bundle. The .app is what the updater installs,
+          # Apple Silicon only, no Intel build. The .app is what the updater installs,
           # the DMG is for the first install; appimage and nsis from tauri.conf.json do not apply here.
           - platform: macos
             os: macos-15
-            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-            build-args: --target universal-apple-darwin --bundles app,dmg
+            rust-targets: aarch64-apple-darwin
+            build-args: --target aarch64-apple-darwin --bundles app,dmg
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -227,9 +227,7 @@ jobs:
           {
             platform linux-x86_64 '*.AppImage'
             platform windows-x86_64 '*-setup.exe'
-            # The universal bundle serves both Mac architectures.
             platform darwin-aarch64 '*.app.tar.gz'
-            platform darwin-x86_64 '*.app.tar.gz'
           } | jq -s --arg version "$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{version: $version, pub_date: $date, platforms: add}' > latest.json
           cat latest.json
