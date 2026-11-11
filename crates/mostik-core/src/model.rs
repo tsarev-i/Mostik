@@ -220,6 +220,9 @@ pub enum CallNote {
     },
     Ended {
         url: String,
+        /// Why a direct call ended; group calls do not say.
+        #[serde(default)]
+        reason: Option<CallEndReason>,
     },
 }
 
@@ -227,8 +230,45 @@ impl CallNote {
     /// The meeting link.
     pub fn url(&self) -> &str {
         match self {
-            CallNote::Started { url } | CallNote::Ringing { url } | CallNote::Ended { url } => url,
+            CallNote::Started { url } | CallNote::Ringing { url } | CallNote::Ended { url, .. } => url,
         }
+    }
+}
+
+/// Why a direct call ended: Telemost's `MeetingEndedReason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallEndReason {
+    /// The person called declined.
+    Declined,
+    /// The caller hung up before an answer.
+    Canceled,
+    /// Someone left the call.
+    Disconnected,
+    /// Nobody answered.
+    Timeout,
+    /// Everyone left.
+    Empty,
+    Abandoned,
+}
+
+impl CallEndReason {
+    /// From the numeric `Reason`.
+    pub fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::Declined,
+            1 => Self::Canceled,
+            2 => Self::Disconnected,
+            3 => Self::Timeout,
+            4 => Self::Empty,
+            5 => Self::Abandoned,
+            _ => return None,
+        })
+    }
+
+    /// The call never connected: declined, cancelled or not answered.
+    pub fn unanswered(self) -> bool {
+        matches!(self, Self::Declined | Self::Canceled | Self::Timeout)
     }
 }
 
@@ -534,6 +574,15 @@ mod tests {
     }
 
     #[test]
+    fn call_end_reasons() {
+        assert_eq!(CallEndReason::from_code(3), Some(CallEndReason::Timeout));
+        assert_eq!(CallEndReason::from_code(9), None);
+        assert!(CallEndReason::Timeout.unanswered());
+        assert!(CallEndReason::Declined.unanswered());
+        assert!(!CallEndReason::Empty.unanswered());
+    }
+
+    #[test]
     fn active_calls_follow_the_latest_note() {
         let note = |chat: &str, ts, started: bool| Message {
             chat_id: ChatId(chat.into()),
@@ -544,6 +593,7 @@ mod tests {
             } else {
                 CallNote::Ended {
                     url: format!("u-{chat}"),
+                    reason: None,
                 }
             }),
             ..msg("u1", ts)

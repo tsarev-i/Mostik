@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Renders Mostik's notification sounds into app/src-tauri/sounds/*.wav.
+"""Renders Mostik's notification sounds and ringtone into app/src-tauri/sounds/*.wav.
 
 The sounds are synthesised here from scratch (FM bells, modal marimba, swept sines, filtered
 noise), so they are the project's own work under its license, not samples of other apps.
@@ -99,6 +99,20 @@ SOUNDS = {
     "knock": ([(0.0, 1.0, knock(1)), (0.14, 0.8, knock(2))], 0.45),
     # A quick major arpeggio on glass.
     "glass": ([(0.0, 0.9, glass(1318.5, 0.22)), (0.07, 0.8, glass(1661.2, 0.22)), (0.14, 0.75, glass(1975.5, 0.3))], 0.9),
+    # The ring of an incoming call, played in a loop: two rising marimba-and-bell pairs.
+    "ringtone": (
+        [
+            (0.0, 0.9, marimba(784.0)),
+            (0.0, 0.35, bell(1568.0, 0.18)),
+            (0.16, 1.0, marimba(1046.5)),
+            (0.16, 0.35, bell(2093.0, 0.2)),
+            (0.5, 0.9, marimba(784.0)),
+            (0.5, 0.35, bell(1568.0, 0.18)),
+            (0.66, 1.0, marimba(1046.5)),
+            (0.66, 0.35, bell(2093.0, 0.25)),
+        ],
+        1.5,
+    ),
 }
 
 

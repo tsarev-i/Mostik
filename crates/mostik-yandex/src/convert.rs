@@ -270,6 +270,8 @@ fn call_note(sm: &Value) -> Option<Message> {
         Started,
         Ringing,
         Ended,
+        /// The end of a direct call, which always has a reason.
+        PersonalEnded,
     }
     let info = &sm["ServerMessageInfo"];
     let (chat, ts, kind, meeting) = if let Some(sys) = sm.pointer("/ClientMessage/SystemMessage") {
@@ -277,7 +279,7 @@ fn call_note(sm: &Value) -> Option<Message> {
             ("MeetingStartedMessage", Kind::Started),
             ("PersonalMeetingStartedMessage", Kind::Started),
             ("MeetingEndedMessage", Kind::Ended),
-            ("PersonalMeetingEndedMessage", Kind::Ended),
+            ("PersonalMeetingEndedMessage", Kind::PersonalEnded),
         ]
         .into_iter()
         .find_map(|(name, kind)| sys.get(name).map(|m| (kind, m)))?;
@@ -308,16 +310,40 @@ fn call_note(sm: &Value) -> Option<Message> {
         call: Some(match kind {
             Kind::Started => CallNote::Started { url },
             Kind::Ringing => CallNote::Ringing { url },
-            Kind::Ended => CallNote::Ended { url },
+            Kind::Ended => CallNote::Ended { url, reason: None },
+            // Zero is left out of the JSON: no `Reason` is 0, "declined" (the web client reads
+            // it as `Reason || 0` too).
+            Kind::PersonalEnded => CallNote::Ended {
+                url,
+                reason: CallEndReason::from_code(n(meeting, &["Reason"]).unwrap_or(0)),
+            },
         }),
     })
 }
 
-/// Whether the push repeats a notification already sent (`IsSilent`), like the ringing of a call
-/// every 5 s: it updates the state but must not notify again.
-pub fn is_silent(body: &Value) -> bool {
+/// A push about a direct call ringing for the user:
+/// `MeetingCallingMessage{RingingId, IncomingCall | RingingEnded}`. The call itself (chat, link,
+/// caller) comes from [`from_push`] as a `Ringing` note.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ringing {
+    /// The call rings; it repeats every 5 s.
+    Incoming { id: String },
+    /// It stopped ringing: the caller hung up, someone answered (maybe on another device), or
+    /// nobody did in time.
+    Ended { id: String },
+}
+
+pub fn ringing(body: &Value) -> Option<Ringing> {
     let sm = body.get("ServerMessage").unwrap_or(body);
-    sm.pointer("/ClientMessage/IsSilent").and_then(Value::as_bool) == Some(true)
+    let calling = sm.pointer("/ClientMessage/MeetingCallingMessage")?;
+    let id = s(calling, &["RingingId"])?.to_owned();
+    if calling.get("IncomingCall").is_some() {
+        Some(Ringing::Incoming { id })
+    } else if calling.get("RingingEnded").is_some() {
+        Some(Ringing::Ended { id })
+    } else {
+        None
+    }
 }
 
 /// A meeting link from a `MeetingId`, which is either the link itself or the bare meeting number.
@@ -1080,7 +1106,8 @@ mod tests {
             Some(LiveEvent::Upsert { message, .. }) => assert_eq!(
                 message.call,
                 Some(CallNote::Ended {
-                    url: "https://telemost.360.yandex.ru/j/123".into()
+                    url: "https://telemost.360.yandex.ru/j/123".into(),
+                    reason: None,
                 })
             ),
             other => panic!("{other:?}"),
@@ -1103,7 +1130,10 @@ mod tests {
                 "ServerMessageInfo": {"From": {"DisplayName": "Boris", "Guid": "bb"}, "Timestamp": sent}})
         };
         for (silent, sent) in [(false, 150), (true, 5_000_150)] {
-            assert_eq!(is_silent(&ring(silent, sent)), silent);
+            assert_eq!(
+                ringing(&ring(silent, sent)),
+                Some(Ringing::Incoming { id: "r1".into() })
+            );
             match from_push(&ring(silent, sent), Some(&UserId("aa".into()))) {
                 Some(LiveEvent::Upsert { message, author, .. }) => {
                     assert_eq!(message.chat_id, ChatId(chat.into()));
@@ -1122,14 +1152,36 @@ mod tests {
         match from_push(&ended, None) {
             Some(LiveEvent::Upsert { message, .. }) => {
                 assert_eq!((message.ts, message.seq_no), (900, 50));
-                assert_eq!(message.call, Some(CallNote::Ended { url: url.into() }));
+                assert_eq!(
+                    message.call,
+                    Some(CallNote::Ended {
+                        url: url.into(),
+                        reason: Some(CallEndReason::Timeout),
+                    })
+                );
                 assert!(!message.is_ringing());
             }
+            other => panic!("{other:?}"),
+        }
+        // A declined call: Telemost leaves out the zero `Reason`.
+        let declined = json!({"ClientMessage": {"SystemMessage": {"ChatId": chat, "PayloadId": "p",
+                "PersonalMeetingEndedMessage": {"CallType": 1, "MeetingId": url}}},
+            "ServerMessageInfo": {"From": {"Guid": "bb"}, "SeqNo": 51, "Timestamp": 990}});
+        match from_push(&declined, None) {
+            Some(LiveEvent::Upsert { message, .. }) => assert_eq!(
+                message.call,
+                Some(CallNote::Ended {
+                    url: url.into(),
+                    reason: Some(CallEndReason::Declined),
+                })
+            ),
             other => panic!("{other:?}"),
         }
         let rang_off = json!({"ClientMessage": {"MeetingCallingMessage": {"RingingEnded": {}, "RingingId": "r1"}},
             "ServerMessageInfo": {"From": {"Guid": "11111111-1111-1111-1111-111111111111"}, "Timestamp": 950}});
         assert_eq!(from_push(&rang_off, None), None);
+        assert_eq!(ringing(&rang_off), Some(Ringing::Ended { id: "r1".into() }));
+        assert_eq!(ringing(&ended), None);
     }
 
     #[test]

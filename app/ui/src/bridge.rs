@@ -773,6 +773,27 @@ pub async fn leave_call() -> Result<(), String> {
     call("leave_call", NoArgs {}).await
 }
 
+/// A call ringing for the user, for the popup (mirror of the backend `ring::Ring`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ring {
+    pub caller: User,
+}
+
+pub async fn ring_info() -> Result<Option<Ring>, String> {
+    call("ring_info", NoArgs {}).await
+}
+
+#[derive(Serialize)]
+struct AnswerArgs {
+    accept: bool,
+}
+
+/// "Accept" or "Decline" in the popup.
+pub async fn answer_ring(accept: bool) -> Result<(), String> {
+    call("answer_ring", AnswerArgs { accept }).await
+}
+
 pub async fn current_call() -> Result<Option<CallInfo>, String> {
     call("current_call", NoArgs {}).await
 }

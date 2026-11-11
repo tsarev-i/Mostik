@@ -1612,7 +1612,7 @@ fn avatar_url(id: &str, size: u32) -> String {
 }
 
 #[component]
-fn Avatar(user: User, #[prop(default = 36)] size: u32, #[prop(optional)] presence: bool) -> impl IntoView {
+pub(crate) fn Avatar(user: User, #[prop(default = 36)] size: u32, #[prop(optional)] presence: bool) -> impl IntoView {
     let radius = if size >= 32 { 8 } else { 4 };
     let style = format!(
         "width:{size}px;height:{size}px;background:{};font-size:{}px;border-radius:{radius}px",
@@ -2599,10 +2599,32 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
             out.push(view! { <div class="day-group"><DayDivider ts=ts/>{items}</div> }.into_any());
         }
     };
-    // Only the latest call note can offer "Join"; an end note shows how long its call lasted.
+    // A call is one line, as in Slack: its start note shows the end too (how it went, how long
+    // it lasted), and the end note itself is not shown. An end without a start in the loaded
+    // page (a direct call in the history, whose ringing Telemost does not keep) is a line itself.
+    let mut ends: std::collections::HashMap<Timestamp, Message> = Default::default();
+    let mut paired: std::collections::HashSet<Timestamp> = Default::default();
+    let mut open: std::collections::HashMap<&str, Timestamp> = Default::default();
+    for m in &list {
+        match &m.call {
+            Some(note @ (CallNote::Started { .. } | CallNote::Ringing { .. })) => {
+                open.insert(note.url(), m.ts);
+            }
+            Some(note @ CallNote::Ended { .. }) => {
+                if let Some(start) = open.remove(note.url()) {
+                    ends.insert(start, m.clone());
+                    paired.insert(m.ts);
+                }
+            }
+            None => {}
+        }
+    }
+    // Only the latest call can offer "Join".
     let last_call = list.iter().rev().find(|m| m.call.is_some()).map(|m| m.ts);
-    let mut started: Option<(String, Timestamp)> = None;
     for m in list {
+        if m.call.is_some() && paired.contains(&m.ts) {
+            continue;
+        }
         let new_day = prev.as_ref().is_none_or(|p| time::day_key(p.ts) != time::day_key(m.ts));
         if new_day && !in_thread {
             flush(&mut out, &mut day, day_ts);
@@ -2610,15 +2632,13 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
         }
         let grouped = !new_day && continues_group(prev.as_ref(), &m);
         let row = match &m.call {
-            Some(note @ (CallNote::Started { .. } | CallNote::Ringing { .. })) => {
-                // A ringing call may never be answered: its end shows no duration.
-                started = matches!(note, CallNote::Started { .. }).then(|| (note.url().to_owned(), m.ts));
-                let live = last_call == Some(m.ts);
-                view! { <CallRow msg=m.clone() live=live since=None/> }.into_any()
+            Some(CallNote::Ended { .. }) => {
+                view! { <CallRow msg=m.clone() end=Some(m.clone()) live=false/> }.into_any()
             }
-            Some(CallNote::Ended { url }) => {
-                let since = started.take().filter(|(u, _)| u == url).map(|(_, ts)| ts);
-                view! { <CallRow msg=m.clone() live=false since=since/> }.into_any()
+            Some(_) => {
+                let end = ends.remove(&m.ts);
+                let live = end.is_none() && last_call == Some(m.ts);
+                view! { <CallRow msg=m.clone() end=end live=live/> }.into_any()
             }
             None => view! { <MessageRow msg=m.clone() grouped=grouped in_thread=in_thread/> }.into_any(),
         };
@@ -2633,26 +2653,59 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
     out
 }
 
-/// A call note in the feed, like Slack's huddle message: who started the call and "Join" while it
-/// goes on, or that it ended and how long it lasted (`since` is when it started).
+/// What a call line says, and whether it is a missed call. `anchor` is the note the line stands
+/// for (the start, or a lone end), `end` the note of its end, if it ended.
+fn call_title(anchor: &CallNote, end: Option<&Message>, me: &UserId) -> (&'static str, bool) {
+    let ended = end.and_then(|e| match &e.call {
+        Some(CallNote::Ended { reason, .. }) => Some((*reason, &e.author)),
+        _ => None,
+    });
+    match ended {
+        None if matches!(anchor, CallNote::Ringing { .. }) => (tr().call_incoming, false),
+        None => (tr().call_started, false),
+        Some((Some(CallEndReason::Declined), _)) => (tr().call_declined, false),
+        // The end note comes from the caller: their own call nobody answered, or one the user missed.
+        Some((Some(r), author)) if r.unanswered() && author == me => (tr().call_no_answer, false),
+        Some((Some(r), _)) if r.unanswered() => (tr().call_missed, true),
+        Some((reason, _)) if reason.is_some() || matches!(anchor, CallNote::Ringing { .. }) => {
+            (tr().call_direct, false)
+        }
+        Some(_) => (tr().call_done, false),
+    }
+}
+
+/// A call in the feed, like Slack's huddle message: who started it and "Join" while it goes on;
+/// once it ended, how it went (a missed or declined direct call) or how long it lasted.
 #[component]
-fn CallRow(msg: Message, live: bool, since: Option<Timestamp>) -> impl IntoView {
+fn CallRow(msg: Message, end: Option<Message>, live: bool) -> impl IntoView {
     let c = ctx();
-    let started = matches!(msg.call, Some(CallNote::Started { .. } | CallNote::Ringing { .. }));
-    let title = match msg.call {
-        Some(CallNote::Ringing { .. }) => tr().call_incoming,
-        Some(CallNote::Started { .. }) => tr().call_started,
-        _ => tr().call_ended,
+    let Some(anchor) = msg.call.clone() else {
+        return ().into_any();
     };
-    let author = c.snap.with_untracked(|s| s.user(&msg.author).cloned());
-    let who = started.then(|| {
-        let name = author
-            .as_ref()
-            .map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
+    let me = c.snap.with_untracked(|s| s.me.clone());
+    let (title, missed) = call_title(&anchor, end.as_ref(), &me);
+    let direct = match (&anchor, end.as_ref().and_then(|e| e.call.as_ref())) {
+        (CallNote::Ringing { .. }, _) => true,
+        (_, Some(CallNote::Ended { reason, .. })) => reason.is_some(),
+        _ => false,
+    };
+    let going = end.is_none();
+    // A direct chat needs no name: it is the other person's call or the user's own.
+    let who = (!direct && !matches!(anchor, CallNote::Ended { .. })).then(|| {
+        let name = c
+            .snap
+            .with_untracked(|s| s.user(&msg.author).map(|u| u.display_name.clone()))
+            .unwrap_or_else(|| tr().user.to_owned());
         let id = msg.author.clone();
         view! { <button class="msg-author" on:click=move |_| ops::open_profile(c, id.clone())>{name}</button> }
     });
-    let lasted = since.map(|from| tr().call_lasted(msg.ts.saturating_sub(from) / 60_000_000));
+    let unanswered = end
+        .as_ref()
+        .is_some_and(|e| matches!(&e.call, Some(CallNote::Ended { reason: Some(r), .. }) if r.unanswered()));
+    let lasted = end
+        .as_ref()
+        .filter(|e| e.ts != msg.ts && !unanswered)
+        .map(|e| tr().call_lasted(e.ts.saturating_sub(msg.ts) / 60_000_000));
     let chat = msg.chat_id.clone();
     // The button stays while the call goes on: a later end note removes it.
     let join = live.then(|| {
@@ -2661,15 +2714,20 @@ fn CallRow(msg: Message, live: bool, since: Option<Timestamp>) -> impl IntoView 
                 let chat = chat.clone();
                 view! {
                     <button class="btn small call-join" on:click=move |_| ops::start_call(c, chat.clone())>
-                        <Icon icon=I::Headphones size=14/><span>{tr().call_join}</span>
+                        <Icon icon=if direct { I::Phone } else { I::Headphones } size=14/><span>{tr().call_join}</span>
                     </button>
                 }
             })}
         }
     });
+    let icon = match (direct, missed || unanswered) {
+        (true, true) => I::PhoneOff,
+        (true, false) => I::Phone,
+        _ => I::Headphones,
+    };
     view! {
-        <div class="msg call-note" class:ended=!started data-ts=msg.ts.to_string()>
-            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=I::Headphones size=16/></span></span>
+        <div class="msg call-note" class:ended=!going class:missed=missed data-ts=msg.ts.to_string()>
+            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=icon size=16/></span></span>
             <div class="call-note-body">
                 <span class="call-note-title">{title}</span>
                 {who.map(|w| view! { <span class="call-note-sep">"·"</span>{w} })}
@@ -2679,6 +2737,7 @@ fn CallRow(msg: Message, live: bool, since: Option<Timestamp>) -> impl IntoView 
             {join}
         </div>
     }
+    .into_any()
 }
 
 #[component]
@@ -4521,7 +4580,8 @@ fn DmList() -> impl IntoView {
                 let me = c.snap.with(|s| s.me.clone());
                 let preview = last.as_ref().map(|m| {
                     if let Some(note) = &m.call {
-                        return format!("📞 {}", match note { CallNote::Started { .. } => tr().call_started, CallNote::Ringing { .. } => tr().call_incoming, CallNote::Ended { .. } => tr().call_ended });
+                        let end = matches!(note, CallNote::Ended { .. }).then_some(m);
+                        return format!("📞 {}", call_title(note, end, &me).0);
                     }
                     let text = c.snap.with(|s| s.plain(&m.text));
                     let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", c.snap.with(|s| s.plain(&m.forwarded[0].text))) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };

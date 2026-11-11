@@ -146,9 +146,46 @@ pub fn typing(chat_id: &str) -> Value {
     json!({ "Typing": { "ChatId": chat_id } })
 }
 
+/// Tells Telemost that a call rings on this device (`NotifyRinging`), as the web client does when
+/// it shows an incoming call.
+pub fn notify_ringing(ringing_id: &str) -> Value {
+    json!({ "MeetingCallingMessage": { "RingingId": ringing_id, "NotifyRinging": {} } })
+}
+
+/// Why the user stopped a call ringing: Telemost's `EndRingingReason`.
+#[derive(Debug, Clone, Copy)]
+pub enum EndRinging {
+    Accepted = 0,
+    Declined = 1,
+}
+
+/// Stops a call ringing on all the user's devices: accepted or declined (`EndRinging`; the
+/// supported feature 0 is `END_ACTION`).
+pub fn end_ringing(ringing_id: &str, reason: EndRinging) -> Value {
+    json!({ "MeetingCallingMessage": { "RingingId": ringing_id,
+        "EndRinging": { "Reason": reason as u8, "SupportedFeatures": [0] } } })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ringing_answers_carry_the_ringing_id() {
+        assert_eq!(
+            end_ringing("r1", EndRinging::Declined),
+            json!({"MeetingCallingMessage": {"RingingId": "r1",
+                "EndRinging": {"Reason": 1, "SupportedFeatures": [0]}}})
+        );
+        assert_eq!(
+            end_ringing("r1", EndRinging::Accepted)["MeetingCallingMessage"]["EndRinging"]["Reason"],
+            0
+        );
+        assert_eq!(
+            notify_ringing("r1"),
+            json!({"MeetingCallingMessage": {"RingingId": "r1", "NotifyRinging": {}}})
+        );
+    }
 
     #[test]
     fn history_page_omits_empty_fields() {

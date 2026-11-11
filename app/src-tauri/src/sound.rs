@@ -1,4 +1,4 @@
-//! Notification sounds: WAV files rendered by `scripts/sounds.py`, built into the binary and
+//! Notification sounds and the ringtone: WAV files rendered by `scripts/sounds.py`, built into the binary and
 //! played through the system's default output (PipeWire or PulseAudio via ALSA on Linux,
 //! WASAPI on Windows).
 
@@ -15,6 +15,37 @@ const FILES: &[(&str, &[u8])] = &[
     ("knock", include_bytes!("../sounds/knock.wav")),
     ("glass", include_bytes!("../sounds/glass.wav")),
 ];
+
+/// The ring of an incoming call, played in a loop while the call rings.
+const RINGTONE: &[u8] = include_bytes!("../sounds/ringtone.wav");
+
+/// One ring every this often.
+const RING_EVERY: Duration = Duration::from_secs(3);
+
+/// Rings, one ring every [`RING_EVERY`], for as long as `keep` says so (asked every 50 ms, so the
+/// ringing stops at once). Blocks: run it on a thread of its own.
+pub fn ring_while(keep: impl Fn() -> bool) {
+    if let Err(e) = ring_loop(&keep) {
+        eprintln!("ringtone: {e}");
+    }
+}
+
+fn ring_loop(keep: &dyn Fn() -> bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut sink = rodio::DeviceSinkBuilder::open_default_sink()?;
+    sink.log_on_drop(false);
+    while keep() {
+        let started = std::time::Instant::now();
+        let player = rodio::play(sink.mixer(), std::io::Cursor::new(RINGTONE))?;
+        while started.elapsed() < RING_EVERY {
+            if !keep() {
+                player.stop();
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Ok(())
+}
 
 /// A burst of messages gives one sound, not a pile of them.
 const MIN_GAP: Duration = Duration::from_millis(700);
@@ -65,5 +96,6 @@ mod tests {
             assert!(wav.is_some_and(|w| w.starts_with(b"RIFF")), "no WAV for sound {id}");
         }
         assert_eq!(FILES.len() + 1, NOTIFICATION_SOUNDS.len());
+        assert!(RINGTONE.starts_with(b"RIFF"));
     }
 }

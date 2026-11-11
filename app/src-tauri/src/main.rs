@@ -9,6 +9,7 @@ mod call;
 #[cfg(target_os = "linux")]
 mod cdp;
 mod login;
+mod ring;
 mod sound;
 mod store;
 mod update;
@@ -107,6 +108,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(backend::AppState::default())
         .manage(call::CallState::default())
+        .manage(ring::RingState::default())
         .manage(update::UpdateState::default())
         .register_asynchronous_uri_scheme_protocol("mostikfile", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -172,6 +174,8 @@ fn main() {
             backend::focus_call,
             backend::leave_call,
             backend::current_call,
+            ring::ring_info,
+            ring::answer_ring,
             backend::recommended_chats,
             backend::join_chat,
             backend::open_yandex_id,

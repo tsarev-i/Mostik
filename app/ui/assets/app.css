@@ -567,6 +567,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 .call-note.ended .call-note-badge { background: var(--bg-hover); color: var(--text-muted); }
 .call-note-body { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .call-note-title { color: var(--text-strong); font-weight: 700; }
+.call-note.missed .call-note-badge { background: rgba(224, 30, 90, 0.16); color: var(--badge); }
+.call-note.missed .call-note-title { color: var(--badge); }
 .call-note-sep, .call-note-meta { color: var(--text-muted); font-size: 13px; }
 .call-join { flex: none; display: flex; align-items: center; gap: 6px; border-color: var(--online); color: var(--online); }
 
@@ -1806,3 +1808,56 @@ button.ws-tile { cursor: pointer; }
 .thread-text { color: var(--text); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .thread-meta { display: flex; gap: 10px; margin-top: 2px; font-size: 13px; color: var(--text-muted); }
 .thread-new { color: var(--badge); font-weight: 700; }
+
+/* ── Incoming call popup (its own window, like Slack's) ────────────── */
+
+.ring {
+  height: 100vh;
+  padding: 20px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background: linear-gradient(160deg, var(--frame-a) 0%, var(--frame-b) 60%, var(--frame-c) 100%);
+  border: 1px solid var(--border-soft);
+  user-select: none;
+}
+.ring-caller { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.ring-face { position: relative; flex: none; border-radius: 10px; }
+.ring-face::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 12px;
+  border: 2px solid var(--online);
+  animation: ring-pulse 1.5s ease-out infinite;
+}
+@keyframes ring-pulse {
+  from { opacity: 0.9; transform: scale(0.96); }
+  to { opacity: 0; transform: scale(1.18); }
+}
+.ring-text { min-width: 0; }
+.ring-name {
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 900;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ring-sub { color: var(--sidebar-text); font-size: 14px; }
+.ring-actions { display: flex; gap: 10px; }
+.ring-btn {
+  flex: 1;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 700;
+}
+.ring-btn.decline { background: #e01e5a; }
+.ring-btn.decline:hover:not(:disabled) { background: #c81a50; }
+.ring-btn.accept { background: #007a5a; }
+.ring-btn.accept:hover:not(:disabled) { background: #148567; }

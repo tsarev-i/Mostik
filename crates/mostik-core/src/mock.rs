@@ -78,7 +78,7 @@ fn call(chat: &str, ts: Timestamp, author: &str, started: bool) -> Message {
         call: Some(if started {
             CallNote::Started { url }
         } else {
-            CallNote::Ended { url }
+            CallNote::Ended { url, reason: None }
         }),
         ..msg(chat, ts, author, "")
     }

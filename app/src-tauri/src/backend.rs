@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use mostik_core::{ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId};
+use mostik_core::{CallNote, ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
@@ -416,6 +416,22 @@ async fn push(live: &Live, client_message: Value) -> Result<Value, String> {
         return Err(format!("Telemost rejected the request: {}", shape(&resp)));
     }
     Ok(resp)
+}
+
+/// Sends a client message over the current connection.
+pub(crate) async fn push_now(app: &AppHandle, client_message: Value) -> Result<(), String> {
+    let live = live(&app.state::<AppState>()).await?;
+    push(&live, client_message).await.map(|_| ())
+}
+
+/// The person with their photo and name from the directory, when the connection is up.
+pub(crate) async fn with_profile(app: &AppHandle, user: User) -> User {
+    let mut users = [user];
+    if let Ok(live) = live(&app.state::<AppState>()).await {
+        fill_profiles(&live.web, &mut users).await;
+    }
+    let [user] = users;
+    user
 }
 
 #[tauri::command]
@@ -974,6 +990,11 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             {
                 let _ = writeln!(f, "{}", json!({ "event": event, "shape": shape(&body) }));
             }
+            let ringing = convert::ringing(&body);
+            if let Some(convert::Ringing::Ended { id }) = &ringing {
+                crate::ring::stop(app, id);
+                return;
+            }
             let me = shared.lock().ok().and_then(|sh| sh.me.clone());
             let Some(ev) = convert::from_push(&body, me.as_ref()) else {
                 return;
@@ -983,6 +1004,26 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
                 && let Ok(mut sh) = shared.lock()
             {
                 sh.my_availability = p.availability;
+            }
+            // A call rings with a popup and a ringtone instead of a notification.
+            if let LiveEvent::Upsert { message, author, .. } = &ev {
+                match (&message.call, &ringing) {
+                    (Some(CallNote::Ringing { url }), Some(convert::Ringing::Incoming { id }))
+                        if may_ring(app, shared, message) =>
+                    {
+                        // The popup asks the directory for a name the push did not bring.
+                        let caller = author.clone().unwrap_or_else(|| stand_in(message.author.clone()));
+                        let ring = crate::ring::Ring {
+                            id: id.clone(),
+                            chat_id: message.chat_id.0.clone(),
+                            url: url.clone(),
+                            caller,
+                        };
+                        crate::ring::incoming(app, ring);
+                    }
+                    (Some(CallNote::Ended { url, .. }), _) => crate::ring::call_ended(app, url),
+                    _ => {}
+                }
             }
             // A message from a chat the list does not have (someone started a direct chat or
             // added the user to a group): fetch the chat, then show the message.
@@ -1004,9 +1045,8 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             if let LiveEvent::Upsert { message, mentioned, .. } = &ev {
                 learn_mentions(app, shared, message, mentioned);
             }
-            // A call rings with a push every 5 s: only the first one notifies.
             if let LiveEvent::Upsert { message, author, .. } = &ev
-                && !convert::is_silent(&body)
+                && !message.is_ringing()
                 && reply_notifies_now(app, shared, message, author.as_ref())
             {
                 notify(app, shared, message, author.as_ref());
@@ -1195,6 +1235,22 @@ fn mentions_me(sh: &Shared, m: &Message) -> bool {
     })
 }
 
+/// Whether a call ringing in `m`'s chat may ring: not in "Do not disturb", not in a chat that
+/// notifies about nothing, not with notifications off. Unlike messages, a call rings even when
+/// the window is in focus, as in Slack.
+fn may_ring(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message) -> bool {
+    let Ok(sh) = shared.lock() else { return false };
+    if !sh.ready
+        || sh.me.as_ref() == Some(&m.author)
+        || sh.my_availability == mostik_core::Availability::DoNotDisturb
+        || sh.muted.get(&m.chat_id.0) == Some(&NotifyLevel::Nothing)
+    {
+        return false;
+    }
+    let state = app.state::<AppState>();
+    state.prefs.lock().is_ok_and(|p| p.notify != "nothing")
+}
+
 fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>) {
     let Ok(mut sh) = shared.lock() else { return };
     // A thread reply lives in the thread chat: its time and number mean nothing in the parent chat.
@@ -1248,9 +1304,7 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         Some(chat) if chat != &who => format!("{who} · {chat}"),
         _ => who,
     };
-    let body: String = if m.is_ringing() {
-        text(app, "📞 Входящий звонок", "📞 Incoming call").to_owned()
-    } else if m.call.is_some() {
+    let body: String = if m.call.is_some() {
         text(app, "📞 Начался созвон", "📞 A call started").to_owned()
     } else if prefs.preview {
         with_names(&sh, |names| mostik_core::markup::plain(&m.text, names))
@@ -1798,13 +1852,21 @@ pub async fn forward_message(
 /// window title and the sidebar show: `#dev` or the person's name. `url` is the link of a call
 /// already going on in the chat: joining it needs no `create_meeting`.
 #[tauri::command]
-pub async fn start_call(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
+pub async fn start_call(app: AppHandle, chat_id: String, label: String, url: Option<String>) -> Result<(), String> {
+    open_call(&app, chat_id, label, url).await
+}
+
+/// See [`start_call`]. Joining a call that rings for the user answers it.
+pub(crate) async fn open_call(
+    app: &AppHandle,
     chat_id: String,
     label: String,
     url: Option<String>,
 ) -> Result<(), String> {
+    if let Some(url) = &url {
+        crate::ring::accept(app, url);
+    }
+    let state = app.state::<AppState>();
     let info = call::CallInfo {
         chat_id: Some(chat_id.clone()),
         label,
@@ -1831,7 +1893,7 @@ pub async fn start_call(
             .ok_or("Telemost did not return the meeting link")?;
         Ok((convert::meeting_url(id), live.web.jar().clone()))
     };
-    call::open_chat_call(&app, info, prepare).await
+    call::open_chat_call(app, info, prepare).await
 }
 
 /// The call window comes to the front (where the desktop lets an app raise its windows:
