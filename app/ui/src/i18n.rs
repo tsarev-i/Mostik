@@ -1097,9 +1097,10 @@ impl Tr {
             "bell" => ("Колокольчик", "Bell"),
             "marimba" => ("Маримба", "Marimba"),
             "drop" => ("Капля", "Drop"),
-            "pop" => ("Пузырёк", "Pop"),
             "knock" => ("Тук-тук", "Knock"),
             "glass" => ("Стекло", "Glass"),
+            "electric_piano" => ("Электропиано", "Electric piano"),
+            "retro" => ("Ретро", "Retro"),
             _ => ("Без звука", "None"),
         };
         match self.lang {

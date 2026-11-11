@@ -11,18 +11,16 @@ const FILES: &[(&str, &[u8])] = &[
     ("bell", include_bytes!("../sounds/bell.wav")),
     ("marimba", include_bytes!("../sounds/marimba.wav")),
     ("drop", include_bytes!("../sounds/drop.wav")),
-    ("pop", include_bytes!("../sounds/pop.wav")),
     ("knock", include_bytes!("../sounds/knock.wav")),
     ("glass", include_bytes!("../sounds/glass.wav")),
+    ("electric_piano", include_bytes!("../sounds/electric_piano.wav")),
+    ("retro", include_bytes!("../sounds/retro.wav")),
 ];
 
-/// The ring of an incoming call, played in a loop while the call rings.
+/// The ring of an incoming call: one pass of a loop, rendered to join seamlessly end to start.
 const RINGTONE: &[u8] = include_bytes!("../sounds/ringtone.wav");
 
-/// One ring every this often.
-const RING_EVERY: Duration = Duration::from_secs(3);
-
-/// Rings, one ring every [`RING_EVERY`], for as long as `keep` says so (asked every 50 ms, so the
+/// Rings the ringtone round and round for as long as `keep` says so (asked every 50 ms, so the
 /// ringing stops at once). Blocks: run it on a thread of its own.
 pub fn ring_while(keep: impl Fn() -> bool) {
     if let Err(e) = ring_loop(&keep) {
@@ -31,19 +29,16 @@ pub fn ring_while(keep: impl Fn() -> bool) {
 }
 
 fn ring_loop(keep: &dyn Fn() -> bool) -> Result<(), Box<dyn std::error::Error>> {
+    use rodio::Source;
+
     let mut sink = rodio::DeviceSinkBuilder::open_default_sink()?;
     sink.log_on_drop(false);
+    let player = rodio::Player::connect_new(sink.mixer());
+    player.append(rodio::Decoder::new(std::io::Cursor::new(RINGTONE))?.repeat_infinite());
     while keep() {
-        let started = std::time::Instant::now();
-        let player = rodio::play(sink.mixer(), std::io::Cursor::new(RINGTONE))?;
-        while started.elapsed() < RING_EVERY {
-            if !keep() {
-                player.stop();
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        std::thread::sleep(Duration::from_millis(50));
     }
+    player.stop();
     Ok(())
 }
 
