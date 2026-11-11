@@ -17,7 +17,9 @@ import wave
 from pathlib import Path
 
 RATE = 44100
-PEAK = 0.45  # Notifications should not be loud: about -7 dBFS.
+PEAK = 0.45  # Peak of a freshly rendered sound (about -7 dBFS), before the loudness match.
+LOUDNESS = -20.0  # LUFS of the loudest 400 ms: every notification sound is brought to it.
+CEILING = 0.8  # Highest sample peak the loudness match may raise a sound to: about -2 dBFS.
 OUT = Path(__file__).resolve().parent.parent / "app" / "src-tauri" / "sounds"
 
 
@@ -155,21 +157,13 @@ def reverb(x, amount):
 
 
 def finish(x, room):
-    """Reverb, a 30 ms fade at the end, then normalise; the loudest 300 ms are kept from getting loud."""
+    """Reverb, a 30 ms fade at the end, then normalise."""
     x = reverb(x, room)
     n, fade = len(x), int(RATE * 0.03)
     for i in range(fade):
         x[n - 1 - i] *= i / fade
     peak = max(map(abs, x)) or 1.0
-    x = [v * PEAK / peak for v in x]
-    w = int(0.3 * RATE)
-    acc = sum(v * v for v in x[:w])
-    best = acc
-    for i in range(w, n):
-        acc += x[i] * x[i] - x[i - w] * x[i - w]
-        best = max(best, acc)
-    rms = math.sqrt(best / min(w, n))
-    return [v * 0.1 / rms for v in x] if rms > 0.1 else x
+    return [v * PEAK / peak for v in x]
 
 
 def electric_piano():
@@ -246,6 +240,57 @@ def render(notes, length):
     return [x * PEAK / peak for x in out]
 
 
+def biquad(x, b0, b1, b2, a0, a1, a2):
+    out, x1, x2, y1, y2 = [0.0] * len(x), 0.0, 0.0, 0.0, 0.0
+    for i, v in enumerate(x):
+        y = (b0 * v + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2) / a0
+        out[i], x2, x1, y2, y1 = y, x1, v, y1, y
+    return out
+
+
+def loudness(x):
+    """Momentary loudness of the loudest 400 ms, LUFS (ITU-R BS.1770 K-weighting).
+
+    The ear hears a plain peak level very unevenly (a low knock and a bright bell at the same peak
+    differ a lot), so the sounds are matched by this instead.
+    """
+    # Stage 1: high shelf, +4 dB above about 1.7 kHz (the head's effect).
+    a = 10 ** (3.999843853973347 / 40)
+    w = 2 * math.pi * 1681.974450955533 / RATE
+    alpha = math.sin(w) / (2 * 0.7071752369554196)
+    c, r = math.cos(w), 2 * math.sqrt(a) * alpha
+    y = biquad(
+        x,
+        a * ((a + 1) + (a - 1) * c + r),
+        -2 * a * ((a - 1) + (a + 1) * c),
+        a * ((a + 1) + (a - 1) * c - r),
+        (a + 1) - (a - 1) * c + r,
+        2 * ((a - 1) - (a + 1) * c),
+        (a + 1) - (a - 1) * c - r,
+    )
+    # Stage 2: high pass at about 38 Hz.
+    w = 2 * math.pi * 38.13547087602444 / RATE
+    alpha = math.sin(w) / (2 * 0.5003270373238773)
+    c = math.cos(w)
+    y = biquad(y, (1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + alpha, -2 * c, 1 - alpha)
+    window, step = int(0.4 * RATE), int(0.01 * RATE)
+    y += [0.0] * max(0, window - len(y))
+    sq = [v * v for v in y]
+    acc = sum(sq[:window])
+    best = acc
+    for start in range(step, len(sq) - window + 1, step):
+        acc += sum(sq[start + window - step : start + window]) - sum(sq[start - step : start])
+        best = max(best, acc)
+    return -0.691 + 10 * math.log10(max(best / window, 1e-12))
+
+
+def match_loudness(x):
+    """Brings a notification sound to LOUDNESS, never above CEILING."""
+    gain = 10 ** ((LOUDNESS - loudness(x)) / 20)
+    gain = min(gain, CEILING / (max(map(abs, x)) or 1.0))
+    return [v * gain for v in x]
+
+
 def write(path, samples):
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
@@ -258,7 +303,10 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     for name, sound in SOUNDS.items():
         path = OUT / f"{name}.wav"
-        write(path, sound() if callable(sound) else render(*sound))
+        samples = sound() if callable(sound) else render(*sound)
+        if name != "ringtone":
+            samples = match_loudness(samples)
+        write(path, samples)
         print(f"{path.relative_to(OUT.parent.parent.parent)}: {path.stat().st_size // 1024} KB")
 
 
