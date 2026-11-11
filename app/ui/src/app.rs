@@ -1191,7 +1191,7 @@ fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
         .unwrap_or("channels");
     let (list, current) = c.folders.with_untracked(|f| {
         (
-            f.iter().map(|f| (f.id.clone(), f.name.clone())).collect::<Vec<_>>(),
+            f.iter().map(|f| (f.id.clone(), folders::label(f))).collect::<Vec<_>>(),
             folders::folder_of(f, &id).map(|f| f.id.clone()),
         )
     });
@@ -2102,6 +2102,11 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     <span class=move || if collapsed.get() { "caret collapsed" } else { "caret" }>
                         <Icon icon=I::ChevronDown size=14/>
                     </span>
+                    {let id = section.id.clone(); move || {
+                        c.folders
+                            .with(|f| f.iter().find(|f| f.id == id).and_then(|f| f.emoji.clone()))
+                            .map(|e| view! { <span class="sb-section-emoji">{e}</span> })
+                    }}
                     <span>{tr().section(&section.id, &section.title)}</span>
                 </button>
                 // A quick "+" on hover, as in Slack: works even when the section is collapsed.
@@ -5980,7 +5985,15 @@ fn FolderDialog(edit: FolderEdit) -> impl IntoView {
             .unwrap_or_default(),
         FolderEdit::New(_) => String::new(),
     };
+    let initial_emoji = match &edit {
+        FolderEdit::Rename(id) => c
+            .folders
+            .with_untracked(|f| f.iter().find(|f| &f.id == id).and_then(|f| f.emoji.clone())),
+        FolderEdit::New(_) => None,
+    };
     let name = RwSignal::new(initial);
+    let emoji = RwSignal::new(initial_emoji);
+    let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     let field = NodeRef::<html::Input>::new();
     Effect::new(move |_| {
         if let Some(el) = field.get() {
@@ -6000,10 +6013,12 @@ fn FolderDialog(edit: FolderEdit) -> impl IntoView {
             return;
         }
         close();
+        let emoji = emoji.get_untracked();
         match edit.clone() {
             FolderEdit::Rename(id) => c.folders.update(|f| {
                 if let Some(f) = f.iter_mut().find(|f| f.id == id) {
                     f.name = text;
+                    f.emoji = emoji;
                 }
             }),
             FolderEdit::New(chat) => c.folders.update(|f| {
@@ -6011,6 +6026,7 @@ fn FolderDialog(edit: FolderEdit) -> impl IntoView {
                 f.push(folders::Folder {
                     id: id.clone(),
                     name: text,
+                    emoji,
                     chats: vec![],
                 });
                 if let Some(chat) = chat {
@@ -6025,15 +6041,39 @@ fn FolderDialog(edit: FolderEdit) -> impl IntoView {
             <div class="modal" on:click=|ev| ev.stop_propagation()>
                 <header><h2>{if renaming { tr().rename_section } else { tr().new_section_title }}</h2></header>
                 <label class="field-label">{tr().section_name}</label>
-                <input class="text-input" node_ref=field maxlength="80" placeholder=tr().section_name_ph
-                    prop:value=move || name.get()
-                    on:input=move |e| name.set(event_target_value(&e))
-                    on:keydown=move |e: ev::KeyboardEvent| {
-                        if e.key() == "Enter" {
-                            e.prevent_default();
-                            on_enter();
-                        }
-                    }/>
+                // The smiley picks the section's emoji, as in Slack.
+                <div class="name-input">
+                    <button class="section-emoji-btn" title=tr().section_emoji
+                        on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
+                        {move || match emoji.get() {
+                            Some(e) => view! { <span class="section-emoji">{e}</span> }.into_any(),
+                            None => view! { <Icon icon=I::Smile size=18/> }.into_any(),
+                        }}
+                    </button>
+                    <input class="text-input bare" node_ref=field maxlength="80" placeholder=tr().section_name_ph
+                        prop:value=move || name.get()
+                        on:input=move |e| name.set(event_target_value(&e))
+                        on:keydown=move |e: ev::KeyboardEvent| {
+                            if e.key() == "Enter" {
+                                e.prevent_default();
+                                on_enter();
+                            }
+                        }/>
+                    {move || emoji.get().is_some().then(|| view! {
+                        <button class="icon-btn section-emoji-clear" title=tr().remove_emoji on:click=move |_| emoji.set(None)>
+                            <Icon icon=I::X size=14/>
+                        </button>
+                    })}
+                </div>
+                {move || emoji_at.get().map(|at| view! {
+                    <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
+                        on_close=Callback::new(move |_| emoji_at.set(None))
+                        on_pick=Callback::new(move |glyph: String| {
+                            emoji_at.set(None);
+                            crate::emoji::remember(crate::emoji::Source::Text, &glyph);
+                            emoji.set(Some(glyph));
+                        })/>
+                })}
                 <div class="modal-actions">
                     <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
                     <button class="btn primary" disabled=move || name.with(|n| n.trim().is_empty()) on:click=move |_| submit()>

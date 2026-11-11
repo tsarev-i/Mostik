@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub struct Folder {
     pub id: String,
     pub name: String,
+    /// Emoji before the name, as in Slack.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<String>,
     /// Chats from top to bottom.
     pub chats: Vec<ChatId>,
 }
@@ -53,6 +56,14 @@ pub fn home_section(ch: &Chat) -> &'static str {
         ChatKind::Direct { .. } | ChatKind::Notes => "dms",
         _ if ch.id.0.starts_with("0/22/") || ch.id.0.starts_with("0/32/") => "meetings",
         _ => "channels",
+    }
+}
+
+/// The folder's name with its emoji, for menus.
+pub fn label(f: &Folder) -> String {
+    match &f.emoji {
+        Some(e) => format!("{e} {}", f.name),
+        None => f.name.clone(),
     }
 }
 
@@ -134,6 +145,7 @@ mod tests {
         Folder {
             id: id.into(),
             name: id.to_uppercase(),
+            emoji: None,
             chats: ids(chats),
         }
     }
