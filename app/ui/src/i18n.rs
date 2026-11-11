@@ -4,6 +4,7 @@
 //! Changing the language re-renders the whole workspace, so
 //! components read strings non-reactively via [`tr`].
 
+use mostik_core::NotifyLevel;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -109,16 +110,18 @@ pub struct Tr {
     pub link_copied: &'static str,
     pub copy_link: &'static str,
     pub mark_unread: &'static str,
-    pub unmute_conversation: &'static str,
-    pub mute_conversation: &'static str,
-    pub unmute_channel: &'static str,
-    pub mute_channel: &'static str,
+    /// Heading of a chat's notification choices in its menu.
+    pub notify_label: &'static str,
+    pub notify_all: &'static str,
+    pub notify_mentions: &'static str,
+    pub notify_nothing: &'static str,
     pub unstar: &'static str,
     pub star: &'static str,
     pub mark_as_read: &'static str,
     pub err_pin: &'static str,
-    pub unmuted_notice: &'static str,
-    pub muted_notice: &'static str,
+    pub notice_notify_all: &'static str,
+    pub notice_notify_mentions: &'static str,
+    pub notice_notify_nothing: &'static str,
     pub err_settings: &'static str,
     pub err_call: &'static str,
     pub call_opening: &'static str,
@@ -435,16 +438,17 @@ pub static RU: Tr = Tr {
     link_copied: "Ссылка скопирована",
     copy_link: "Копировать ссылку",
     mark_unread: "Пометить непрочитанным",
-    unmute_conversation: "Включить уведомления",
-    mute_conversation: "Отключить уведомления",
-    unmute_channel: "Включить уведомления канала",
-    mute_channel: "Отключить уведомления канала",
+    notify_label: "Уведомления",
+    notify_all: "Все сообщения",
+    notify_mentions: "Только упоминания",
+    notify_nothing: "Ничего",
     unstar: "Убрать из избранного",
     star: "Добавить в избранное",
     mark_as_read: "Отметить прочитанным",
     err_pin: "Не удалось закрепить сообщение",
-    unmuted_notice: "Уведомления из чата включены",
-    muted_notice: "Уведомления из чата отключены",
+    notice_notify_all: "Чат уведомляет обо всех сообщениях",
+    notice_notify_mentions: "Чат уведомляет только об упоминаниях",
+    notice_notify_nothing: "Уведомления из чата отключены",
     err_settings: "Не удалось сохранить",
     err_call: "Не удалось начать звонок",
     call_opening: "Открываем созвон…",
@@ -583,7 +587,7 @@ pub static RU: Tr = Tr {
     p_notify_direct: "Личных сообщениях и упоминаниях",
     p_notify_nothing: "Ни о чём",
     p_notify_preview: "Показывать текст сообщения в уведомлении",
-    p_notify_explain: "Уведомления приходят, когда окно Мостика не в фокусе. Чаты с отключённым звуком в Телемосте не уведомляют.",
+    p_notify_explain: "Уведомления приходят, когда окно Мостика не в фокусе. Чат без звука уведомляет только об упоминаниях или не уведомляет совсем — это выбирается в его меню.",
     p_show_example: "Показать пример",
     p_color_mode: "Цветовой режим",
     p_mode_light: "Светлый",
@@ -767,16 +771,17 @@ pub static EN: Tr = Tr {
     link_copied: "Link copied",
     copy_link: "Copy link",
     mark_unread: "Mark unread",
-    unmute_conversation: "Unmute conversation",
-    mute_conversation: "Mute conversation",
-    unmute_channel: "Unmute channel",
-    mute_channel: "Mute channel",
+    notify_label: "Notifications",
+    notify_all: "All messages",
+    notify_mentions: "Mentions only",
+    notify_nothing: "Nothing",
     unstar: "Remove from Starred",
     star: "Star",
     mark_as_read: "Mark as read",
     err_pin: "Couldn’t pin the message",
-    unmuted_notice: "Notifications for this conversation are on",
-    muted_notice: "Notifications for this conversation are muted",
+    notice_notify_all: "This conversation notifies about all messages",
+    notice_notify_mentions: "This conversation notifies about mentions only",
+    notice_notify_nothing: "Notifications for this conversation are off",
     err_settings: "Couldn’t save the change",
     err_call: "Couldn’t start the call",
     call_opening: "Opening the call…",
@@ -915,7 +920,7 @@ pub static EN: Tr = Tr {
     p_notify_direct: "Direct messages and mentions",
     p_notify_nothing: "Nothing",
     p_notify_preview: "Include a preview of the message in each notification",
-    p_notify_explain: "Notifications arrive when the Mostik window isn't focused. Chats muted in Telemost don't notify.",
+    p_notify_explain: "Notifications arrive when the Mostik window isn't focused. A muted chat notifies about mentions only or about nothing, as set in its menu.",
     p_show_example: "Show me an example",
     p_color_mode: "Color mode",
     p_mode_light: "Light",
@@ -1060,6 +1065,23 @@ impl Tr {
             "dms" => self.sec_dms,
             "meetings" => self.sec_meetings,
             _ => fallback,
+        }
+        .to_owned()
+    }
+
+    pub fn notify_level(&self, level: NotifyLevel) -> &'static str {
+        match level {
+            NotifyLevel::All => self.notify_all,
+            NotifyLevel::Mentions => self.notify_mentions,
+            NotifyLevel::Nothing => self.notify_nothing,
+        }
+    }
+
+    pub fn notify_level_notice(&self, level: NotifyLevel) -> String {
+        match level {
+            NotifyLevel::All => self.notice_notify_all,
+            NotifyLevel::Mentions => self.notice_notify_mentions,
+            NotifyLevel::Nothing => self.notice_notify_nothing,
         }
         .to_owned()
     }

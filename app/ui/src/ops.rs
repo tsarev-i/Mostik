@@ -1067,22 +1067,20 @@ fn split_message_link(url: &str) -> Option<(&str, Timestamp)> {
     Some((chat, ts.trim_end_matches('/').parse().ok()?))
 }
 
-/// "Mute" / "Unmute" for a chat.
-pub fn toggle_mute(c: Ctx, id: ChatId) {
-    let muted = !c.snap.with_untracked(|s| s.chat(&id).is_some_and(|ch| ch.muted));
+/// What a chat notifies about: everything, mentions only or nothing.
+pub fn set_notify_level(c: Ctx, id: ChatId, level: NotifyLevel) {
     spawn_local(async move {
         if c.live
-            && let Err(e) = bridge::set_muted(&id.0, muted).await
+            && let Err(e) = bridge::set_notify_level(&id.0, level).await
         {
             return report(c, format!("{}: {e}", tr().err_settings));
         }
         c.snap.update(|s| {
             if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == id) {
-                ch.muted = muted;
+                ch.set_notify_level(level);
             }
         });
-        c.notice
-            .set(Some(if muted { tr().muted_notice } else { tr().unmuted_notice }.into()));
+        c.notice.set(Some(tr().notify_level_notice(level)));
     });
 }
 

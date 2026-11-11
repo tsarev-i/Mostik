@@ -40,6 +40,7 @@ fn chat(id: &str, kind: ChatKind, name: &str, members: u32, unread: u32, mention
         unread,
         mentions,
         muted: false,
+        mute_mentions: false,
         last_ts: TODAY,
         pinned: None,
         organizations: vec![],

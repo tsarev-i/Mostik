@@ -122,7 +122,11 @@ pub struct Chat {
     pub member_count: u32,
     pub unread: u32,
     pub mentions: u32,
+    /// Telemost's `mute`: the chat is quiet in the sidebar and notifies only about mentions,
+    /// or about nothing with `mute_mentions` (see [`Chat::notify_level`]).
     pub muted: bool,
+    #[serde(default)]
+    pub mute_mentions: bool,
     /// Time of the last message, used for sorting.
     pub last_ts: Timestamp,
     /// Pinned message of the chat (`PinnedMessageInfo.PinnedMessageTs`).
@@ -410,6 +414,46 @@ impl ThreadSummary {
         if self.last_reply_ts <= known.last_reply_ts {
             self.reply_count = self.reply_count.min(known.reply_count);
         }
+    }
+}
+
+/// What a chat notifies about, as in Slack: everything, mentions only or nothing. Telemost
+/// keeps it in the `chat_mutings` bucket as `{mute, mute_mentions}`; its web client only
+/// switches `mute`, which here is "mentions only".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyLevel {
+    All,
+    Mentions,
+    Nothing,
+}
+
+impl NotifyLevel {
+    /// `(mute, mute_mentions)` for the bucket.
+    pub fn flags(self) -> (bool, bool) {
+        match self {
+            NotifyLevel::All => (false, false),
+            NotifyLevel::Mentions => (true, false),
+            NotifyLevel::Nothing => (true, true),
+        }
+    }
+
+    pub fn from_flags(mute: bool, mute_mentions: bool) -> Self {
+        match (mute, mute_mentions) {
+            (false, _) => NotifyLevel::All,
+            (true, false) => NotifyLevel::Mentions,
+            (true, true) => NotifyLevel::Nothing,
+        }
+    }
+}
+
+impl Chat {
+    pub fn notify_level(&self) -> NotifyLevel {
+        NotifyLevel::from_flags(self.muted, self.mute_mentions)
+    }
+
+    pub fn set_notify_level(&mut self, level: NotifyLevel) {
+        (self.muted, self.mute_mentions) = level.flags();
     }
 }
 

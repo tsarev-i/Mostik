@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use mostik_core::{ChatId, ChatKind, Message, Presence, Snapshot, Timestamp, User, UserId};
+use mostik_core::{ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
@@ -59,7 +59,8 @@ struct Shared {
     my_availability: mostik_core::Availability,
     /// The last `(Timestamp, SeqNo)` per chat, for read markers.
     last: BTreeMap<String, (Timestamp, u64)>,
-    muted: BTreeSet<String>,
+    /// What muted chats still notify about; chats not here notify about everything.
+    muted: BTreeMap<String, NotifyLevel>,
     titles: BTreeMap<String, String>,
     names: BTreeMap<String, String>,
     /// Public group chats the user is in: `@<name>` mentions them too.
@@ -1123,8 +1124,14 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
     }
     // Only the start of a call notifies; "the call ended" is just a line in the chat.
     let ended = matches!(m.call, Some(mostik_core::CallNote::Ended { .. }));
-    if !sh.ready || sh.me.as_ref() == Some(&m.author) || sh.muted.contains(&m.chat_id.0) || m.edited || ended {
+    if !sh.ready || sh.me.as_ref() == Some(&m.author) || m.edited || ended {
         return;
+    }
+    // A muted chat notifies about mentions only, or about nothing.
+    match sh.muted.get(&m.chat_id.0) {
+        Some(NotifyLevel::Nothing) => return,
+        Some(NotifyLevel::Mentions) if !mentions_me(&sh, m) => return,
+        _ => {}
     }
     if sh.my_availability == mostik_core::Availability::DoNotDisturb {
         return;
@@ -1217,6 +1224,7 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<
         unread: 0,
         mentions: 0,
         muted: false,
+        mute_mentions: false,
         last_ts: 0,
         pinned: None,
         organizations: vec![],
@@ -1404,6 +1412,7 @@ pub async fn create_channel(
         unread: 0,
         mentions: 0,
         muted: false,
+        mute_mentions: false,
         last_ts: js_now_mcs(),
         pinned: None,
         organizations: vec![],
@@ -1559,20 +1568,25 @@ async fn update_bucket(live: &Live, name: &str, change: impl Fn(&mut Value)) -> 
     Err("Telemost did not accept the setting: it is being changed on another device at the same time".into())
 }
 
-/// "Mute" for a chat (the `chat_mutings` bucket).
+/// What a chat notifies about (the `chat_mutings` bucket).
 #[tauri::command]
-pub async fn set_muted(state: tauri::State<'_, AppState>, chat_id: String, muted: bool) -> Result<(), String> {
+pub async fn set_notify_level(
+    state: tauri::State<'_, AppState>,
+    chat_id: String,
+    level: NotifyLevel,
+) -> Result<(), String> {
     let live = live(&state).await?;
     let id = chat_id.clone();
+    let (mute, mute_mentions) = level.flags();
     update_bucket(&live, "chat_mutings", move |v| {
-        v[&id] = json!({ "mute": muted, "mute_mentions": false })
+        v[&id] = json!({ "mute": mute, "mute_mentions": mute_mentions })
     })
     .await?;
     if let Ok(mut sh) = live.shared.lock() {
-        if muted {
-            sh.muted.insert(chat_id);
-        } else {
+        if level == NotifyLevel::All {
             sh.muted.remove(&chat_id);
+        } else {
+            sh.muted.insert(chat_id, level);
         }
     }
     Ok(())
@@ -1757,6 +1771,7 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<mostik_core::Chat> {
         unread: 0,
         mentions: 0,
         muted: false,
+        mute_mentions: false,
         last_ts: 0,
         pinned: None,
         organizations: v
@@ -2380,7 +2395,7 @@ async fn connect_inner(
         }
         for ch in &snapshot.chats {
             if ch.muted {
-                sh.muted.insert(ch.id.0.clone());
+                sh.muted.insert(ch.id.0.clone(), ch.notify_level());
             }
             sh.titles
                 .insert(ch.id.0.clone(), mostik_core::chat_title(&snapshot, ch));

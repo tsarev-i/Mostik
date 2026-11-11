@@ -376,6 +376,7 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
             unread: unread.min(999) as u32,
             mentions: 0,
             muted: chat.get("Muted").and_then(Value::as_bool).unwrap_or(false),
+            mute_mentions: false,
             last_ts,
             pinned: n(chat, &["PinnedMessageInfo", "PinnedMessageTs"]).filter(|ts| *ts > 0),
             organizations: info
@@ -641,6 +642,7 @@ pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
         unread: 0,
         mentions: 0,
         muted: false,
+        mute_mentions: false,
         last_ts: 0,
         pinned: None,
         organizations,
@@ -881,6 +883,7 @@ pub fn notes_chat(me: &UserId) -> Chat {
         unread: 0,
         mentions: 0,
         muted: false,
+        mute_mentions: false,
         last_ts: 0,
         pinned: None,
         organizations: vec![],
@@ -904,6 +907,7 @@ pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
         for ch in &mut snapshot.chats {
             if let Some(m) = mutings.get(&ch.id.0) {
                 ch.muted = m.get("mute").and_then(Value::as_bool).unwrap_or(ch.muted);
+                ch.mute_mentions = m.get("mute_mentions").and_then(Value::as_bool).unwrap_or(false);
             }
         }
     }
@@ -1294,13 +1298,23 @@ mod tests {
         let mut snap = snapshot(me, "org".into(), from_history(&history, None));
         let buckets = json!({"status": "ok", "data": {"buckets": [
             {"bucket_name": "pinned_chats", "bucket_value": {"pinned_chats": ["0/0/b", "0/0/missing"]}},
-            {"bucket_name": "chat_mutings", "bucket_value": {"0/0/a": {"mute": true, "mute_mentions": false}}}
+            {"bucket_name": "chat_mutings", "bucket_value": {"0/0/a": {"mute": true, "mute_mentions": false},
+                                                              "0/0/b": {"mute": true, "mute_mentions": true}}}
         ]}});
         apply_buckets(&mut snap, &buckets);
         assert_eq!(snap.sections[0].id, "starred");
         assert_eq!(snap.sections[0].chats, vec![ChatId("0/0/b".into())]);
         assert!(!snap.sections[1].chats.contains(&ChatId("0/0/b".into())));
         assert!(snap.chat(&ChatId("0/0/a".into())).unwrap().muted);
+        // Telemost's web client mutes with `mute` alone: mentions still notify.
+        assert_eq!(
+            snap.chat(&ChatId("0/0/a".into())).unwrap().notify_level(),
+            mostik_core::NotifyLevel::Mentions
+        );
+        assert_eq!(
+            snap.chat(&ChatId("0/0/b".into())).unwrap().notify_level(),
+            mostik_core::NotifyLevel::Nothing
+        );
     }
 
     #[test]

@@ -1034,14 +1034,14 @@ fn sidebar_menu_items(c: Ctx) -> impl IntoView {
 /// Sidebar row menu, as in Slack: channel details or the peer's profile, copying,
 /// "Mark as read", starring, notifications and leaving the channel.
 fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
-    let Some((kind, title, me, unread, muted)) = c.snap.with_untracked(|s| {
+    let Some((kind, title, me, unread, notify)) = c.snap.with_untracked(|s| {
         s.chat(&id).map(|ch| {
             (
                 ch.kind.clone(),
                 display_title(s, ch),
                 s.me.clone(),
                 ch.unread > 0,
-                ch.muted,
+                ch.notify_level(),
             )
         })
     }) else {
@@ -1082,14 +1082,17 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
         <button on:click=move |_| { close_menus(c); ops::toggle_star(c, star_id.clone()); }>
             {if starred { tr().unstar } else { tr().star }}
         </button>
-        <button on:click=move |_| { close_menus(c); ops::toggle_mute(c, mute_id.clone()); }>
-            {match (muted, channel) {
-                (true, true) => tr().unmute_channel,
-                (false, true) => tr().mute_channel,
-                (true, false) => tr().unmute_conversation,
-                (false, false) => tr().mute_conversation,
-            }}
-        </button>
+        <div class="menu-sep"></div>
+        <div class="menu-label">{tr().notify_label}</div>
+        {[NotifyLevel::All, NotifyLevel::Mentions, NotifyLevel::Nothing].map(|level| {
+            let id = mute_id.clone();
+            view! {
+                <button class="menu-radio" on:click=move |_| { close_menus(c); ops::set_notify_level(c, id.clone(), level); }>
+                    <span class="menu-tick">{(level == notify).then(|| view! { <Icon icon=I::Check size=14/> })}</span>
+                    <span>{tr().notify_level(level)}</span>
+                </button>
+            }
+        }).collect_view()}
         {channel.then(|| view! {
             <div class="menu-sep"></div>
             <button class="danger" on:click=move |_| {

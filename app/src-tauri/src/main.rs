@@ -131,7 +131,7 @@ fn main() {
             backend::typing,
             backend::open_url,
             backend::search_messages,
-            backend::set_muted,
+            backend::set_notify_level,
             backend::set_starred,
             backend::mark_unread,
             backend::pin_message,

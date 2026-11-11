@@ -658,13 +658,13 @@ pub async fn search_messages(query: &str, chat_ids: Vec<String>) -> Result<Found
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MuteArgs<'a> {
+struct NotifyLevelArgs<'a> {
     chat_id: &'a str,
-    muted: bool,
+    level: mostik_core::NotifyLevel,
 }
 
-pub async fn set_muted(chat_id: &str, muted: bool) -> Result<(), String> {
-    call("set_muted", MuteArgs { chat_id, muted }).await
+pub async fn set_notify_level(chat_id: &str, level: mostik_core::NotifyLevel) -> Result<(), String> {
+    call("set_notify_level", NotifyLevelArgs { chat_id, level }).await
 }
 
 #[derive(Serialize)]
