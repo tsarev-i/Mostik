@@ -1,6 +1,6 @@
 //! Tauri command calls and event subscriptions. Without Tauri (in a browser) the UI runs on demo data.
 
-use mostik_core::{ChatId, Message, Reaction, Snapshot, Timestamp, User, UserId};
+use mostik_core::{Chat, ChatId, Message, Reaction, Snapshot, Timestamp, User, UserId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -70,9 +70,15 @@ pub enum LiveEvent {
         chat_id: ChatId,
         ts: Timestamp,
         reactions: Vec<Reaction>,
+        #[serde(default)]
+        users: Vec<User>,
     },
     Seen {
         chat_id: ChatId,
+    },
+    ThreadSeen {
+        chat_id: ChatId,
+        parent: Timestamp,
     },
     Online {
         user: UserId,
@@ -83,8 +89,16 @@ pub enum LiveEvent {
         chat_id: ChatId,
         ts: Option<Timestamp>,
     },
+    ChatAdded {
+        chat: Chat,
+        section: String,
+        users: Vec<User>,
+    },
     Connection {
         online: bool,
+    },
+    Users {
+        users: Vec<User>,
     },
 }
 
@@ -223,6 +237,8 @@ pub async fn install_update() -> Result<(), String> {
 pub struct HistoryPage {
     pub messages: Vec<Message>,
     pub users: Vec<User>,
+    /// The server may have older messages.
+    pub more: bool,
 }
 
 pub async fn history(
@@ -243,6 +259,39 @@ pub async fn history(
 
 pub async fn mark_read(chat_id: &str) -> Result<(), String> {
     call("mark_read", ChatArgs { chat_id }).await
+}
+
+/// Followed threads and the people they mention.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Threads {
+    pub threads: Vec<mostik_core::FollowedThread>,
+    pub users: Vec<User>,
+}
+
+pub async fn followed_threads() -> Result<Threads, String> {
+    call("followed_threads", NoArgs {}).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadReadArgs<'a> {
+    chat_id: &'a str,
+    parent: Timestamp,
+    ts: Timestamp,
+    seq_no: u64,
+}
+
+pub async fn mark_thread_read(chat_id: &str, parent: Timestamp, ts: Timestamp, seq_no: u64) -> Result<(), String> {
+    call(
+        "mark_thread_read",
+        ThreadReadArgs {
+            chat_id,
+            parent,
+            ts,
+            seq_no,
+        },
+    )
+    .await
 }
 
 pub async fn send_message(chat_id: &str, text: &str, thread: Option<Timestamp>) -> Result<Message, String> {

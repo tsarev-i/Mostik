@@ -145,6 +145,8 @@ fn main() {
             backend::open_yandex_id,
             backend::save_file,
             backend::test_notification,
+            backend::followed_threads,
+            backend::mark_thread_read,
             backend::set_preferences,
             backend::set_zoom,
             backend::set_window_title,

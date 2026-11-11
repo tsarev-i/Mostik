@@ -90,6 +90,17 @@ pub struct User {
     pub avatar: Option<String>,
 }
 
+/// The name of a person Telemost has said nothing about yet.
+pub const UNKNOWN_USER: &str = "Unknown user";
+
+impl User {
+    /// Whether the name is a real one and not a stand-in: empty, the GUID or [`UNKNOWN_USER`].
+    /// A stand-in gives way to the first real name that comes.
+    pub fn has_name(&self) -> bool {
+        !self.display_name.is_empty() && self.display_name != self.id.0 && self.display_name != UNKNOWN_USER
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatKind {
     /// Group chat: a channel in Slack terms, public or private.
@@ -145,6 +156,10 @@ pub struct Reaction {
     pub emoji: String,
     pub count: u32,
     pub mine: bool,
+    /// Who reacted, as far as Telemost says: `RecentUserReactions` holds only the latest ones,
+    /// so the list may be shorter than `count`.
+    #[serde(default)]
+    pub users: Vec<UserId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +201,18 @@ pub struct Message {
 pub enum CallNote {
     Started { url: String },
     Ended { url: String },
+}
+
+/// A thread the user follows (wrote in, started or was mentioned in), like Slack's "Threads".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowedThread {
+    /// The message that started the thread, in its chat.
+    pub parent: Message,
+    /// Replies the user has not read yet.
+    pub unread: u32,
+    /// Time and number of the last reply: the order of the list and the read marker.
+    pub last_ts: Timestamp,
+    pub last_seq: u64,
 }
 
 /// Forwarded message: author, time, text and attachments of the original.

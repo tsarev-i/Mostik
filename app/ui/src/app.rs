@@ -96,6 +96,8 @@ pub struct Ctx {
     pub call: RwSignal<Option<bridge::CallInfo>>,
     /// Calls going on in chats (from their call notes), with the meeting links.
     pub active_calls: Memo<std::collections::BTreeMap<ChatId, String>>,
+    /// Followed threads with their unread replies, newest first.
+    pub threads: RwSignal<Vec<FollowedThread>>,
 }
 
 /// A sidebar chat held with the mouse button.
@@ -243,8 +245,17 @@ pub enum ViewMode {
     Home,
     Dms,
     Drafts,
+    /// Followed threads, like Slack's "Threads".
+    Threads,
     /// "Mentions & reactions", like Activity in Slack.
     Activity,
+}
+
+impl ViewMode {
+    /// A page of the home view in place of a chat: "Threads" or "Drafts & sent".
+    pub fn is_home_page(self) -> bool {
+        matches!(self, ViewMode::Drafts | ViewMode::Threads)
+    }
 }
 
 const DRAFTS_KEY: &str = "mostik.drafts";
@@ -360,6 +371,7 @@ pub fn App() -> impl IntoView {
         now: RwSignal::new(js_sys::Date::now()),
         call: RwSignal::new(None),
         active_calls: Memo::new(move |_| snap.with(Snapshot::active_calls)),
+        threads: RwSignal::new(vec![]),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -573,6 +585,7 @@ pub fn App() -> impl IntoView {
     });
     let _ctx_wheel = window_event_listener(ev::wheel, move |_| c.ctx_menu.set(None));
     let _ctx_blur = window_event_listener(ev::blur, move |_| c.ctx_menu.set(None));
+    let _focus = window_event_listener(ev::focus, move |_| ops::refresh_me(c));
     let _ctx_resize = window_event_listener(ev::resize, move |_| c.ctx_menu.set(None));
 
     if live {
@@ -586,6 +599,7 @@ pub fn App() -> impl IntoView {
         }
         c.snap.set(demo);
         c.phase.set(Phase::Ready);
+        ops::load_threads(c);
         ops::open_chat(c, ChatId("dev".into()));
     }
     view! {
@@ -619,12 +633,15 @@ pub fn App() -> impl IntoView {
             <DeleteDialog/>
         </Show>
         {move || c.confirm_leave.get().map(|id| view! { <LeaveDialog id=id/> })}
-        {move || c.error.get().map(|e| view! {
-            <div class="toast" on:click=move |_| c.error.set(None)>{e}</div>
-        })}
-        {move || c.notice.get().map(|e| view! {
-            <div class="toast ok" on:click=move |_| c.notice.set(None)>{e}</div>
-        })}
+        // Toasts stack at the bottom instead of covering each other.
+        <div class="toasts">
+            {move || c.error.get().map(|e| view! {
+                <div class="toast" on:click=move |_| c.error.set(None)>{e}</div>
+            })}
+            {move || c.notice.get().map(|e| view! {
+                <div class="toast ok" on:click=move |_| c.notice.set(None)>{e}</div>
+            })}
+        </div>
         {move || c.lightbox.get().map(|a| view! {
             <div class="lightbox" on:click=move |_| c.lightbox.set(None)>
                 <img src=bridge::file_url(&a.file_id, None) alt=a.name.clone()/>
@@ -698,6 +715,8 @@ fn Workspace() -> impl IntoView {
                         </Show>
                         {move || if c.view.get() == ViewMode::Drafts {
                             view! { <DraftsView/> }.into_any()
+                        } else if c.view.get() == ViewMode::Threads {
+                            view! { <ThreadsView/> }.into_any()
                         } else {
                             view! {
                                 <ChannelHeader/>
@@ -1456,7 +1475,7 @@ fn Rail() -> impl IntoView {
     let me = move || c.snap.with(|s| s.user(&s.me).cloned());
     let item = move |icon: I, label: &'static str, mode: ViewMode| {
         view! {
-            <button class=move || if c.view.get() == mode || (mode == ViewMode::Home && c.view.get() == ViewMode::Drafts) { "rail-item active" } else { "rail-item" }
+            <button class=move || if c.view.get() == mode || (mode == ViewMode::Home && c.view.get().is_home_page()) { "rail-item active" } else { "rail-item" }
                 on:click=move |_| c.view.set(mode)>
                 <span class="rail-icon"><Icon icon=icon size=20/>
                     {(mode == ViewMode::Activity).then_some(move || {
@@ -1683,6 +1702,24 @@ fn Sidebar() -> impl IntoView {
             </Show>
             <div class="sb-scroll" class:hidden=move || matches!(c.view.get(), ViewMode::Dms | ViewMode::Activity)>
                 <div class="sb-quick">
+                    {move || {
+                        // Bold with the number of threads that have new replies, as in Slack.
+                        let unread = c.threads.with(|l| l.iter().filter(|t| t.unread > 0).count());
+                        let mut cls = String::from("sb-row");
+                        if c.view.get() == ViewMode::Threads {
+                            cls.push_str(" selected");
+                        }
+                        if unread > 0 {
+                            cls.push_str(" unread");
+                        }
+                        view! {
+                            <button class=cls on:click=move |_| c.view.set(ViewMode::Threads)>
+                                <span class="sb-icon"><Icon icon=I::Threads size=15/></span>
+                                <span class="sb-name">{tr().threads}</span>
+                                {(unread > 0).then(|| view! { <span class="badge">{unread}</span> })}
+                            </button>
+                        }
+                    }}
                     <button class=move || if c.view.get() == ViewMode::Drafts { "sb-row selected" } else { "sb-row" }
                         on:click=move |_| c.view.set(ViewMode::Drafts)>
                         <span class="sb-icon"><Icon icon=I::Send size=15/></span>
@@ -2040,7 +2077,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
     };
     let selected = {
         let id = id.clone();
-        Memo::new(move |_| c.view.get() != ViewMode::Drafts && c.current.with(|cur| cur == &id))
+        Memo::new(move |_| !c.view.get().is_home_page() && c.current.with(|cur| cur == &id))
     };
     let ctx_open = {
         let id = id.clone();
@@ -2101,7 +2138,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
         if c.chat_drag.with_untracked(|d| d.as_ref().is_some_and(|d| d.active)) {
             return;
         }
-        if c.view.get_untracked() == ViewMode::Drafts {
+        if c.view.get_untracked().is_home_page() {
             c.view.set(ViewMode::Home);
         }
         ops::open_chat(c, id.clone());
@@ -2288,6 +2325,32 @@ fn MessageList() -> impl IntoView {
             stick.set(false);
         }
     });
+    // Pictures and videos get their height only once loaded, after the list has scrolled down:
+    // stay at the bottom while they come. `load` does not bubble, so it is caught on the way down.
+    Effect::new(move |attached: Option<bool>| {
+        if attached == Some(true) {
+            return true;
+        }
+        let Some(el) = list_ref.get() else { return false };
+        let on_load = wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
+            if stick.try_get_untracked() == Some(true)
+                && anchor.try_get_untracked().is_some_and(|a| a.is_none())
+                && let Some(el) = list_ref.try_get_untracked().flatten()
+            {
+                el.set_scroll_top(el.scroll_height());
+            }
+        });
+        for event in ["load", "loadedmetadata"] {
+            let _ = el.add_event_listener_with_callback_and_bool(
+                event,
+                wasm_bindgen::JsCast::unchecked_ref(on_load.as_ref()),
+                true,
+            );
+        }
+        // Lives as long as the element; the signals are checked with `try_` after unmount.
+        on_load.forget();
+        true
+    });
     let on_scroll = move |_| {
         let Some(el) = list_ref.get_untracked() else { return };
         stick.set(el.scroll_height() - el.scroll_top() - el.client_height() < 120);
@@ -2296,7 +2359,7 @@ fn MessageList() -> impl IntoView {
         }
     };
     view! {
-        <div class="messages" node_ref=list_ref on:scroll=on_scroll>
+        <div class="messages chat-feed" node_ref=list_ref on:scroll=on_scroll>
             {move || {
                 let id = c.current.get();
                 let done = !c.live || c.exhausted.with(|e| e.contains(&id));
@@ -2327,6 +2390,13 @@ fn InlineEditor(msg: Message) -> impl IntoView {
             let n = utf16_len(&el.value());
             let _ = el.set_selection_range(n, n);
             autosize(&el);
+            // The editor is taller than the message: the last message's editor would go under
+            // the composer. Once laid out, scroll it fully into view.
+            request_animation_frame(move || {
+                if let Some(el) = area.get_untracked() {
+                    reveal_editor(&el);
+                }
+            });
         }
     });
     let cancel = move || c.editing.set(None);
@@ -2362,7 +2432,10 @@ fn InlineEditor(msg: Message) -> impl IntoView {
             <textarea node_ref=area rows="1" prop:value=move || text.get()
                 on:input=move |e| {
                     text.set(event_target_value(&e));
-                    if let Some(el) = area.get_untracked() { autosize(&el); }
+                    if let Some(el) = area.get_untracked() {
+                        autosize(&el);
+                        reveal_editor(&el);
+                    }
                 }
                 on:keydown=move |e: ev::KeyboardEvent| {
                     if e.is_composing() { return; }
@@ -2388,6 +2461,16 @@ fn autosize(el: &web_sys::HtmlTextAreaElement) {
     let style = wasm_bindgen::JsCast::unchecked_ref::<web_sys::HtmlElement>(el).style();
     let _ = style.set_property("height", "auto");
     let _ = style.set_property("height", &format!("{}px", el.scroll_height()));
+}
+
+/// Scrolls the message list just enough for the whole in-place editor (text and buttons) to show,
+/// with the gap from `scroll-margin` in the CSS.
+fn reveal_editor(area: &web_sys::HtmlTextAreaElement) {
+    if let Ok(Some(editor)) = area.closest(".inline-edit") {
+        let opts = web_sys::ScrollIntoViewOptions::new();
+        opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
+        editor.scroll_into_view_with_scroll_into_view_options(&opts);
+    }
 }
 
 #[component]
@@ -2734,9 +2817,10 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                 {list.into_iter().map(|r| {
                     let m = m.clone();
                     let kind = r.kind;
+                    let title = c.snap.with_untracked(|s| reaction_title(s, &r));
                     view! {
                         <button class=if r.mine { "reaction mine" } else { "reaction" }
-                            title=reactions::name(kind).unwrap_or("")
+                            title=title
                             on:click=move |_| ops::toggle_reaction(c, &m, kind)>
                             <span class="emoji">{r.emoji}</span>
                             <span class="count">{r.count}</span>
@@ -2863,6 +2947,25 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
 }
 
 /// Forwarded message, like a "shared message" in Slack: a bar on the left, author, text and origin.
+/// Reaction tooltip: who reacted, as in Slack. Telemost names only the latest people, so the
+/// rest are counted; with nobody known it falls back to the reaction's name.
+fn reaction_title(s: &Snapshot, r: &Reaction) -> String {
+    let names: Vec<String> = r
+        .users
+        .iter()
+        .filter(|u| **u != s.me)
+        .filter_map(|u| s.user(u).filter(|u| u.has_name()).map(|u| u.display_name.clone()))
+        .collect();
+    let more = r
+        .count
+        .saturating_sub(u32::from(r.mine))
+        .saturating_sub(names.len() as u32);
+    if names.is_empty() && !r.mine {
+        return reactions::name(r.kind).unwrap_or("").to_owned();
+    }
+    tr().reacted(&names, more, r.mine)
+}
+
 #[component]
 fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     let c = ctx();
@@ -4542,6 +4645,70 @@ fn ActivityList() -> impl IntoView {
 enum DraftsTab {
     Drafts,
     Sent,
+}
+
+/// Followed threads, like Slack's "Threads": the ones with new replies first, then by the last
+/// reply. A click opens the thread in the side pane.
+#[component]
+fn ThreadsView() -> impl IntoView {
+    let c = ctx();
+    let list = Memo::new(move |_| {
+        let mut list = c.threads.get();
+        list.sort_by_key(|t| (t.unread == 0, std::cmp::Reverse(t.last_ts)));
+        list
+    });
+    view! {
+        <header class="ch-header">
+            <div class="ch-title-row"><div class="ch-title"><span class="ch-kind"><Icon icon=I::Threads size=18/></span><span>{tr().threads}</span></div></div>
+        </header>
+        <div class="messages drafts-list">
+            {move || {
+                let list = list.get();
+                if list.is_empty() {
+                    return view! {
+                        <div class="empty-state"><h3>{tr().no_threads}</h3><p>{tr().no_threads_hint}</p></div>
+                    }.into_any();
+                }
+                let open = c.thread.get().map(|p| (c.current.get(), p));
+                list.into_iter().map(|t| {
+                    let (author, title, names, me_name) = c.snap.with(|s| (
+                        s.user(&t.parent.author).cloned(),
+                        s.chat(&t.parent.chat_id).map(|ch| display_title(s, ch)).unwrap_or_default(),
+                        s.mention_names(),
+                        s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
+                    ));
+                    let name = author.as_ref().map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
+                    let text = names.with(|who| render_text(&t.parent.text, who, &me_name));
+                    let replies = t.parent.thread.as_ref().map(|th| th.reply_count).unwrap_or(0);
+                    let selected = open.as_ref() == Some(&(t.parent.chat_id.clone(), t.parent.ts));
+                    let unread = t.unread;
+                    let has_unread = unread > 0;
+                    let parent = t.parent.clone();
+                    view! {
+                        <div class="draft-row thread-row" class:unread=has_unread class:selected=selected
+                            on:click=move |_| ops::open_followed_thread(c, parent.clone())>
+                            <span class="draft-face">{match author {
+                                Some(u) => view! { <Avatar user=u size=36/> }.into_any(),
+                                None => view! { <span class="avatar unknown"></span> }.into_any(),
+                            }}</span>
+                            <span class="dm-body">
+                                <span class="dm-top">
+                                    <span class="dm-name">{name}</span>
+                                    <span class="thread-where">{format!("# {title}")}</span>
+                                    <span class="dm-time">{time::relative(t.last_ts)}</span>
+                                </span>
+                                <span class="thread-text">{text}</span>
+                                <span class="thread-meta">
+                                    {(replies > 0).then(|| tr().replies(replies))}
+                                    {(unread > 0).then(|| view! { <span class="thread-new">{tr().new_replies(unread)}</span> })}
+                                </span>
+                            </span>
+                        </div>
+                    }
+                }).collect_view().into_any()
+            }}
+        </div>
+    }
 }
 
 /// "Drafts & sent", as in Slack.

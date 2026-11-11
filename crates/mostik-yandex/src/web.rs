@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use reqwest::StatusCode;
-use reqwest::header::{COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
+use reqwest::header::{COOKIE, HeaderMap, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE, USER_AGENT};
 use serde_json::Value;
 
 use crate::endpoints::{API_URL, CSRF_URL, WEB_ORIGIN};
@@ -79,24 +79,37 @@ pub fn parse_csrf(body: &str) -> Option<String> {
 /// HTTP client with the session cookies, CSRF token and page parameters.
 pub struct WebClient {
     http: reqwest::Client,
+    /// For the page only: it follows redirects itself to take the cookies they set.
+    page_http: reqwest::Client,
     jar: CookieJar,
     user_agent: String,
     /// Shared by all `clone_light` copies, so a refreshed token reaches every one of them.
     csrf: Arc<Mutex<Option<String>>>,
     pub page: Option<PageParams>,
+    /// Status, host and path of every response of the last `load_page`, for the probe.
+    pub page_hops: Vec<String>,
 }
+
+/// Redirects `load_page` follows before giving up: Telemost sends to `cookier.360.yandex.ru` and
+/// back, Yandex ID may add a hop or two to refresh the session.
+const PAGE_REDIRECTS: usize = 8;
 
 impl WebClient {
     pub fn new(jar: CookieJar, user_agent: String) -> Result<Self, WebError> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()?;
+        let page_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
         Ok(Self {
             http,
+            page_http,
             jar,
             user_agent,
             csrf: Arc::default(),
             page: None,
+            page_hops: Vec::new(),
         })
     }
 
@@ -104,10 +117,12 @@ impl WebClient {
     pub fn clone_light(&self) -> Self {
         Self {
             http: self.http.clone(),
+            page_http: self.page_http.clone(),
             jar: self.jar.clone(),
             user_agent: self.user_agent.clone(),
             csrf: self.csrf.clone(),
             page: self.page.clone(),
+            page_hops: Vec::new(),
         }
     }
 
@@ -132,21 +147,48 @@ impl WebClient {
         h
     }
 
-    /// Loads the web client page and takes `puid` and `serviceId` from it.
+    /// Loads the web client page and takes `puid` and `serviceId` from it. Redirects are
+    /// followed here, with the cookies they set going into the jar: Telemost sends a session
+    /// without a fresh `yandex360session` to `cookier.360.yandex.ru` and back, and replaying the
+    /// old cookies would loop. The caller saves the jar if it changed.
     pub async fn load_page(&mut self) -> Result<PageParams, WebError> {
-        let resp = self
-            .http
-            .get(format!("{WEB_ORIGIN}/"))
-            .headers(self.headers("telemost.360.yandex.ru"))
-            .send()
-            .await?;
-        let html = resp.text().await?;
-        let params = parse_page_params(&html)?;
-        if !params.logged_in {
-            return Err(WebError::Unauthorized);
+        let mut url =
+            reqwest::Url::parse(&format!("{WEB_ORIGIN}/")).map_err(|e| WebError::BadResponse(e.to_string()))?;
+        self.page_hops.clear();
+        for _ in 0..=PAGE_REDIRECTS {
+            let host = url.host_str().unwrap_or_default().to_owned();
+            let resp = self
+                .page_http
+                .get(url.clone())
+                .headers(self.headers(&host))
+                .send()
+                .await?;
+            let status = resp.status();
+            self.page_hops.push(format!("{} {host}{}", status.as_u16(), url.path()));
+            for header in resp.headers().get_all(SET_COOKIE) {
+                if let Ok(header) = header.to_str() {
+                    self.jar.set_cookie(&host, header);
+                }
+            }
+            if status.is_redirection() {
+                url = resp
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|l| l.to_str().ok())
+                    .and_then(|l| url.join(l).ok())
+                    .filter(|next| next.scheme() == "https")
+                    .ok_or_else(|| WebError::BadResponse(format!("page: HTTP {status} without a usable Location")))?;
+                continue;
+            }
+            let html = resp.text().await?;
+            let params = parse_page_params(&html)?;
+            if !params.logged_in {
+                return Err(WebError::Unauthorized);
+            }
+            self.page = Some(params.clone());
+            return Ok(params);
         }
-        self.page = Some(params.clone());
-        Ok(params)
+        Err(WebError::BadResponse("page: too many redirects".into()))
     }
 
     /// CSRF token for write requests; fetched once and cached until the server rejects it.

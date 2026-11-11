@@ -60,13 +60,18 @@ pub fn chat_kind(chat_id: &str, me: Option<&UserId>, is_public: bool) -> ChatKin
 }
 
 fn reactions(sm: &Value, me: Option<&UserId>) -> Vec<Reaction> {
-    let mine: Vec<u64> = sm
+    // `(type, who)` of the latest reactions.
+    let recent: Vec<(u64, &str)> = sm
         .get("RecentUserReactions")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|r| me.is_some_and(|me| s(r, &["UserInfo", "Guid"]) == Some(me.0.as_str())))
-        .filter_map(|r| n(r, &["Type"]))
+        .filter_map(|r| Some((n(r, &["Type"])?, s(r, &["UserInfo", "Guid"])?)))
+        .collect();
+    let mine: Vec<u64> = recent
+        .iter()
+        .filter(|(_, who)| me.is_some_and(|me| me.0 == *who))
+        .map(|(kind, _)| *kind)
         .collect();
     sm.get("Reactions")
         .and_then(Value::as_array)
@@ -80,8 +85,23 @@ fn reactions(sm: &Value, me: Option<&UserId>) -> Vec<Reaction> {
                 emoji: crate::reactions::emoji(kind).to_owned(),
                 count,
                 mine: mine.contains(&kind),
+                users: recent
+                    .iter()
+                    .filter(|(k, _)| *k == kind)
+                    .map(|(_, who)| UserId((*who).to_owned()))
+                    .collect(),
             })
         })
+        .collect()
+}
+
+/// People from `RecentUserReactions`, with the names the UI shows in the reaction tooltip.
+pub fn reaction_authors(sm: &Value) -> Vec<User> {
+    sm.get("RecentUserReactions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("UserInfo").and_then(user_from))
         .collect()
 }
 
@@ -316,6 +336,9 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
                     users.entry(u.id.0.clone()).or_insert(u);
                 }
             }
+            for u in reaction_authors(sm) {
+                users.entry(u.id.0.clone()).or_insert(u);
+            }
             if let Parsed::Message(m) = parse_server_message(sm, Some(id), me) {
                 last_ts = last_ts.max(m.ts);
                 out.messages.push(*m);
@@ -366,10 +389,47 @@ pub fn search_messages(v: &Value, me: Option<&UserId>) -> (Vec<Message>, Vec<Use
         if let Some(u) = sm.pointer("/ServerMessageInfo/From").and_then(user_from) {
             users.entry(u.id.0.clone()).or_insert(u);
         }
+        for u in reaction_authors(sm) {
+            users.entry(u.id.0.clone()).or_insert(u);
+        }
         if let Parsed::Message(m) = parse_server_message(sm, None, me) {
             out.push(*m);
         }
     }
+    (out, users.into_values().collect())
+}
+
+/// Followed threads from `history` with `Threads: true`: every item is a thread chat
+/// (`100/<ns>/<uuid>_<ts>`) with its `ThreadParentMessage` and read counters. Returns the
+/// threads, newest reply first, and the people they mention.
+pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>, Vec<User>) {
+    let mut users: BTreeMap<String, User> = BTreeMap::new();
+    let mut out = Vec::new();
+    for chat in v.get("Chats").and_then(Value::as_array).into_iter().flatten() {
+        let Some((parent_chat, parent_ts)) = s(chat, &["ChatId"]).and_then(thread_parent) else {
+            continue;
+        };
+        let Some(sm) = chat.get("ThreadParentMessage") else {
+            continue;
+        };
+        if let Some(u) = sm.pointer("/ServerMessageInfo/From").and_then(user_from) {
+            users.entry(u.id.0.clone()).or_insert(u);
+        }
+        let Parsed::Message(mut parent) = parse_server_message(sm, Some(&parent_chat), me) else {
+            continue;
+        };
+        // The parent lives in the chat itself, whatever `Plain.ChatId` says.
+        parent.chat_id = ChatId(parent_chat);
+        parent.ts = parent_ts;
+        let last_seq = n(chat, &["LastSeqNo"]).unwrap_or(0);
+        out.push(FollowedThread {
+            unread: last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0)) as u32,
+            last_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
+            last_seq,
+            parent: *parent,
+        });
+    }
+    out.sort_by_key(|t| std::cmp::Reverse(t.last_ts));
     (out, users.into_values().collect())
 }
 
@@ -390,15 +450,23 @@ pub enum LiveEvent {
         chat_id: ChatId,
         user: UserId,
     },
-    /// Resulting reactions of a message after someone changed them.
+    /// Resulting reactions of a message after someone changed them; `users` are the people
+    /// who reacted, for their names.
     Reactions {
         chat_id: ChatId,
         ts: Timestamp,
         reactions: Vec<Reaction>,
+        #[serde(default)]
+        users: Vec<User>,
     },
     /// The user read the chat (possibly on another device).
     Seen {
         chat_id: ChatId,
+    },
+    /// The user read the thread of message `parent` in `chat_id` (possibly on another device).
+    ThreadSeen {
+        chat_id: ChatId,
+        parent: Timestamp,
     },
     /// A person came online (their `Heartbeat` arrived).
     Online {
@@ -412,9 +480,20 @@ pub enum LiveEvent {
         chat_id: ChatId,
         ts: Option<Timestamp>,
     },
+    /// A chat the list did not have yet, for example a direct chat someone has just started:
+    /// it goes into `section`; `users` are people the UI may not know yet.
+    ChatAdded {
+        chat: Chat,
+        section: String,
+        users: Vec<User>,
+    },
     /// The connection to Telemost went up or down.
     Connection {
         online: bool,
+    },
+    /// Directory profiles (photo, position, real name) of authors that came with a history page.
+    Users {
+        users: Vec<User>,
     },
 }
 
@@ -452,16 +531,23 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
             chat_id: ChatId(thread_parent(chat).map_or_else(|| chat.to_owned(), |(p, _)| p)),
             ts: n(r, &["Timestamp"])?,
             reactions: reactions(sm, me),
+            users: reaction_authors(sm),
         });
     }
     if let Some(seen) = cm.get("SeenMarker") {
         let chat = s(seen, &["ChatId"])?;
-        if me.is_some_and(|me| from.as_ref() == Some(me)) && thread_parent(chat).is_none() {
-            return Some(LiveEvent::Seen {
-                chat_id: ChatId(chat.to_owned()),
-            });
+        if me.is_none_or(|me| from.as_ref() != Some(me)) {
+            return None;
         }
-        return None;
+        return Some(match thread_parent(chat) {
+            Some((chat_id, parent)) => LiveEvent::ThreadSeen {
+                chat_id: ChatId(chat_id),
+                parent,
+            },
+            None => LiveEvent::Seen {
+                chat_id: ChatId(chat.to_owned()),
+            },
+        });
     }
     if let Some(diff) = cm.pointer("/SystemMessage/ChatInfoDiff")
         && let Some(list) = diff.get("PinnedMessageTimestamps")
@@ -483,6 +569,46 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     }
 }
 
+/// The sidebar section of a chat: `dms`, `meetings` or `channels`.
+pub fn section_of(chat: &Chat) -> &'static str {
+    match chat.kind {
+        ChatKind::Direct { .. } | ChatKind::Notes => "dms",
+        _ if is_meeting_chat(&chat.id.0) => "meetings",
+        _ => "channels",
+    }
+}
+
+/// A chat from a `get_chats_info` item: `{chat_id, name, description, is_public, members_count,
+/// organization_ids}`. Counters and times are left for the messages to fill in.
+pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
+    let id = s(info, &["chat_id"])?;
+    let kind = chat_kind(id, me, info.get("is_public").and_then(Value::as_bool).unwrap_or(false));
+    // Like the history, direct chats belong to no organization: they show in all of them.
+    let organizations = match kind {
+        ChatKind::Direct { .. } | ChatKind::Notes => vec![],
+        _ => info
+            .get("organization_ids")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_u64)
+            .collect(),
+    };
+    Some(Chat {
+        id: ChatId(id.to_owned()),
+        kind,
+        name: s(info, &["name"]).unwrap_or_default().to_owned(),
+        description: s(info, &["description"]).filter(|d| !d.is_empty()).map(str::to_owned),
+        member_count: n(info, &["members_count"]).unwrap_or(0) as u32,
+        unread: 0,
+        mentions: 0,
+        muted: false,
+        last_ts: 0,
+        pinned: None,
+        organizations,
+    })
+}
+
 /// Builds the UI snapshot: "Channels", "Direct messages" and "Meeting chats" sections.
 pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapshot {
     data.chats.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
@@ -491,11 +617,10 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
     if let Some(notes) = data.chats.iter().find(|c| c.kind == ChatKind::Notes) {
         dms.push(notes.id.clone());
     }
-    for ch in &data.chats {
-        match ch.kind {
-            ChatKind::Notes => {}
-            ChatKind::Direct { .. } => dms.push(ch.id.clone()),
-            _ if is_meeting_chat(&ch.id.0) => meetings.push(ch.id.clone()),
+    for ch in data.chats.iter().filter(|ch| ch.kind != ChatKind::Notes) {
+        match section_of(ch) {
+            "dms" => dms.push(ch.id.clone()),
+            "meetings" => meetings.push(ch.id.clone()),
             _ => channels.push(ch.id.clone()),
         }
     }
@@ -511,7 +636,7 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
             users.push(User {
                 id: peer.clone(),
                 display_name: if ch.name.is_empty() {
-                    "Unknown user".into()
+                    UNKNOWN_USER.into()
                 } else {
                     ch.name.clone()
                 },
@@ -599,8 +724,10 @@ pub fn statuses_from_subscribe(v: &Value) -> Vec<PresenceInfo> {
         .collect()
 }
 
-/// How many microseconds after the last `Heartbeat` a person counts as online.
-pub const ONLINE_WINDOW_MCS: u64 = 3 * 60 * 1_000_000;
+/// How many microseconds after the last `Heartbeat` a person counts as online. Other clients
+/// (web, mobile, background tabs) send it less often than once a minute, so a short window makes
+/// the dot blink between pushes; 10 minutes covers their interval.
+pub const ONLINE_WINDOW_MCS: u64 = 10 * 60 * 1_000_000;
 
 /// "Online" from the `subscribe` response with `MessageBodyType: 2` (last `Heartbeat` and `CurrentTime`).
 pub fn online_from_heartbeat(v: &Value) -> Option<bool> {
@@ -786,6 +913,74 @@ mod tests {
     }
 
     #[test]
+    fn followed_threads_with_unread() {
+        let v = json!({"Chats": [
+            {"ChatId": "100/0/abc_42", "LastSeqNo": 5, "LastSeenByMeSeqNo": 3, "LastTsMcs": 90,
+             "ThreadParentMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/abc", "Text": {"MessageText": "plan"}}},
+                "ServerMessageInfo": {"Timestamp": 42, "From": {"Guid": "u1", "DisplayName": "Anna"},
+                    "ThreadState": {"LastSeqNo": 5, "LastTsMcs": 90}}}},
+            {"ChatId": "100/0/def_7", "LastSeqNo": 2, "LastSeenByMeSeqNo": 2, "LastTsMcs": 95,
+             "ThreadParentMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/def", "Text": {"MessageText": "q"}}},
+                "ServerMessageInfo": {"Timestamp": 7, "From": {"Guid": "u2"}}}},
+            {"ChatId": "0/0/not-a-thread", "LastSeqNo": 1}
+        ]});
+        let (threads, users) = followed_threads(&v, None);
+        assert_eq!(threads.len(), 2);
+        assert_eq!(
+            (
+                threads[0].parent.chat_id.0.as_str(),
+                threads[0].parent.ts,
+                threads[0].unread
+            ),
+            ("0/0/def", 7, 0)
+        );
+        let t = &threads[1];
+        assert_eq!(
+            (t.parent.chat_id.0.as_str(), t.parent.ts, t.parent.text.as_str()),
+            ("0/0/abc", 42, "plan")
+        );
+        assert_eq!((t.unread, t.last_ts, t.last_seq), (2, 90, 5));
+        assert_eq!(t.parent.thread.as_ref().map(|t| t.reply_count), Some(5));
+        assert_eq!(users.len(), 2);
+        let me = UserId("me".into());
+        let seen = json!({"ClientMessage": {"SeenMarker": {"ChatId": "100/0/abc_42", "SeqNo": 5}}, "ServerMessageInfo": {"From": {"Guid": "me"}}});
+        assert_eq!(
+            from_push(&seen, Some(&me)),
+            Some(LiveEvent::ThreadSeen {
+                chat_id: ChatId("0/0/abc".into()),
+                parent: 42
+            })
+        );
+    }
+
+    #[test]
+    fn chat_from_chats_info() {
+        let me = UserId("aa".into());
+        let group = json!({"chat_id": "0/0/x", "name": "dev", "description": "", "is_public": true,
+            "members_count": 19, "organization_ids": [7]});
+        let ch = chat_from_info(&group, Some(&me)).unwrap();
+        assert_eq!(ch.kind, ChatKind::Group { public: true });
+        assert_eq!(
+            (ch.name.as_str(), ch.description.as_deref(), ch.member_count),
+            ("dev", None, 19)
+        );
+        assert_eq!(section_of(&ch), "channels");
+        assert_eq!(ch.organizations, vec![7]);
+        let dm = json!({"chat_id": "bb_aa", "members_count": 2, "organization_ids": [7], "public": false});
+        let ch = chat_from_info(&dm, Some(&me)).unwrap();
+        assert_eq!(
+            ch.kind,
+            ChatKind::Direct {
+                peer: UserId("bb".into())
+            }
+        );
+        assert!(ch.organizations.is_empty());
+        assert_eq!(section_of(&ch), "dms");
+        let meeting = json!({"chat_id": "0/22/m", "name": "Sync"});
+        assert_eq!(section_of(&chat_from_info(&meeting, Some(&me)).unwrap()), "meetings");
+    }
+
+    #[test]
     fn meeting_messages_are_call_notes() {
         let push = |kind: &str, id: &str| {
             json!({"ServerMessage": {"ClientMessage": {"NotificationBehaviour": 2, "SystemMessage": {
@@ -953,10 +1148,12 @@ mod tests {
                 kind: 100102,
                 emoji: "👍".into(),
                 count: 2,
-                mine: true
+                mine: true,
+                users: vec![UserId("me".into())],
             }]
         );
-        assert_eq!(d.users.len(), 3);
+        // Authors, readers and the one who reacted.
+        assert_eq!(d.users.len(), 4);
         assert_eq!(d.last["0/0/abc"], (9, 10));
     }
 
@@ -1038,7 +1235,8 @@ mod tests {
         );
         let hb = |ago: u64| json!({"CurrentTime": 10_000_000_000u64, "LastMessage": {"ServerMessageInfo": {"Timestamp": 10_000_000_000u64 - ago}}});
         assert_eq!(online_from_heartbeat(&hb(60_000_000)), Some(true));
-        assert_eq!(online_from_heartbeat(&hb(10 * 60_000_000)), Some(false));
+        assert_eq!(online_from_heartbeat(&hb(5 * 60_000_000)), Some(true));
+        assert_eq!(online_from_heartbeat(&hb(15 * 60_000_000)), Some(false));
         assert_eq!(online_from_heartbeat(&json!({})), None);
     }
 
@@ -1116,8 +1314,19 @@ mod tests {
                     kind: 100102,
                     emoji: "👍".into(),
                     count: 1,
-                    mine: true
-                }]
+                    mine: true,
+                    users: vec![me.clone()],
+                }],
+                users: vec![User {
+                    id: me.clone(),
+                    display_name: "me".into(),
+                    title: None,
+                    presence: Presence::Offline,
+                    status: None,
+                    availability: Default::default(),
+                    is_robot: false,
+                    avatar: None,
+                }],
             })
         );
         let unreact =
@@ -1127,7 +1336,8 @@ mod tests {
             Some(LiveEvent::Reactions {
                 chat_id: ChatId("c".into()),
                 ts: 7,
-                reactions: vec![]
+                reactions: vec![],
+                users: vec![],
             })
         );
         let seen = json!({"ClientMessage": {"SeenMarker": {"ChatId": "c", "SeqNo": 3}}, "ServerMessageInfo": {"From": {"Guid": "me"}}});

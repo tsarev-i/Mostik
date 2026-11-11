@@ -8,8 +8,6 @@ use crate::app::{Ctx, Phase};
 use crate::bridge::{self, LiveEvent};
 use crate::i18n::tr;
 
-const PAGE: usize = 50;
-
 fn report(c: Ctx, e: String) {
     leptos::logging::warn!("{e}");
     c.error.set(Some(e));
@@ -25,7 +23,7 @@ fn learn_users(s: &mut Snapshot, users: Vec<User>) {
     for u in users {
         match s.users.iter_mut().find(|x| x.id == u.id) {
             Some(known) => {
-                if known.display_name.is_empty() || known.display_name == known.id.0 {
+                if !known.has_name() && u.has_name() {
                     known.display_name = u.display_name;
                 }
                 known.avatar = known.avatar.take().or(u.avatar);
@@ -40,11 +38,19 @@ fn learn_users(s: &mut Snapshot, users: Vec<User>) {
 pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
     let current = c.current.get_untracked();
     let open_thread = c.thread.get_untracked();
+    let is_new = c
+        .snap
+        .with_untracked(|s| !s.messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts));
     c.snap.update(|s| {
-        if let Some(a) = author
-            && !s.users.iter().any(|u| u.id == a.id)
-        {
-            s.users.push(a);
+        // A push carries the author's current name and photo: they replace a stand-in like
+        // "Unknown user" and an old picture.
+        if let Some(a) = author {
+            if let Some(known) = s.users.iter_mut().find(|u| u.id == a.id)
+                && a.avatar.is_some()
+            {
+                known.avatar = a.avatar.clone();
+            }
+            learn_users(s, vec![a]);
         }
         if let Some(old) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
             // An edit push may come without reactions or a sequence number: keep the known ones.
@@ -100,6 +106,11 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
         s.messages.push(m.clone());
         sort_sections(s);
     });
+    if let Some(parent) = m.thread_parent
+        && is_new
+    {
+        track_thread(c, &m, parent);
+    }
     let viewing_reply = m.thread_parent.is_some() && open_thread == m.thread_parent;
     let read_on_open = c.settings.with_untracked(|s| s.mark_read_on_open);
     let held = c.hold_unread.with_untracked(|h| h.as_ref() == Some(&m.chat_id));
@@ -107,6 +118,7 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
         && read_on_open
         && !held
         && m.chat_id == current
+        && !c.view.get_untracked().is_home_page()
         && (m.thread_parent.is_none() || viewing_reply)
         && document_visible()
     {
@@ -152,9 +164,23 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
     match ev {
         LiveEvent::Upsert { message, author } => upsert(c, *message, author),
         LiveEvent::Deleted { chat_id, ts } => remove(c, &chat_id, ts),
-        LiveEvent::Reactions { chat_id, ts, reactions } => c.snap.update(|s| {
+        LiveEvent::Reactions {
+            chat_id,
+            ts,
+            reactions,
+            users,
+        } => c.snap.update(|s| {
+            learn_users(s, users);
             if let Some(m) = s.messages.iter_mut().find(|m| m.chat_id == chat_id && m.ts == ts) {
                 m.reactions = reactions;
+            }
+        }),
+        LiveEvent::ThreadSeen { chat_id, parent } => c.threads.update(|list| {
+            if let Some(t) = list
+                .iter_mut()
+                .find(|t| t.parent.chat_id == chat_id && t.parent.ts == parent)
+            {
+                t.unread = 0;
             }
         }),
         LiveEvent::Seen { chat_id } => c.snap.update(|s| {
@@ -170,14 +196,33 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
                 t.push((chat_id, user, until));
             });
         }
-        LiveEvent::Online { user, online } => c.snap.update(|s| {
-            if let Some(u) = s.users.iter_mut().find(|u| u.id == user) {
-                u.presence = if online { Presence::Online } else { Presence::Offline };
+        LiveEvent::Online { user, online } => {
+            if online {
+                LAST_HEARTBEAT.with_borrow_mut(|m| m.insert(user.clone(), js_sys::Date::now()));
             }
-        }),
+            c.snap.update(|s| {
+                if let Some(u) = s.users.iter_mut().find(|u| u.id == user) {
+                    u.presence = if online { Presence::Online } else { Presence::Offline };
+                }
+            })
+        }
         LiveEvent::Status(p) => apply_presence(c, vec![p]),
         LiveEvent::Pinned { chat_id, ts } => set_pinned(c, &chat_id, ts),
+        LiveEvent::ChatAdded { chat, section, users } => c.snap.update(|s| {
+            learn_users(s, users);
+            if s.chat(&chat.id).is_some() {
+                return;
+            }
+            if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == section)
+                && !sec.chats.contains(&chat.id)
+            {
+                sec.chats.push(chat.id.clone());
+            }
+            s.chats.push(chat);
+            sort_sections(s);
+        }),
         LiveEvent::Connection { online } => c.online.set(online),
+        LiveEvent::Users { users } => c.snap.update(|s| learn_users(s, users)),
     }
 }
 
@@ -211,7 +256,7 @@ fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
         r.insert(0, id.clone());
         r.truncate(20);
     });
-    if c.view.get_untracked() == crate::app::ViewMode::Drafts {
+    if c.view.get_untracked().is_home_page() {
         c.view.set(crate::app::ViewMode::Home);
     }
     c.current.set(id.clone());
@@ -234,7 +279,7 @@ async fn load_latest(c: Ctx, id: &ChatId) {
     let read_on_open = c.settings.with_untracked(|s| s.mark_read_on_open);
     match bridge::history(&id.0, None, None).await {
         Ok(page) => {
-            let full = page.messages.len() < PAGE;
+            let full = !page.more;
             c.snap.update(|s| {
                 learn_users(s, page.users);
                 s.messages.retain(|m| &m.chat_id != id || m.thread_parent.is_some());
@@ -247,12 +292,32 @@ async fn load_latest(c: Ctx, id: &ChatId) {
                     e.remove(id);
                 }
             });
-            if read_on_open {
+            fill_screen(c, id.clone());
+            if read_on_open && !c.view.get_untracked().is_home_page() {
                 mark_read(c, id.clone());
             }
         }
         Err(e) => report(c, format!("{}: {e}", tr().err_history)),
     }
+}
+
+/// A short page may not fill the message list, and then there is no scrolling to load older
+/// messages: load them until the list scrolls or the history ends. Runs after the list re-renders.
+fn fill_screen(c: Ctx, id: ChatId) {
+    set_timeout(
+        move || {
+            if c.current.get_untracked() != id {
+                return;
+            }
+            let Some(el) = document().query_selector(".chat-feed").ok().flatten() else {
+                return;
+            };
+            if el.scroll_height() <= el.client_height() {
+                load_older(c);
+            }
+        },
+        std::time::Duration::from_millis(16),
+    );
 }
 
 /// "Back" / "Forward" through opened chats, like the arrows in Slack's top bar.
@@ -279,7 +344,7 @@ pub fn navigate(c: Ctx, back: bool) {
 pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Option<Timestamp>) {
     let same = c.current.get_untracked() == chat;
     let load = if same {
-        if c.view.get_untracked() == crate::app::ViewMode::Drafts {
+        if c.view.get_untracked().is_home_page() {
             c.view.set(crate::app::ViewMode::Home);
         }
         false
@@ -317,7 +382,7 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
             let Some(oldest) = oldest else { break };
             match bridge::history(&chat2.0, Some(oldest), None).await {
                 Ok(page) => {
-                    if page.messages.len() < PAGE {
+                    if !page.more {
                         c.exhausted.update(|e| {
                             e.insert(chat2.clone());
                         });
@@ -382,7 +447,7 @@ pub fn load_older(c: Ctx) -> bool {
     spawn_local(async move {
         match bridge::history(&id.0, Some(oldest), None).await {
             Ok(page) => {
-                if page.messages.len() < PAGE {
+                if !page.more {
                     c.exhausted.update(|e| {
                         e.insert(id.clone());
                     });
@@ -395,6 +460,9 @@ pub fn load_older(c: Ctx) -> bool {
                         }
                     }
                 });
+                c.loading_older.set(false);
+                fill_screen(c, id);
+                return;
             }
             Err(e) => report(c, format!("{}: {e}", tr().err_older)),
         }
@@ -406,20 +474,196 @@ pub fn load_older(c: Ctx) -> bool {
 pub fn open_thread(c: Ctx, parent: Timestamp) {
     c.profile.set(None);
     c.thread.set(Some(parent));
+    let id = c.current.get_untracked();
+    if !c.live {
+        return read_thread(c, id, parent);
+    }
+    load_thread(c, id, parent);
+}
+
+/// Loads the replies of the open thread of message `parent` in chat `id` and marks it read.
+fn load_thread(c: Ctx, id: ChatId, parent: Timestamp) {
+    spawn_local(async move {
+        match bridge::history(&id.0, None, Some(parent)).await {
+            Ok(page) => {
+                let last = page.messages.iter().max_by_key(|m| m.ts).map(|m| (m.ts, m.seq_no));
+                c.snap.update(|s| {
+                    learn_users(s, page.users);
+                    s.messages
+                        .retain(|m| !(m.chat_id == id && m.thread_parent == Some(parent)));
+                    s.messages.extend(page.messages);
+                });
+                // The open thread is read, as in Slack.
+                let mut unread = false;
+                c.threads.update(|list| {
+                    if let Some(t) = list
+                        .iter_mut()
+                        .find(|t| t.parent.chat_id == id && t.parent.ts == parent)
+                    {
+                        if let Some((ts, seq)) = last.filter(|(ts, _)| *ts >= t.last_ts) {
+                            (t.last_ts, t.last_seq) = (ts, seq.max(t.last_seq));
+                        }
+                        unread = t.unread > 0;
+                    }
+                });
+                if unread {
+                    read_thread(c, id, parent);
+                }
+            }
+            Err(e) => report(c, format!("{}: {e}", tr().err_thread)),
+        }
+    });
+}
+
+/// Followed threads, once per connection; the pushes keep the list current after that.
+pub fn load_threads(c: Ctx) {
+    if !c.live {
+        // Demo: the threads the user replied in; others' later replies are unread.
+        let list = c.snap.with_untracked(|s| {
+            s.messages
+                .iter()
+                .filter(|p| p.thread.is_some())
+                .filter_map(|p| {
+                    let replies = s.thread_replies(&p.chat_id, p.ts);
+                    let mine = replies.iter().rposition(|r| r.author == s.me)?;
+                    Some(FollowedThread {
+                        parent: p.clone(),
+                        unread: replies[mine + 1..].iter().filter(|r| r.author != s.me).count() as u32,
+                        last_ts: replies.last().map_or(p.ts, |r| r.ts),
+                        last_seq: 0,
+                    })
+                })
+                .collect()
+        });
+        c.threads.set(list);
+        return;
+    }
+    spawn_local(async move {
+        match bridge::followed_threads().await {
+            Ok(t) => {
+                c.snap.update(|s| learn_users(s, t.users));
+                c.threads.set(t.threads);
+            }
+            Err(e) => leptos::logging::warn!("threads: {e}"),
+        }
+    });
+}
+
+/// A new reply in the thread of message `parent`: the thread list follows it. Someone else's
+/// reply is unread unless that thread is open in front of the user. A thread not in the list
+/// yet joins it when the user replied, started it or is mentioned in the reply, as Telemost
+/// subscribes them.
+fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
+    let (me, mentioned, parent_msg) = c.snap.with_untracked(|s| {
+        let me_name = s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default();
+        let mentioned = s
+            .mention_names()
+            .with(|who| mostik_core::markup::mentions_me(&m.text, who, &me_name));
+        let parent_msg = s
+            .messages
+            .iter()
+            .find(|x| x.chat_id == m.chat_id && x.ts == parent)
+            .cloned();
+        (s.me.clone(), mentioned, parent_msg)
+    });
+    let mine = m.author == me;
+    let open = c.current.with_untracked(|cur| cur == &m.chat_id)
+        && c.thread.get_untracked() == Some(parent)
+        && document_visible();
+    let mut read_now = false;
+    c.threads.update(|list| {
+        let at = list
+            .iter()
+            .position(|t| t.parent.chat_id == m.chat_id && t.parent.ts == parent);
+        let at = match (at, parent_msg) {
+            (Some(i), _) => i,
+            (None, Some(p)) if mine || mentioned || p.author == me => {
+                list.push(FollowedThread {
+                    parent: p,
+                    unread: 0,
+                    last_ts: 0,
+                    last_seq: 0,
+                });
+                list.len() - 1
+            }
+            _ => return,
+        };
+        let t = &mut list[at];
+        if m.ts >= t.last_ts {
+            t.last_ts = m.ts;
+            t.last_seq = t.last_seq.max(m.seq_no);
+        }
+        if mine {
+            t.unread = 0;
+        } else if open {
+            read_now = t.unread > 0 || m.seq_no > 0;
+            t.unread = 0;
+        } else {
+            t.unread += 1;
+        }
+        list.sort_by_key(|t| std::cmp::Reverse(t.last_ts));
+    });
+    if read_now && c.settings.with_untracked(|s| s.mark_read_on_open) {
+        read_thread(c, m.chat_id.clone(), parent);
+    }
+}
+
+/// Marks a followed thread read up to its last known reply.
+pub fn read_thread(c: Ctx, chat: ChatId, parent: Timestamp) {
+    let mut last = None;
+    c.threads.update(|list| {
+        if let Some(t) = list
+            .iter_mut()
+            .find(|t| t.parent.chat_id == chat && t.parent.ts == parent)
+        {
+            t.unread = 0;
+            last = Some((t.last_ts, t.last_seq));
+        }
+    });
+    let Some((ts, seq)) = last.filter(|(ts, seq)| *ts > 0 && *seq > 0) else {
+        return;
+    };
     if !c.live {
         return;
     }
-    let id = c.current.get_untracked();
     spawn_local(async move {
-        match bridge::history(&id.0, None, Some(parent)).await {
-            Ok(page) => c.snap.update(|s| {
-                learn_users(s, page.users);
-                s.messages
-                    .retain(|m| !(m.chat_id == id && m.thread_parent == Some(parent)));
-                s.messages.extend(page.messages);
-            }),
-            Err(e) => report(c, format!("{}: {e}", tr().err_thread)),
+        if let Err(e) = bridge::mark_thread_read(&chat.0, parent, ts, seq).await {
+            leptos::logging::warn!("mark_thread_read: {e}");
         }
+    });
+}
+
+/// Opens a followed thread from the "Threads" view: the thread pane shows it next to the list.
+/// The parent may come from a chat whose history is not loaded, so it is added if missing.
+pub fn open_followed_thread(c: Ctx, parent: Message) {
+    c.snap.update(|s| {
+        if !s
+            .messages
+            .iter()
+            .any(|m| m.chat_id == parent.chat_id && m.ts == parent.ts)
+        {
+            s.messages.push(parent.clone());
+        }
+    });
+    c.editing.set(None);
+    c.current.set(parent.chat_id.clone());
+    open_thread(c, parent.ts);
+    if !c.live {
+        return;
+    }
+    // The chat is current now: Home, DMs or Activity show it, so it needs its history too.
+    // Not marked read while the "Threads" page covers it.
+    spawn_local(async move {
+        load_latest(c, &parent.chat_id).await;
+        c.snap.update(|s| {
+            if !s
+                .messages
+                .iter()
+                .any(|m| m.chat_id == parent.chat_id && m.ts == parent.ts)
+            {
+                s.messages.push(parent);
+            }
+        });
     });
 }
 
@@ -501,6 +745,7 @@ pub fn toggle_reaction(c: Ctx, m: &Message, kind: u64) {
         }
         // The resulting reactions arrive as a push; update locally right away so as not to wait.
         c.snap.update(|s| {
+            let me = s.me.clone();
             let Some(msg) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == m.ts) else {
                 return;
             };
@@ -508,10 +753,12 @@ pub fn toggle_reaction(c: Ctx, m: &Message, kind: u64) {
                 Some(r) if add && !r.mine => {
                     r.count += 1;
                     r.mine = true;
+                    r.users.push(me.clone());
                 }
                 Some(r) if !add && r.mine => {
                     r.count = r.count.saturating_sub(1);
                     r.mine = false;
+                    r.users.retain(|u| u != &me);
                 }
                 Some(_) => {}
                 None if add => msg.reactions.push(Reaction {
@@ -519,6 +766,7 @@ pub fn toggle_reaction(c: Ctx, m: &Message, kind: u64) {
                     emoji: reactions::emoji(kind).to_owned(),
                     count: 1,
                     mine: true,
+                    users: vec![me.clone()],
                 }),
                 None => {}
             }
@@ -883,6 +1131,7 @@ pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
             c.phase.set(Phase::Ready);
             c.online.set(true);
             refresh_presence(c);
+            load_threads(c);
             if let Some(id) = first {
                 open_chat(c, id);
             }
@@ -925,9 +1174,7 @@ pub fn subscribe(c: Ctx) {
         })
         .await;
         bridge::listen(bridge::SNAPSHOT_EVENT, move |snapshot: Snapshot| {
-            let current = c.current.get_untracked();
-            c.snap.set(snapshot);
-            open_chat(c, current);
+            reconnected(c, snapshot)
         })
         .await;
         bridge::listen(bridge::UPDATE_EVENT, move |status: bridge::UpdateStatus| {
@@ -939,6 +1186,43 @@ pub fn subscribe(c: Ctx) {
             c.update.set(status);
         }
     });
+}
+
+/// The fresh snapshot after a reconnection. The chat list, counters and presence come from it,
+/// but the messages already shown stay (the snapshot has only the last one of each chat), so the
+/// open chat does not blank out; it then gets its latest page in place, keeping an edit in
+/// progress. An open thread stays and gets the replies missed while offline.
+fn reconnected(c: Ctx, mut fresh: Snapshot) {
+    c.snap.update(|s| {
+        let old = std::mem::take(&mut s.messages);
+        // The snapshot has no presence (everyone is offline in it): known people keep theirs
+        // until the poll below, otherwise every dot turns gray after each reconnection.
+        for u in &mut fresh.users {
+            if let Some(known) = s.users.iter().find(|x| x.id == u.id) {
+                u.presence = known.presence;
+                u.availability = known.availability;
+                u.status = known.status.clone();
+            }
+        }
+        learn_users(&mut fresh, std::mem::take(&mut s.users));
+        let mut messages = fresh.messages;
+        for m in old {
+            if !messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
+                messages.push(m);
+            }
+        }
+        fresh.messages = messages;
+        *s = fresh;
+    });
+    refresh_presence(c);
+    load_threads(c);
+    let current = c.current.get_untracked();
+    if !current.0.is_empty() {
+        if let Some(parent) = c.thread.get_untracked() {
+            load_thread(c, current.clone(), parent);
+        }
+        spawn_local(async move { load_latest(c, &current).await });
+    }
 }
 
 /// Installs the available update; the app restarts on success, so only an error comes back.
@@ -1031,15 +1315,32 @@ pub fn message_user(c: Ctx, user: UserId) {
     });
 }
 
+/// How long after a pushed `Heartbeat` a person stays online, whatever a poll says
+/// (the same window as `ONLINE_WINDOW_MCS` in `mostik-yandex`).
+const ONLINE_WINDOW_MS: f64 = 10.0 * 60.0 * 1000.0;
+
+thread_local! {
+    /// When the last `Heartbeat` push of each person arrived (local time, ms).
+    static LAST_HEARTBEAT: std::cell::RefCell<std::collections::HashMap<UserId, f64>> =
+        Default::default();
+}
+
 /// Applies presence and statuses to the people of the snapshot. We always count ourselves as online:
-/// while Mostik runs, it sends `Heartbeat`.
+/// while Mostik runs, it sends `Heartbeat`. A poll does not turn gray someone whose `Heartbeat`
+/// push came within the online window: the poll may lag behind the push.
 pub fn apply_presence(c: Ctx, list: Vec<PresenceInfo>) {
+    let now = js_sys::Date::now();
+    let fresh = |user: &UserId| LAST_HEARTBEAT.with_borrow(|m| m.get(user).is_some_and(|t| now - t < ONLINE_WINDOW_MS));
     c.snap.update(|s| {
         let me = s.me.clone();
         for p in list {
             if let Some(u) = s.users.iter_mut().find(|u| u.id == p.user) {
                 if let Some(online) = p.online {
-                    u.presence = if online { Presence::Online } else { Presence::Offline };
+                    u.presence = if online || fresh(&u.id) {
+                        Presence::Online
+                    } else {
+                        Presence::Offline
+                    };
                 }
                 u.availability = p.availability;
                 u.status = p.status.clone();
@@ -1077,6 +1378,39 @@ pub fn refresh_presence(c: Ctx) {
         if let Ok(list) = bridge::presence(guids).await {
             apply_presence(c, list);
         }
+    });
+}
+
+/// Own name and photo from the directory, so a new profile picture shows up without a restart.
+/// Runs when the window gets focus (the picture is changed in the browser or on another device),
+/// at most once a minute.
+pub fn refresh_me(c: Ctx) {
+    thread_local! {
+        static LAST: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    }
+    let now = js_sys::Date::now();
+    if !c.live || c.phase.get_untracked() != Phase::Ready || now - LAST.get() < 60_000.0 {
+        return;
+    }
+    LAST.set(now);
+    let me = c.snap.with_untracked(|s| s.me.clone());
+    spawn_local(async move {
+        let Ok(p) = bridge::user_profile(&me.0).await else {
+            return;
+        };
+        c.snap.update(|s| {
+            if let Some(u) = s.users.iter_mut().find(|u| u.id == p.id) {
+                if p.avatar.is_some() && u.avatar != p.avatar {
+                    u.avatar = p.avatar.clone();
+                }
+                if !p.display_name.is_empty() && u.display_name != p.display_name {
+                    u.display_name = p.display_name.clone();
+                }
+            }
+        });
+        c.profiles.update(|m| {
+            m.insert(p.id.clone(), p);
+        });
     });
 }
 

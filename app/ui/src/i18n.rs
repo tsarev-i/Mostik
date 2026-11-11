@@ -285,6 +285,9 @@ pub struct Tr {
     pub err_open_dm: &'static str,
     // Drafts and sent
     pub drafts_and_sent: &'static str,
+    pub threads: &'static str,
+    pub no_threads: &'static str,
+    pub no_threads_hint: &'static str,
     pub drafts: &'static str,
     pub sent: &'static str,
     pub no_drafts: &'static str,
@@ -372,7 +375,7 @@ pub static RU: Tr = Tr {
     drag_to_resize: "Потяните, чтобы изменить ширину",
     connecting: "Подключаемся к Телемосту…",
     finish_login: "Завершите вход в окне Яндекс ID…",
-    offline: "Нет соединения с Телемостом — переподключаемся…",
+    offline: "Нет соединения с Телемостом. Переподключаемся…",
     you_short: "вы",
     someone: "Кто-то",
     user: "Пользователь",
@@ -607,6 +610,9 @@ pub static RU: Tr = Tr {
     err_profile: "Не удалось загрузить профиль",
     err_open_dm: "Не удалось открыть личный чат",
     drafts_and_sent: "Черновики и отправленные",
+    threads: "Треды",
+    no_threads: "Пока нет тредов",
+    no_threads_hint: "Здесь появятся треды, которые вы начали, в которых отвечали или где вас упомянули.",
     drafts: "Черновики",
     sent: "Отправленные",
     no_drafts: "Черновиков нет",
@@ -700,7 +706,7 @@ pub static EN: Tr = Tr {
     drag_to_resize: "Drag to resize",
     connecting: "Connecting to Telemost…",
     finish_login: "Finish signing in in the Yandex ID window…",
-    offline: "No connection to Telemost — reconnecting…",
+    offline: "No connection to Telemost. Reconnecting…",
     you_short: "you",
     someone: "Someone",
     user: "User",
@@ -935,6 +941,9 @@ pub static EN: Tr = Tr {
     err_profile: "Couldn't load the profile",
     err_open_dm: "Couldn't open the direct message",
     drafts_and_sent: "Drafts & sent",
+    threads: "Threads",
+    no_threads: "No threads yet",
+    no_threads_hint: "Threads you started, replied in or were mentioned in show up here.",
     drafts: "Drafts",
     sent: "Sent",
     no_drafts: "No drafts",
@@ -1051,6 +1060,13 @@ impl Tr {
         .to_owned()
     }
 
+    pub fn new_replies(&self, n: u32) -> String {
+        match self.lang {
+            Lang::Ru => format!("{n} {}", ru_plural(n, "новый", "новых", "новых")),
+            Lang::En => format!("{n} new"),
+        }
+    }
+
     pub fn replies(&self, n: u32) -> String {
         match self.lang {
             Lang::Ru => format!("{n} {}", ru_plural(n, "ответ", "ответа", "ответов")),
@@ -1142,6 +1158,37 @@ impl Tr {
         match self.lang {
             Lang::Ru => format!("Сообщение: {name}"),
             Lang::En => format!("Message {name}"),
+        }
+    }
+
+    /// Who reacted, for the reaction tooltip, as in Slack: "Anna, Boris and you reacted".
+    /// `more` is how many others Telemost did not name.
+    pub fn reacted(&self, names: &[String], more: u32, mine: bool) -> String {
+        let mut who: Vec<String> = names.to_vec();
+        if more > 0 {
+            who.push(match self.lang {
+                Lang::Ru => format!("ещё {more}"),
+                Lang::En => format!("{more} more"),
+            });
+        }
+        if mine {
+            who.push(match self.lang {
+                Lang::Ru => "вы".into(),
+                Lang::En => "you".into(),
+            });
+        }
+        let and = match self.lang {
+            Lang::Ru => " и ",
+            Lang::En => " and ",
+        };
+        let list = match who.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{}{and}{last}", rest.join(", ")),
+            Some((last, _)) => last.clone(),
+            None => String::new(),
+        };
+        match self.lang {
+            Lang::Ru => format!("Отреагировали: {list}"),
+            Lang::En => format!("{list} reacted"),
         }
     }
 

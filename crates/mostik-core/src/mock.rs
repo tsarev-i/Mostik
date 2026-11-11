@@ -95,6 +95,7 @@ fn react(emoji: &str, count: u32, mine: bool) -> Reaction {
         emoji: emoji.to_owned(),
         count,
         mine,
+        users: vec![],
     }
 }
 

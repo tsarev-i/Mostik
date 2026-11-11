@@ -36,7 +36,11 @@ pub const EVENT: &str = "mostik://event";
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 /// The session is no longer valid: the UI shows the login screen with this reason.
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
-const PAGE_SIZE: u32 = 50;
+/// History page sizes. A page of 50 takes the server 0.5–1.5 s in a busy channel and 20 about
+/// 0.1–0.3 s, so a chat opens with a short page; older pages and threads take more at once.
+const FIRST_PAGE: u32 = 20;
+const OLDER_PAGE: u32 = 40;
+const THREAD_PAGE: u32 = 50;
 const MAX_DIAG_EVENTS: usize = 300;
 
 /// Result of `bootstrap` and `login`: either the login screen or a ready snapshot.
@@ -63,6 +67,9 @@ struct Shared {
     /// Set once the snapshot is built: until then `muted`, `titles` and `names` are incomplete,
     /// so no notifications are shown.
     ready: bool,
+    /// Events of chats that are not in the list yet, held until the chat itself is fetched, so
+    /// the UI gets the chat first and then its messages in order.
+    pending: BTreeMap<String, Vec<LiveEvent>>,
 }
 
 /// In-memory attachment cache: showing an image again does not hit the network.
@@ -204,7 +211,7 @@ async fn live(state: &AppState) -> Result<Arc<Live>, String> {
 pub async fn bootstrap(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Boot, String> {
     match store::load() {
         None => Ok(Boot::NeedLogin { reason: None }),
-        Some(jar) => connect(&app, &state, jar).await,
+        Some(jar) => connect(&app, &state, jar, false).await,
     }
 }
 
@@ -220,7 +227,7 @@ pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<
         .to_owned()
     })?;
     store::save(&jar)?;
-    connect(&app, &state, jar).await
+    connect(&app, &state, jar, true).await
 }
 
 #[tauri::command]
@@ -237,11 +244,16 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
 pub struct HistoryPage {
     messages: Vec<Message>,
     users: Vec<User>,
+    /// The server may have older messages. Decided by the raw page: service records such as
+    /// joins are dropped by the parser, so fewer messages than asked does not mean the end.
+    more: bool,
 }
 
-/// History page: the latest messages before `before` (exclusive).
+/// History page: the latest messages before `before` (exclusive). The page comes back at once;
+/// directory profiles of its new authors follow as [`LiveEvent::Users`].
 #[tauri::command]
 pub async fn history(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     chat_id: String,
     before: Option<Timestamp>,
@@ -249,38 +261,60 @@ pub async fn history(
 ) -> Result<HistoryPage, String> {
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
+    let limit = match (thread, before) {
+        (Some(_), _) => THREAD_PAGE,
+        (None, None) => FIRST_PAGE,
+        (None, Some(_)) => OLDER_PAGE,
+    };
+    let started = std::time::Instant::now();
     let body = live
         .xiva
-        .call("history", &HistoryRequest::page(&target, PAGE_SIZE, before), 20)
+        .call("history", &HistoryRequest::page(&target, limit, before), 20)
         .await
         .map_err(|e| e.to_string())?;
+    let raw = body
+        .pointer("/Chats/0/Messages")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     let data = convert::from_history(&body, Some(&live.me));
     let mut users = data.users;
     if let Ok(mut sh) = live.shared.lock() {
         if before.is_none() && thread.is_none() {
             sh.last.extend(data.last);
         }
-        // Someone already known needs no directory request.
+        // Someone already known by name needs no directory request; a stand-in name is not known.
         users.retain(|u| !sh.names.contains_key(&u.id.0));
-    }
-    if !users.is_empty() {
-        fill_profiles(&live.web, &mut users).await;
-        if let Ok(mut sh) = live.shared.lock() {
-            for u in &users {
-                sh.names.insert(u.id.0.clone(), u.display_name.clone());
-            }
+        // Recorded right away, so the next page does not ask the directory for the same people.
+        for u in users.iter().filter(|u| u.has_name()) {
+            sh.names.insert(u.id.0.clone(), u.display_name.clone());
         }
     }
     eprintln!(
-        "history {}: {} messages, {} new authors",
+        "history {}: {} of {limit} records, {} messages, {} new authors, {} ms",
         id_pattern(&chat_id),
+        raw,
         data.messages.len(),
-        users.len()
+        users.len(),
+        started.elapsed().as_millis()
     );
+    if !users.is_empty() {
+        let mut profiles = users.clone();
+        let live = live.clone();
+        tauri::async_runtime::spawn(async move {
+            fill_profiles(&live.web, &mut profiles).await;
+            if let Ok(mut sh) = live.shared.lock() {
+                for u in profiles.iter().filter(|u| u.has_name()) {
+                    sh.names.insert(u.id.0.clone(), u.display_name.clone());
+                }
+            }
+            let _ = app.emit(EVENT, &LiveEvent::Users { users: profiles });
+        });
+    }
     prefetch_previews(live.clone(), &data.messages);
     Ok(HistoryPage {
         messages: data.messages,
         users,
+        more: raw >= limit as usize,
     })
 }
 
@@ -638,7 +672,7 @@ async fn fill_profiles(web: &WebClient, users: &mut [User]) -> usize {
                 if u.title.is_none() {
                     u.title = p.position.clone();
                 }
-                if !p.display_name.is_empty() && (u.display_name == u.id.0 || u.display_name.is_empty()) {
+                if !p.display_name.is_empty() && !u.has_name() {
                     u.display_name = p.display_name.clone();
                 }
             }
@@ -651,14 +685,16 @@ fn err_json(e: impl ToString) -> Value {
     json!({ "error": e.to_string() })
 }
 
-fn write_probe(app: &AppHandle, name: &str, probe: &Value) {
+pub(crate) fn write_probe(app: &AppHandle, name: &str, probe: &Value) {
     if let Ok(dir) = app.path().app_data_dir() {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(name), serde_json::to_string_pretty(probe).unwrap_or_default());
     }
 }
 
-async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar) -> Result<Boot, String> {
+/// `signed_in`: the session has just come from the login window, so a rejection means the
+/// sign-in did not go through rather than an expired session.
+async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar, signed_in: bool) -> Result<Boot, String> {
     let mut probe = json!({ "client": identity::ua_suffix() });
     let result = connect_inner(app, state, jar, &mut probe).await;
     write_probe(app, "probe.json", &probe);
@@ -667,39 +703,70 @@ async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar) -> Result<Bo
             let live = Arc::new(live);
             *state.live.lock().await = Some(live.clone());
             start_heartbeat(app);
-            probe_threads(app.clone(), live);
             Ok(Boot::Ready { snapshot })
         }
         Err(ConnectError::Unauthorized) => {
             store::delete();
+            let reason = if signed_in {
+                text(
+                    app,
+                    "Телемост не принял вход через Яндекс ID. Попробуйте войти ещё раз.",
+                    "Telemost did not accept the Yandex ID sign-in. Please try again.",
+                )
+            } else {
+                text(
+                    app,
+                    "Сессия Яндекс ID недействительна, войдите снова.",
+                    "Your Yandex ID session has expired. Please sign in again.",
+                )
+            };
             Ok(Boot::NeedLogin {
-                reason: Some(
-                    text(
-                        app,
-                        "Сессия Яндекс ID недействительна, войдите снова.",
-                        "Your Yandex ID session has expired. Please sign in again.",
-                    )
-                    .into(),
-                ),
+                reason: Some(reason.into()),
             })
         }
         Err(ConnectError::Other(e)) => Err(e),
     }
 }
 
-/// Diagnostics of the thread ID format, in the background so that it never delays the start.
-fn probe_threads(app: AppHandle, live: Arc<Live>) {
-    tauri::async_runtime::spawn(async move {
-        let probe = match live.xiva.call("history", &wire::thread_list(0), 30).await {
-            Ok(v) => {
-                let mut entry = id_patterns(&v);
-                entry["shape"] = shape(&v);
-                entry
-            }
-            Err(e) => err_json(e),
-        };
-        write_probe(&app, "probe-threads.json", &probe);
-    });
+#[derive(Serialize)]
+pub struct Threads {
+    threads: Vec<mostik_core::FollowedThread>,
+    users: Vec<User>,
+}
+
+/// Threads the user follows, with unread counts, like Slack's "Threads". The UI asks once per
+/// connection and then keeps the list current from the pushes. The thread ID format goes to
+/// the diagnostics.
+#[tauri::command]
+pub async fn followed_threads(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Threads, String> {
+    let live = live(&state).await?;
+    let v = live.xiva.call("history", &wire::thread_list(0), 30).await;
+    let probe = match &v {
+        Ok(v) => {
+            let mut entry = id_patterns(v);
+            entry["shape"] = shape(v);
+            entry
+        }
+        Err(e) => err_json(e),
+    };
+    write_probe(&app, "probe-threads.json", &probe);
+    let (threads, users) = convert::followed_threads(&v.map_err(|e| e.to_string())?, Some(&live.me));
+    Ok(Threads { threads, users })
+}
+
+/// Marks the thread of message `parent` read up to its reply `ts` with number `seq_no`
+/// (the thread chat's own numbering).
+#[tauri::command]
+pub async fn mark_thread_read(
+    state: tauri::State<'_, AppState>,
+    chat_id: String,
+    parent: Timestamp,
+    ts: Timestamp,
+    seq_no: u64,
+) -> Result<(), String> {
+    let live = live(&state).await?;
+    let thread = convert::thread_chat_id(&chat_id, parent).ok_or("Threads are not supported in this chat")?;
+    push(&live, wire::seen_marker(&thread, ts, seq_no)).await.map(|_| ())
 }
 
 enum ConnectError {
@@ -717,7 +784,7 @@ impl From<WebError> for ConnectError {
 }
 
 /// Socket event: diagnostics, `Shared` update, UI event, notification.
-fn handle_incoming(app: &AppHandle, shared: &StdMutex<Shared>, diag: &AtomicUsize, incoming: Incoming) {
+fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &AtomicUsize, incoming: Incoming) {
     match incoming {
         Incoming::Push { event, body } => {
             if diag.fetch_add(1, Ordering::SeqCst) < MAX_DIAG_EVENTS
@@ -739,6 +806,23 @@ fn handle_incoming(app: &AppHandle, shared: &StdMutex<Shared>, diag: &AtomicUsiz
             {
                 sh.my_availability = p.availability;
             }
+            // A message from a chat the list does not have (someone started a direct chat or
+            // added the user to a group): fetch the chat, then show the message.
+            if let LiveEvent::Upsert { message, .. } = &ev
+                && message.thread_parent.is_none()
+                && let Ok(mut sh) = shared.lock()
+                && sh.ready
+                && !sh.titles.contains_key(&message.chat_id.0)
+            {
+                let chat = message.chat_id.0.clone();
+                let first = !sh.pending.contains_key(&chat);
+                sh.pending.entry(chat.clone()).or_default().push(ev);
+                if first {
+                    let (app, shared) = (app.clone(), shared.clone());
+                    tauri::async_runtime::spawn(async move { add_chat(app, shared, chat).await });
+                }
+                return;
+            }
             if let LiveEvent::Upsert { message, author } = &ev {
                 notify(app, shared, message, author.as_ref());
             }
@@ -751,6 +835,93 @@ fn handle_incoming(app: &AppHandle, shared: &StdMutex<Shared>, diag: &AtomicUsiz
             tauri::async_runtime::spawn(async move { reconnect_loop(app).await });
         }
     }
+}
+
+/// Fetches a chat that is not in the list yet (`get_chats_info`, plus the profile of a direct
+/// chat's peer the app does not know) and hands it to the UI together with the events held for it.
+async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String) {
+    let state = app.state::<AppState>();
+    let mut fetched = None;
+    // Right after a (re)connection the new `Live` may not be stored yet.
+    for _ in 0..10 {
+        match live(&state).await {
+            Ok(live) if Arc::ptr_eq(&live.shared, &shared) => {
+                fetched = fetch_chat(&live, &chat_id).await;
+                break;
+            }
+            _ => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    let held = {
+        let Ok(mut sh) = shared.lock() else { return };
+        let held = sh.pending.remove(&chat_id).unwrap_or_default();
+        // Known from now on even if the fetch failed: its messages are not held again.
+        let title = match &fetched {
+            Some((chat, users)) => match &chat.kind {
+                ChatKind::Direct { peer } => users
+                    .iter()
+                    .find(|u| &u.id == peer)
+                    .map(|u| u.display_name.clone())
+                    .or_else(|| sh.names.get(&peer.0).cloned())
+                    .unwrap_or_default(),
+                _ => chat.name.clone(),
+            },
+            None => String::new(),
+        };
+        sh.titles.insert(chat_id.clone(), title);
+        if let Some((chat, users)) = fetched {
+            for u in users.iter().filter(|u| u.has_name()) {
+                sh.names.insert(u.id.0.clone(), u.display_name.clone());
+            }
+            if chat.kind == (ChatKind::Group { public: true }) && !sh.channels.contains(&chat.name) {
+                sh.channels.push(chat.name.clone());
+            }
+            let section = convert::section_of(&chat).to_owned();
+            let _ = app.emit(EVENT, &LiveEvent::ChatAdded { chat, section, users });
+        }
+        // Emitted under the lock: events that arrive meanwhile wait and come after these.
+        for ev in &held {
+            let _ = app.emit(EVENT, ev);
+        }
+        held
+    };
+    for ev in held {
+        if let LiveEvent::Upsert { message, author } = &ev {
+            notify(&app, &shared, message, author.as_ref());
+        }
+    }
+}
+
+async fn fetch_chat(live: &Live, chat_id: &str) -> Option<(mostik_core::Chat, Vec<User>)> {
+    let info = chat_info_raw(live, chat_id)
+        .await
+        .map_err(|e| eprintln!("new chat {chat_id}: {e}"))
+        .ok()?;
+    let chat = convert::chat_from_info(&info, Some(&live.me))?;
+    let mut users = vec![];
+    if let ChatKind::Direct { peer } = &chat.kind {
+        let known = live.shared.lock().is_ok_and(|sh| sh.names.contains_key(&peer.0));
+        if !known {
+            let mut peer = vec![User {
+                id: peer.clone(),
+                display_name: String::new(),
+                title: None,
+                presence: mostik_core::Presence::Offline,
+                status: None,
+                availability: Default::default(),
+                is_robot: false,
+                avatar: None,
+            }];
+            fill_profiles(&live.web, &mut peer).await;
+            for u in &mut peer {
+                if !u.has_name() {
+                    u.display_name = mostik_core::UNKNOWN_USER.into();
+                }
+            }
+            users.extend(peer);
+        }
+    }
+    Some((chat, users))
 }
 
 fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>) {
@@ -859,7 +1030,7 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<
         .pointer("/data/chat/chat_id")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("Telemost did not open the chat: {:?}", v.pointer("/data/code")))?;
-    Ok(mostik_core::Chat {
+    let chat = mostik_core::Chat {
         id: ChatId(id.to_owned()),
         kind: convert::chat_kind(id, Some(&live.me), false),
         name: String::new(),
@@ -871,7 +1042,9 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<
         last_ts: 0,
         pinned: None,
         organizations: vec![],
-    })
+    };
+    note_chat(&live, &chat);
+    Ok(chat)
 }
 
 fn rpc_ok(v: &Value) -> Result<(), String> {
@@ -1880,6 +2053,7 @@ async fn connect_inner(
             .map(|c| format!("{}@{}", c.name, c.domain))
             .collect::<Vec<_>>()
     );
+    let saved = jar.clone();
     let mut web = WebClient::new(jar, ua.clone())?;
 
     let page = web.load_page().await;
@@ -1887,7 +2061,12 @@ async fn connect_inner(
         Ok(p) => json!({ "puid_len": p.puid.len(), "service_id": p.service_id.is_some(), "logged_in": p.logged_in }),
         Err(e) => err_json(e),
     };
+    probe["page"]["hops"] = json!(web.page_hops);
     let page = page?;
+    // The page refreshed some cookies on its redirects: keep them for the next start.
+    if web.jar() != &saved {
+        probe["page"]["jar_saved"] = json!(store::save(web.jar()).is_ok());
+    }
 
     let shared: Arc<StdMutex<Shared>> = Arc::default();
     let (handler_app, handler_shared, diag) = (app.clone(), shared.clone(), state.diag_events.clone());
@@ -2028,7 +2207,7 @@ async fn connect_inner(
             sh.titles
                 .insert(ch.id.0.clone(), mostik_core::chat_title(&snapshot, ch));
         }
-        for u in &snapshot.users {
+        for u in snapshot.users.iter().filter(|u| u.has_name()) {
             sh.names.insert(u.id.0.clone(), u.display_name.clone());
         }
         sh.channels = snapshot.mention_channels();

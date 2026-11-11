@@ -16,6 +16,7 @@ uuid.workspace = true
 rmpv = "1"
 bytes = "1"
 reqwest = { version = "0.13", features = ["multipart"] }
+cookie = "0.18"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

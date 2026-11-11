@@ -2959,6 +2959,7 @@ name = "mostik-yandex"
 version = "0.2.0"
 dependencies = [
  "bytes",
+ "cookie",
  "futures-util",
  "mostik-core",
  "reqwest",
