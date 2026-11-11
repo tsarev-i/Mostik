@@ -1721,7 +1721,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 .pin-card > .link { margin-left: 72px; font-size: 13px; }
 .menu-head { display: flex; align-items: center; gap: 10px; padding: 8px 16px; }
 .menu-head b { color: var(--text-strong); font-size: 15px; }
-.ws-tile.small { width: 28px; height: 28px; font-size: 13px; border-radius: 6px; flex: none; }
+/* In menus: no rail spacing under the tile, or it sits higher than the name next to it. */
+.ws-tile.small { width: 28px; height: 28px; margin-bottom: 0; font-size: 13px; border-radius: 6px; flex: none; }
 .ws-name.active { background: var(--sidebar-hover); }
 button.ws-tile { cursor: pointer; }
 .popover.menu button:disabled { opacity: 0.5; cursor: default; background: none; color: inherit; }
