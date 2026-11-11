@@ -2850,6 +2850,11 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     let save_key = save.clone();
     view! {
         <div class="inline-edit" on:click=|e| e.stop_propagation()>
+            <FormatBar on_fmt=Callback::new(move |(before, after)| {
+                if let Some(el) = area.get_untracked() {
+                    text.set(wrap_selection(&el, before, after));
+                }
+            })/>
             <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
                 on:input=move |_| {
                     if let Some(el) = area.get_untracked() {
@@ -2878,6 +2883,25 @@ fn InlineEditor(msg: Message) -> impl IntoView {
                 <button class="btn small" on:click=move |_| cancel()>{tr().cancel}</button>
                 <button class="btn small primary" disabled=move || busy.get() on:click=move |_| save()>{tr().save}</button>
             </div>
+        </div>
+    }
+}
+
+/// Formatting buttons over a message field: each wraps the selection in Telemost markup markers.
+#[component]
+fn FormatBar(on_fmt: Callback<(&'static str, &'static str)>) -> impl IntoView {
+    let fmt = move |before: &'static str, after: &'static str| move |_| on_fmt.run((before, after));
+    view! {
+        <div class="composer-toolbar">
+            <button class="fmt" title=tr().fmt_bold on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
+            <button class="fmt" title=tr().fmt_italic on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
+            <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
+            <button class="fmt" title=tr().fmt_strike on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
+            <span class="sep"></span>
+            <button class="fmt" title=tr().fmt_link on:click=fmt("[", "](https://)")><Icon icon=I::Link size=16/></button>
+            <span class="sep"></span>
+            <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
+            <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>
         </div>
     }
 }
@@ -4076,13 +4100,11 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             _ => {}
         }
     };
-    let fmt = move |before: &'static str, after: &'static str| {
-        move |_| {
-            if let Some(el) = area.get_untracked() {
-                let text = wrap_selection(&el, before, after);
-                remember(&text);
-                set_draft.set(text);
-            }
+    let fmt = move |(before, after): (&'static str, &'static str)| {
+        if let Some(el) = area.get_untracked() {
+            let text = wrap_selection(&el, before, after);
+            remember(&text);
+            set_draft.set(text);
         }
     };
     let typing_text = move || if thread { None } else { typing_line(c, &c.current.get()) };
@@ -4111,17 +4133,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         </div>
                     </Show>
                 })}
-                <div class="composer-toolbar">
-                    <button class="fmt" title=tr().fmt_bold on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
-                    <button class="fmt" title=tr().fmt_italic on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
-                    <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
-                    <button class="fmt" title=tr().fmt_strike on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
-                    <span class="sep"></span>
-                    <button class="fmt" title=tr().fmt_link on:click=fmt("[", "](https://)")><Icon icon=I::Link size=16/></button>
-                    <span class="sep"></span>
-                    <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
-                    <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>
-                </div>
+                <FormatBar on_fmt=Callback::new(fmt)/>
                 <div
                     class="editor"
                     node_ref=area
