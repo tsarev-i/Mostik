@@ -44,6 +44,11 @@ tauri-plugin-notification = "2"
 tauri-plugin-updater = { version = "2", default-features = false, features = ["system-proxy"] }
 tokio = { version = "1", features = ["fs", "macros", "rt", "sync", "time"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Session cookies of the call window straight into WebView2 (see call.rs). Same versions as wry uses.
+webview2-com = "0.39"
+windows-core = "0.62"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # fd setup for the DevTools pipe of the call browser; close-on-exec flags before the restart after an update.
 libc = "0.2"

@@ -70,6 +70,17 @@ pub fn is_meeting_url(url: &str) -> bool {
     })
 }
 
+/// Whether the call window's page going to `url` means the call is over. After "Leave" Telemost
+/// shows its own pages (chats, home) in the window, and the page script goes to [`ENDED_URL`].
+/// A sign-in page (Yandex ID, when the session cookies are not enough) is not the end: the user
+/// may sign in right there, so the window stays.
+fn is_call_over(url: &str) -> bool {
+    if url.starts_with("about:blank") {
+        return true;
+    }
+    Url::parse(url).is_ok_and(|u| u.host_str().is_some_and(|h| MEETING_HOSTS.contains(&h))) && !is_meeting_url(url)
+}
+
 /// Opens the meeting in the call window. If that call is already open, its window comes to the
 /// front; a different call is refused until the current one ends.
 pub async fn open(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar) -> Result<(), String> {
@@ -145,6 +156,8 @@ fn current(app: &AppHandle) -> Option<(String, imp::Handle)> {
     *active = None;
     drop(active);
     let _ = app.emit(CALL_EVENT, None::<CallInfo>);
+    // `ended` will find nothing to forget, so the leftover status is checked from here.
+    crate::backend::clear_meeting_status_later(app.clone());
     None
 }
 
@@ -257,7 +270,6 @@ fn window_title(app: &AppHandle, label: &str) -> String {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use std::ffi::{OsStr, OsString};
     use std::io::pipe;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
@@ -370,18 +382,30 @@ mod imp {
     /// Profiles of another running Mostik are its own business; this process has no call open
     /// when it calls this, so its own leftovers go too.
     pub fn cleanup(app: &AppHandle) {
-        let Ok(dir) = app.path().app_cache_dir() else { return };
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
-        for e in entries.flatten() {
-            let name = e.file_name();
-            let Some(owner) = name.to_str().and_then(profile_owner) else {
-                continue;
-            };
-            let alive = Path::new("/proc").join(owner.to_string()).exists();
-            if owner == std::process::id() || !alive {
-                let _ = std::fs::remove_dir_all(e.path());
+        for dir in profile_parents(app) {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                let name = e.file_name();
+                let Some(owner) = name.to_str().and_then(profile_owner) else {
+                    continue;
+                };
+                let alive = Path::new("/proc").join(owner.to_string()).exists();
+                if owner == std::process::id() || !alive {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
             }
         }
+    }
+
+    /// Where call profiles live: the app cache, and `~/snap/<name>/common` for snap browsers.
+    fn profile_parents(app: &AppHandle) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = app.path().app_cache_dir().into_iter().collect();
+        if let Some(snaps) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("snap"))
+            && let Ok(entries) = std::fs::read_dir(snaps)
+        {
+            dirs.extend(entries.flatten().map(|e| e.path().join("common")));
+        }
+        dirs
     }
 
     /// The Mostik process a profile directory (`call-browser-<pid>-<n>`) belongs to.
@@ -393,11 +417,13 @@ mod imp {
     /// GPU) may still write to the profile for a moment, so the whole process group goes first,
     /// then the profile.
     fn dispose(mut child: std::process::Child, profile: &Path) {
-        let _ = child.wait();
+        // Before `wait`: until the leader is reaped its pid, and so the group id, cannot be reused,
+        // so the signal cannot reach an unrelated group.
         // SAFETY: plain syscall; the group was created for this browser by `process_group(0)`.
         unsafe {
             libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
         }
+        let _ = child.wait();
         for _ in 0..5 {
             std::thread::sleep(Duration::from_millis(200));
             match std::fs::remove_dir_all(profile) {
@@ -449,8 +475,8 @@ mod imp {
         Ok(target)
     }
 
-    /// Closes the window once the user leaves the meeting, as the Slack huddle window does.
-    /// After "Leave" Telemost opens its own chats in the same page; here that means the call is over.
+    /// Closes the window once the user leaves the meeting, as the Slack huddle window does
+    /// (see `is_call_over`).
     async fn close_when_left(cdp: Arc<Cdp>, mut events: UnboundedReceiver<Event>, target: String) {
         let mut in_meeting = false;
         while let Some(e) = events.recv().await {
@@ -459,7 +485,7 @@ mod imp {
             };
             if super::is_meeting_url(url) {
                 in_meeting = true;
-            } else if in_meeting && !url.starts_with("data:") {
+            } else if in_meeting && super::is_call_over(url) {
                 eprintln!("call: left the meeting, closing the window");
                 let _ = cdp.send("Browser.close", json!({}), None).await;
                 return;
@@ -531,11 +557,10 @@ mod imp {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        for (key, value) in scrub_env(std::env::vars_os(), std::env::var_os("APPDIR").as_deref()) {
-            match value {
-                Some(v) => cmd.env(key, v),
-                None => cmd.env_remove(key),
-            };
+        // From inside an AppImage the image's libraries would break the system browser.
+        if let Some(appdir) = crate::appimage::appdir() {
+            cmd.env_clear()
+                .envs(crate::appimage::clean_env(std::env::vars_os(), &appdir));
         }
         // SAFETY: only async-signal-safe calls (fcntl, dup2) between fork and exec.
         unsafe {
@@ -673,61 +698,9 @@ b{{color:#f8f8f8;font-size:17px}}
         out
     }
 
-    /// Environment fixes for the browser. Inside an AppImage, variables like `LD_LIBRARY_PATH`
-    /// or `GIO_MODULE_DIR` point into the image, and its libraries would break the system
-    /// browser: such entries are dropped, and the variable is removed if nothing is left.
-    pub(super) fn scrub_env(
-        vars: impl IntoIterator<Item = (OsString, OsString)>,
-        appdir: Option<&OsStr>,
-    ) -> Vec<(OsString, Option<OsString>)> {
-        let Some(appdir) = appdir.and_then(OsStr::to_str).filter(|d| !d.is_empty()) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for (key, value) in vars {
-            let Some(v) = value.to_str() else { continue };
-            if !v.contains(appdir) {
-                continue;
-            }
-            let kept: Vec<&str> = v.split(':').filter(|part| !part.contains(appdir)).collect();
-            let kept = kept.join(":");
-            out.push((key, (!kept.is_empty()).then(|| OsString::from(kept))));
-        }
-        out
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        fn vars(list: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
-            list.iter().map(|(k, v)| (k.into(), v.into())).collect()
-        }
-
-        #[test]
-        fn outside_an_appimage_nothing_changes() {
-            assert!(scrub_env(vars(&[("LD_LIBRARY_PATH", "/opt/x")]), None).is_empty());
-        }
-
-        #[test]
-        fn appimage_paths_are_dropped() {
-            let dir = OsStr::new("/tmp/.mount_MostikAb");
-            let fixed = scrub_env(
-                vars(&[
-                    ("LD_LIBRARY_PATH", "/tmp/.mount_MostikAb/usr/lib"),
-                    ("XDG_DATA_DIRS", "/tmp/.mount_MostikAb/usr/share:/usr/share"),
-                    ("HOME", "/home/u"),
-                ]),
-                Some(dir),
-            );
-            assert_eq!(
-                fixed,
-                vec![
-                    (OsString::from("LD_LIBRARY_PATH"), None),
-                    (OsString::from("XDG_DATA_DIRS"), Some(OsString::from("/usr/share"))),
-                ]
-            );
-        }
 
         #[test]
         fn origins_include_the_meeting_host_once() {
@@ -922,10 +895,14 @@ b{{color:#f8f8f8;font-size:17px}}
 
 #[cfg(target_os = "windows")]
 mod imp {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use mostik_yandex::session::CookieJar;
     use tauri::webview::Color;
-    use tauri::webview::cookie::Cookie;
-    use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+    use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE, ICoreWebView2_2};
+    use windows_core::{HSTRING, Interface};
 
     use super::{HEIGHT, WIDTH};
 
@@ -948,12 +925,19 @@ mod imp {
         let label = format!("call-{generation}");
         let app2 = app.clone();
         let label2 = label.clone();
+        let in_meeting = Arc::new(AtomicBool::new(false));
         let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(blank))
             .title(title)
             .initialization_script(super::page_script(title))
-            // The page script reports the end of the call by going to `ENDED_URL`.
+            // The end of the call, as on Linux (`is_call_over`). Routing inside the page does not
+            // come here; on the bare meeting page the page script covers it with `ENDED_URL`.
             .on_navigation(move |url| {
-                if url.as_str() != super::ENDED_URL {
+                let url = url.as_str();
+                if super::is_meeting_url(url) {
+                    in_meeting.store(true, Ordering::Relaxed);
+                    return true;
+                }
+                if !(in_meeting.load(Ordering::Relaxed) && super::is_call_over(url)) {
                     return true;
                 }
                 // Not from inside the navigation handler: close once it has returned.
@@ -977,20 +961,54 @@ mod imp {
             }
         });
         // The cookies go in before the meeting loads, so the page sees the session at once.
-        for c in &jar.cookies {
-            let cookie = Cookie::build((c.name.clone(), c.value.clone()))
-                .domain(c.domain.clone())
-                .path("/")
-                .secure(true)
-                .build();
-            if let Err(e) = window.set_cookie(cookie) {
-                eprintln!("call: could not set a cookie: {e}");
-            }
+        if let Err(e) = set_cookies(&window, jar).await {
+            eprintln!("call: could not set the session cookies: {e}");
         }
         window
             .navigate(meeting)
             .map_err(|e| format!("could not open the meeting: {e}"))?;
         Ok(Some(Handle { label }))
+    }
+
+    /// Puts the session cookies into the WebView2 profile as domain cookies (`.yandex.ru`), as on
+    /// Linux. Tauri's `set_cookie` cannot: the `cookie` crate hands out the domain without its
+    /// leading dot, and to WebView2 `yandex.ru` without the dot means that host only, so
+    /// `telemost.360.yandex.ru` would not get `Session_id`.
+    async fn set_cookies(window: &WebviewWindow, jar: &CookieJar) -> Result<(), String> {
+        let cookies: Vec<(String, String, String)> = jar
+            .cookies
+            .iter()
+            .map(|c| {
+                let domain = format!(".{}", c.domain.trim_start_matches('.'));
+                (c.name.clone(), c.value.clone(), domain)
+            })
+            .collect();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        window
+            .with_webview(move |pw| {
+                // SAFETY: WebView2 COM calls on the webview's own thread, where `with_webview` runs.
+                let result = unsafe {
+                    (|| -> windows_core::Result<()> {
+                        let webview: ICoreWebView2_2 = pw.controller().CoreWebView2()?.cast()?;
+                        let manager = webview.CookieManager()?;
+                        for (name, value, domain) in &cookies {
+                            let cookie = manager.CreateCookie(
+                                &HSTRING::from(name),
+                                &HSTRING::from(value),
+                                &HSTRING::from(domain),
+                                &HSTRING::from("/"),
+                            )?;
+                            cookie.SetIsSecure(true)?;
+                            cookie.SetSameSite(COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE)?;
+                            manager.AddOrUpdateCookie(&cookie)?;
+                        }
+                        Ok(())
+                    })()
+                };
+                let _ = tx.send(result.map_err(|e| e.to_string()));
+            })
+            .map_err(|e| e.to_string())?;
+        rx.await.map_err(|_| "the call window went away".to_owned())?
     }
 
     pub async fn focus(app: &AppHandle, h: &Handle) {
@@ -1061,6 +1079,24 @@ mod tests {
             "https://telemost.360.yandex.ru/private-join/1?theme=dark"
         ));
         assert!(!is_meeting_url("https://telemost.360.yandex.ru/private-join/"));
+    }
+
+    #[test]
+    fn what_ends_the_call() {
+        // Telemost's own pages after "Leave", and the page script's signal.
+        assert!(is_call_over("https://telemost.360.yandex.ru/"));
+        assert!(is_call_over("https://telemost.yandex.ru/chats"));
+        assert!(is_call_over(ENDED_URL));
+        assert!(is_call_over("about:blank"));
+        // Not the meeting itself, and not a sign-in on the way to it.
+        assert!(!is_call_over("https://telemost.360.yandex.ru/j/123"));
+        assert!(!is_call_over(
+            "https://telemost.360.yandex.ru/private-join/123?theme=dark"
+        ));
+        assert!(!is_call_over(
+            "https://passport.yandex.ru/auth?retpath=https%3A%2F%2Ftelemost.360.yandex.ru"
+        ));
+        assert!(!is_call_over("data:text/html,x"));
     }
 
     #[test]

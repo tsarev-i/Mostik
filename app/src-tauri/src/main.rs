@@ -2,6 +2,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "linux")]
+mod appimage;
 mod backend;
 mod call;
 #[cfg(target_os = "linux")]

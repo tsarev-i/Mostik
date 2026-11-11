@@ -1223,12 +1223,15 @@ pub async fn start_call(
     chat_id: String,
     label: String,
 ) -> Result<(), String> {
-    // Before `create_meeting`: it already announces the call in the chat.
-    if let Some(current) = call::info(&app)
-        && current.chat_id.as_deref() != Some(chat_id.as_str())
-    {
+    // Before `create_meeting`: it announces the call in the chat again. An open call, of this chat
+    // or another one, only comes to the front.
+    if let Some(current) = call::info(&app) {
         call::focus(&app).await;
-        return Err(call::BUSY.into());
+        return if current.chat_id.as_deref() == Some(chat_id.as_str()) {
+            Ok(())
+        } else {
+            Err(call::BUSY.into())
+        };
     }
     let live = live(&state).await?;
     let mut web = live.web.clone_light();

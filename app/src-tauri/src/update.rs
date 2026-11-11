@@ -37,9 +37,14 @@ pub enum UpdateStatus {
 }
 
 /// The update found by the last check, the status shown in the UI and the background check switch.
+///
+/// A check and an install both change `update` and the status; they do it while holding the
+/// `update` lock, and `installing` keeps a check that was waiting for the network from bringing
+/// the "Update" button back (and with it a second install) in the middle of an install.
 pub struct UpdateState {
     update: Mutex<Option<Update>>,
     status: Mutex<UpdateStatus>,
+    installing: AtomicBool,
     /// Background checks are on until the UI passes the saved preference.
     auto: AtomicBool,
 }
@@ -53,6 +58,7 @@ impl Default for UpdateState {
             } else {
                 UpdateStatus::Unsupported
             }),
+            installing: AtomicBool::new(false),
             auto: AtomicBool::new(true),
         }
     }
@@ -119,10 +125,13 @@ async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
         },
         None => UpdateStatus::None,
     };
-    *app.state::<UpdateState>()
-        .update
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = found;
+    let state = app.state::<UpdateState>();
+    let mut update = state.update.lock().unwrap_or_else(|e| e.into_inner());
+    // An install may have started while this check waited for the network: it wins.
+    if state.installing.load(Ordering::SeqCst) {
+        return Ok(status(app));
+    }
+    *update = found;
     set_status(app, new.clone());
     Ok(new)
 }
@@ -162,17 +171,30 @@ pub async fn check_update(app: AppHandle) -> Result<UpdateStatus, String> {
 #[tauri::command]
 pub async fn install_update(app: AppHandle) -> Result<(), String> {
     let state = app.state::<UpdateState>();
-    let Some(update) = state.update.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-        return Err(crate::backend::text(&app, "Обновление не найдено", "No update found").to_owned());
+    let (update, version) = {
+        let mut found = state.update.lock().unwrap_or_else(|e| e.into_inner());
+        if state.installing.load(Ordering::SeqCst) {
+            return Err(crate::backend::text(
+                &app,
+                "Обновление уже устанавливается",
+                "The update is already installing",
+            )
+            .to_owned());
+        }
+        let Some(update) = found.take() else {
+            return Err(crate::backend::text(&app, "Обновление не найдено", "No update found").to_owned());
+        };
+        state.installing.store(true, Ordering::SeqCst);
+        let version = update.version.clone();
+        set_status(
+            &app,
+            UpdateStatus::Installing {
+                version: version.clone(),
+                percent: Some(0),
+            },
+        );
+        (update, version)
     };
-    let version = update.version.clone();
-    set_status(
-        &app,
-        UpdateStatus::Installing {
-            version: version.clone(),
-            percent: Some(0),
-        },
-    );
     let mut received = 0u64;
     let progress = |chunk: usize, total: Option<u64>| {
         received += chunk as u64;
@@ -201,8 +223,11 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         }
         Err(e) => {
             // Keep the update so that the button can try again.
-            *state.update.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
+            let mut found = state.update.lock().unwrap_or_else(|e| e.into_inner());
+            *found = Some(update);
+            state.installing.store(false, Ordering::SeqCst);
             set_status(&app, UpdateStatus::Available { version });
+            drop(found);
             Err(format!(
                 "{}: {e}",
                 crate::backend::text(&app, "Не удалось обновить Мостик", "Could not update Mostik")
@@ -220,10 +245,9 @@ fn relaunch_appimage(appimage: &std::ffi::OsStr) -> Result<(), String> {
     close_fds_on_exec();
     let mut command = std::process::Command::new(appimage);
     command.args(std::env::args_os().skip(1));
-    let appdir = std::env::var("APPDIR").ok().filter(|d| !d.is_empty());
-    if let Some(appdir) = appdir {
+    if let Some(appdir) = crate::appimage::appdir() {
         command.env_clear();
-        command.envs(clean_env(std::env::vars_os(), &appdir));
+        command.envs(crate::appimage::clean_env(std::env::vars_os(), &appdir));
     }
     // AppRun keeps the directory the app was started from in OWD; HOME if that is gone too.
     let cwd = ["OWD", "HOME"]
@@ -237,26 +261,6 @@ fn relaunch_appimage(appimage: &std::ffi::OsStr) -> Result<(), String> {
         .spawn()
         .map(drop)
         .map_err(|e| format!("{}: {e}", appimage.to_string_lossy()))
-}
-
-/// The environment without the entries that point into the old AppImage mount `appdir`: such
-/// path-list entries are removed, a variable left empty is dropped.
-#[cfg(target_os = "linux")]
-fn clean_env(
-    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
-    appdir: &str,
-) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-    vars.filter_map(|(key, value)| match value.to_str() {
-        Some(v) if v.contains(appdir) => {
-            let kept: Vec<&str> = v
-                .split(':')
-                .filter(|p| !p.is_empty() && !p.starts_with(appdir))
-                .collect();
-            (!kept.is_empty()).then(|| (key, kept.join(":").into()))
-        }
-        _ => Some((key, value)),
-    })
-    .collect()
 }
 
 /// The AppImage runtime keeps its FUSE mount, and itself, alive while anyone holds its keepalive
@@ -280,33 +284,5 @@ fn close_fds_on_exec() {
                 libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
             }
         }
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::clean_env;
-
-    #[test]
-    fn clean_env_drops_the_old_mount() {
-        let vars = [
-            ("PATH", "/tmp/.mount_Old/usr/bin/:/usr/bin:/tmp/.mount_Old/bin"),
-            ("GTK_DATA_PREFIX", "/tmp/.mount_Old"),
-            ("PWD", "/tmp/.mount_Old/usr"),
-            ("HOME", "/home/me"),
-        ]
-        .map(|(k, v)| (k.into(), v.into()));
-        let cleaned = clean_env(vars.into_iter(), "/tmp/.mount_Old");
-        let cleaned: Vec<(String, String)> = cleaned
-            .into_iter()
-            .map(|(k, v)| (k.into_string().unwrap(), v.into_string().unwrap()))
-            .collect();
-        assert_eq!(
-            cleaned,
-            [
-                ("PATH".to_owned(), "/usr/bin".to_owned()),
-                ("HOME".to_owned(), "/home/me".to_owned()),
-            ]
-        );
     }
 }

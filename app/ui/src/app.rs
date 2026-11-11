@@ -1953,10 +1953,31 @@ fn chat_drop(c: Ctx) {
     if moved == current {
         return;
     }
+    // The switch to the custom order applies to every section: those never dragged keep the order
+    // they are shown in now (say, A–Z) instead of falling back to the Telemost one.
+    let switching = c.settings.with_untracked(|s| s.sidebar_sort != SidebarSort::Custom);
+    let kept: Vec<(String, Vec<ChatId>)> = if switching {
+        untrack(|| {
+            c.snap.with(|s| {
+                s.sections
+                    .iter()
+                    .filter(|sec| sec.id != d.section && c.chat_order.with(|o| !o.contains_key(&sec.id)))
+                    // Without a saved order the custom one is the Telemost order, `sec.chats`.
+                    .filter_map(|sec| {
+                        let shown = section_order(c, s, &sec.id, &sec.chats);
+                        (shown != sec.chats).then(|| (sec.id.clone(), shown))
+                    })
+                    .collect()
+            })
+        })
+    } else {
+        Vec::new()
+    };
     c.chat_order.update(|o| {
         o.insert(d.section, moved);
+        o.extend(kept);
     });
-    if c.settings.with_untracked(|s| s.sidebar_sort != SidebarSort::Custom) {
+    if switching {
         c.settings.update(|s| s.sidebar_sort = SidebarSort::Custom);
     }
 }
