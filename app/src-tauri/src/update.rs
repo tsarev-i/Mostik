@@ -38,13 +38,12 @@ pub enum UpdateStatus {
 
 /// The update found by the last check, the status shown in the UI and the background check switch.
 ///
-/// A check and an install both change `update` and the status; they do it while holding the
-/// `update` lock, and `installing` keeps a check that was waiting for the network from bringing
-/// the "Update" button back (and with it a second install) in the middle of an install.
+/// A check and an install both change `update` and the status while holding the `update` lock,
+/// so a check that was waiting for the network sees an install that started meanwhile (status
+/// `Installing`) and does not bring the "Update" button back, nor with it a second install.
 pub struct UpdateState {
     update: Mutex<Option<Update>>,
     status: Mutex<UpdateStatus>,
-    installing: AtomicBool,
     /// Background checks are on until the UI passes the saved preference.
     auto: AtomicBool,
 }
@@ -58,7 +57,6 @@ impl Default for UpdateState {
             } else {
                 UpdateStatus::Unsupported
             }),
-            installing: AtomicBool::new(false),
             auto: AtomicBool::new(true),
         }
     }
@@ -128,7 +126,7 @@ async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
     let state = app.state::<UpdateState>();
     let mut update = state.update.lock().unwrap_or_else(|e| e.into_inner());
     // An install may have started while this check waited for the network: it wins.
-    if state.installing.load(Ordering::SeqCst) {
+    if matches!(status(app), UpdateStatus::Installing { .. }) {
         return Ok(status(app));
     }
     *update = found;
@@ -173,7 +171,7 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
     let state = app.state::<UpdateState>();
     let (update, version) = {
         let mut found = state.update.lock().unwrap_or_else(|e| e.into_inner());
-        if state.installing.load(Ordering::SeqCst) {
+        if matches!(status(&app), UpdateStatus::Installing { .. }) {
             return Err(crate::backend::text(
                 &app,
                 "Обновление уже устанавливается",
@@ -184,7 +182,6 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
         let Some(update) = found.take() else {
             return Err(crate::backend::text(&app, "Обновление не найдено", "No update found").to_owned());
         };
-        state.installing.store(true, Ordering::SeqCst);
         let version = update.version.clone();
         set_status(
             &app,
@@ -225,7 +222,6 @@ pub async fn install_update(app: AppHandle) -> Result<(), String> {
             // Keep the update so that the button can try again.
             let mut found = state.update.lock().unwrap_or_else(|e| e.into_inner());
             *found = Some(update);
-            state.installing.store(false, Ordering::SeqCst);
             set_status(&app, UpdateStatus::Available { version });
             drop(found);
             Err(format!(
@@ -254,7 +250,7 @@ fn relaunch_appimage(appimage: &std::ffi::OsStr) -> Result<(), String> {
         .into_iter()
         .filter_map(std::env::var_os)
         .map(std::path::PathBuf::from)
-        .find(|d| d.is_dir() && !std::env::var_os("APPDIR").is_some_and(|a| d.starts_with(a)))
+        .find(|d| d.is_dir() && !crate::appimage::appdir().is_some_and(|a| d.starts_with(a)))
         .unwrap_or_else(|| "/".into());
     command.current_dir(cwd);
     command

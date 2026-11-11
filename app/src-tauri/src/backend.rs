@@ -1223,40 +1223,33 @@ pub async fn start_call(
     chat_id: String,
     label: String,
 ) -> Result<(), String> {
-    // Before `create_meeting`: it announces the call in the chat again. An open call, of this chat
-    // or another one, only comes to the front.
-    if let Some(current) = call::info(&app) {
-        call::focus(&app).await;
-        return if current.chat_id.as_deref() == Some(chat_id.as_str()) {
-            Ok(())
-        } else {
-            Err(call::BUSY.into())
-        };
-    }
     let live = live(&state).await?;
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc(
-            "create_meeting",
-            json!({ "chat_id": chat_id, "supported_features": [] }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
-    let id = v
-        .pointer("/data/meeting_id")
-        .and_then(Value::as_str)
-        .ok_or("Telemost did not return the meeting link")?;
-    let url = if id.starts_with("https://") {
-        id.to_owned()
-    } else {
-        format!("https://telemost.360.yandex.ru/j/{id}")
-    };
     let info = call::CallInfo {
-        chat_id: Some(chat_id),
+        chat_id: Some(chat_id.clone()),
         label,
     };
-    call::open(&app, &url, info, live.web.jar()).await
+    // `create_meeting` runs only when no call is open: it announces the call in the chat.
+    let meeting = || async {
+        let mut web = live.web.clone_light();
+        let v = web
+            .rpc(
+                "create_meeting",
+                json!({ "chat_id": chat_id, "supported_features": [] }),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        rpc_ok(&v)?;
+        let id = v
+            .pointer("/data/meeting_id")
+            .and_then(Value::as_str)
+            .ok_or("Telemost did not return the meeting link")?;
+        Ok(if id.starts_with("https://") {
+            id.to_owned()
+        } else {
+            format!("https://telemost.360.yandex.ru/j/{id}")
+        })
+    };
+    call::open_chat_call(&app, info, live.web.jar(), meeting).await
 }
 
 /// The call window comes to the front (where the desktop lets an app raise its windows:
@@ -1576,9 +1569,11 @@ pub async fn set_status(
 /// After a call: if Telemost still shows "In meeting" a few seconds after the window closed (the
 /// page had no chance to say goodbye), take that status off. A status the user set stays.
 pub fn clear_meeting_status_later(app: AppHandle) {
+    // A call opened in the meantime, in the window or in the browser, has its own status.
+    let opens = call::opens(&app);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(8)).await;
-        if call::info(&app).is_some() {
+        if call::opens(&app) != opens || call::info(&app).is_some() {
             return;
         }
         let state = app.state::<AppState>();
