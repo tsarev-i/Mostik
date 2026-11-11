@@ -2154,28 +2154,45 @@ fn SidebarSection(section: Section) -> impl IntoView {
         })
     };
     let empty = Memo::new(move |_| visible.with(Vec::is_empty));
+    // The section icon: a star for "Starred", the emoji of a folder; the Telemost sections have none.
+    let emoji = {
+        let id = section_id.clone();
+        Memo::new(move |_| {
+            c.folders
+                .with(|f| f.iter().find(|f| f.id == id).and_then(|f| f.emoji.clone()))
+        })
+    };
+    let has_icon = {
+        let starred = section_id == "starred";
+        Memo::new(move |_| starred || emoji.with(Option::is_some))
+    };
     move || {
         (always || !empty.get()).then(|| {
         let section_id = section_id.clone();
         view! {
             <div class="sb-section" class:drop-into=move || drop_into.get() data-section=section_id.clone()>
                 <div class="sb-section-head">
-                <button class="sb-section-title" on:click=toggle.clone() on:contextmenu={
+                // As in Slack, no caret until hovered: then it shows in place of the section icon
+                // (or left of an icon-less title) and turns down over an expanded section.
+                <button class="sb-section-title" class:with-icon=move || has_icon.get()
+                    aria-expanded=move || if collapsed.get() { "false" } else { "true" }
+                    on:click=toggle.clone() on:contextmenu={
                     let id = section.id.clone();
                     move |e: ev::MouseEvent| {
                         e.prevent_default();
                         c.ctx_menu.set(Some(CtxMenu { x: e.client_x() as f64, y: e.client_y() as f64, target: CtxTarget::Section(id.clone()) }));
                     }
                 }>
-                    <span class=move || if collapsed.get() { "caret collapsed" } else { "caret" }>
-                        <Icon icon=I::ChevronDown size=14/>
+                    <span class="sb-section-slot">
+                        {(section_id == "starred").then(|| view! {
+                            <span class="sb-section-icon"><Icon icon=I::Star size=15/></span>
+                        })}
+                        {move || emoji.get().map(|e| view! { <span class="sb-section-icon emoji">{e}</span> })}
+                        <span class="caret" class:collapsed=move || collapsed.get()>
+                            <Icon icon=I::ChevronDown size=12/>
+                        </span>
                     </span>
-                    {let id = section.id.clone(); move || {
-                        c.folders
-                            .with(|f| f.iter().find(|f| f.id == id).and_then(|f| f.emoji.clone()))
-                            .map(|e| view! { <span class="sb-section-emoji">{e}</span> })
-                    }}
-                    <span>{tr().section(&section.id, &section.title)}</span>
+                    <span class="sb-section-name">{tr().section(&section.id, &section.title)}</span>
                 </button>
                 // A quick "+" on hover, as in Slack: works even when the section is collapsed.
                 {(section_id == "channels").then(|| view! {

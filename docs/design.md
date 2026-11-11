@@ -68,6 +68,10 @@ until then Noto Sans is used.
 - Hovering a message shows the action bar: reaction, reply in thread, forward, "important", more.
 - The day separator is a centred pill that sticks to the top of the feed.
 - A collapsed sidebar section still shows the open chat and chats with unread messages.
+- Sidebar section headers have no caret, as in Slack: on hover it shows in place of the section icon
+  (the star of "Starred", a folder's emoji) or left of an icon-less title, and turns down over an
+  expanded section. A section with an icon lines up with the chat rows; icon-less ones ("Channels",
+  "Direct messages") are smaller muted headers.
 - A mention of yourself is highlighted with a background and a bar on the left; "important" gets a green label
   (the counterpart of "Saved" in Slack).
 - Enter sends, Shift+Enter inserts a line break.
