@@ -15,6 +15,8 @@ pub enum I {
     ArrowRight,
     Clock,
     Search,
+    /// "Find a conversation": lines with a magnifier.
+    FindList,
     Help,
     Home,
     Chat,
@@ -22,6 +24,10 @@ pub enum I {
     Files,
     Compose,
     Hash,
+    /// "Channels" section: a hash in a square.
+    HashSquare,
+    /// "Direct messages" section: two speech bubbles.
+    Messages,
     Lock,
     Megaphone,
     Threads,
@@ -91,6 +97,15 @@ fn paths(i: I) -> &'static str {
         }
         I::Hash => {
             r#"<line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/>"#
+        }
+        I::HashSquare => {
+            r#"<rect width="18" height="18" x="3" y="3" rx="3"/><path d="M7.5 10h9"/><path d="M7.5 14h9"/><path d="m10.5 7-1 10"/><path d="m14.5 7-1 10"/>"#
+        }
+        I::Messages => {
+            r#"<path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/>"#
+        }
+        I::FindList => {
+            r#"<path d="M21 6H3"/><path d="M10 12H3"/><path d="M10 18H3"/><circle cx="17" cy="15" r="3"/><path d="m21 19-1.9-1.9"/>"#
         }
         I::Lock => r#"<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>"#,
         I::Megaphone => r#"<path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>"#,

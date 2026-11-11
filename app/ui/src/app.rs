@@ -20,6 +20,9 @@ pub struct Ctx {
     pub current: RwSignal<ChatId>,
     pub thread: RwSignal<Option<Timestamp>>,
     pub collapsed: RwSignal<HashSet<String>>,
+    /// "Find a conversation" above the sidebar sections: while it has text, the sections show
+    /// only the conversations whose name has it.
+    pub sb_query: RwSignal<String>,
     pub about: RwSignal<bool>,
     /// New version of Mostik: the "Update" button in the top bar.
     pub update: RwSignal<bridge::UpdateStatus>,
@@ -70,7 +73,8 @@ pub struct Ctx {
     /// Files attached to the main composer (picked in the dialog or dropped).
     pub pending_files: RwSignal<Vec<bridge::PendingFile>>,
     pub new_message: RwSignal<bool>,
-    pub creating_channel: RwSignal<bool>,
+    /// The "Create a channel" dialog.
+    pub creating_channel: RwSignal<Option<NewChannel>>,
     pub details: RwSignal<Option<DetailsTab>>,
     /// What is selected in the rail and sidebar: home, direct messages or "Drafts & sent".
     pub view: RwSignal<ViewMode>,
@@ -146,6 +150,12 @@ pub struct ChatDrag {
 pub struct DropAt {
     pub section: String,
     pub anchor: Option<(ChatId, bool)>,
+}
+
+/// Where "Create a channel" was started: from one's own section, the new channel goes into it.
+#[derive(Clone, Default, PartialEq)]
+pub struct NewChannel {
+    pub folder: Option<String>,
 }
 
 /// Open right-click menu: the point that was clicked and what for.
@@ -366,6 +376,7 @@ pub fn App() -> impl IntoView {
         current: RwSignal::new(ChatId(String::new())),
         thread: RwSignal::new(None),
         collapsed: RwSignal::new(HashSet::new()),
+        sb_query: RwSignal::new(String::new()),
         about: RwSignal::new(false),
         update: RwSignal::new(bridge::UpdateStatus::None),
         live,
@@ -400,7 +411,7 @@ pub fn App() -> impl IntoView {
         dnd_until: RwSignal::new(None),
         pending_files: RwSignal::new(vec![]),
         new_message: RwSignal::new(false),
-        creating_channel: RwSignal::new(false),
+        creating_channel: RwSignal::new(None),
         details: RwSignal::new(None),
         view: RwSignal::new(ViewMode::Home),
         drafts: RwSignal::new(load_drafts()),
@@ -672,8 +683,8 @@ pub fn App() -> impl IntoView {
             c.status_dialog.set(false);
         } else if c.new_message.get_untracked() {
             c.new_message.set(false);
-        } else if c.creating_channel.get_untracked() {
-            c.creating_channel.set(false);
+        } else if c.creating_channel.get_untracked().is_some() {
+            c.creating_channel.set(None);
         } else if c.details.get_untracked().is_some() {
             c.details.set(None);
         } else if c.prefs.get_untracked() {
@@ -733,7 +744,7 @@ pub fn App() -> impl IntoView {
         <Show when=move || c.about.get()>
             <AboutDialog/>
         </Show>
-        {move || c.creating_channel.get().then(|| view! { <CreateChannelDialog/> })}
+        {move || c.creating_channel.get().map(|to| view! { <CreateChannelDialog to=to/> })}
         {move || c.new_message.get().then(|| view! { <NewMessageDialog/> })}
         {move || c.forwarding.get().map(|m| view! { <ForwardDialog msg=m/> })}
         {move || c.browsing.get().then(|| view! { <BrowseChannelsDialog/> })}
@@ -893,7 +904,7 @@ fn ContextMenu(menu: CtxMenu) -> impl IntoView {
         CtxTarget::Section(id) => section_menu_items(c, id).into_any(),
         CtxTarget::Workspace => workspace_menu_items(c).into_any(),
         CtxTarget::AddChannels => view! {
-            <button on:click=move |_| { close_menus(c); c.creating_channel.set(true); }>{tr().create_channel}</button>
+            <button on:click=move |_| { close_menus(c); c.creating_channel.set(Some(NewChannel::default())); }>{tr().create_channel}</button>
             <button on:click=move |_| { close_menus(c); c.browsing.set(true); }>{tr().browse_channels}</button>
         }
         .into_any(),
@@ -927,7 +938,8 @@ fn user_menu_items(c: Ctx, id: UserId) -> impl IntoView {
     }
 }
 
-/// Section header right-click menu: mark all read, collapse or expand sections.
+/// Section menu, as in Slack: the "⋮" of a section header or a right click on it. What the
+/// section makes (channels, messages), managing it, the sidebar filter and sorting, deleting it.
 fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
     let unread = c
         .sections
@@ -943,6 +955,10 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
             })
         })
         .unwrap_or_default();
+    let title = c
+        .sections
+        .with_untracked(|list| list.iter().find(|sec| sec.id == id).map(|sec| sec.title.clone()))
+        .unwrap_or_default();
     let all: Vec<String> = c
         .sections
         .with_untracked(|list| list.iter().map(|sec| sec.id.clone()).collect());
@@ -950,12 +966,49 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
     let toggle_id = id.clone();
     let custom = c.settings.with_untracked(|s| s.sidebar_sort == SidebarSort::Custom)
         && c.chat_order.with_untracked(|o| o.contains_key(&id));
+    let folder = folders::is_folder(&id);
+    // What the section makes: channels in "Channels" and one's own sections, messages in "Direct messages".
+    let make = match id.as_str() {
+        "channels" => Some(view! {
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); c.creating_channel.set(Some(NewChannel::default())); }>
+                <Icon icon=I::Hash size=16/><span>{tr().create_channel}</span>
+            </button>
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); c.browsing.set(true); }>
+                <Icon icon=I::Search size=16/><span>{tr().browse_channels}</span>
+            </button>
+        }
+        .into_any()),
+        "dms" => Some(view! {
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); c.new_message.set(true); }>
+                <Icon icon=I::Compose size=16/><span>{tr().new_message}</span>
+            </button>
+        }
+        .into_any()),
+        _ if folder => {
+            let to = id.clone();
+            Some(view! {
+                <button class="menu-icon-item" on:click=move |_| {
+                    close_menus(c);
+                    c.creating_channel.set(Some(NewChannel { folder: Some(to.clone()) }));
+                }>
+                    <Icon icon=I::Hash size=16/><span>{tr().create_channel}</span>
+                </button>
+            }
+            .into_any())
+        }
+        _ => None,
+    };
     // An own section can be renamed and deleted: its chats go back to their sections.
-    let folder = folders::is_folder(&id).then(|| {
-        let (rename_id, delete_id) = (id.clone(), id.clone());
+    let rename = folder.then(|| {
+        let rename_id = id.clone();
+        view! {
+            <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::Rename(rename_id.clone()))); }>{tr().rename_section}</button>
+        }
+    });
+    let delete = folder.then(|| {
+        let delete_id = id.clone();
         view! {
             <div class="menu-sep"></div>
-            <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::Rename(rename_id.clone()))); }>{tr().rename_section}</button>
             <button class="danger" on:click=move |_| {
                 close_menus(c);
                 ops::change_folders(c, |f| f.retain(|f| f.id != delete_id));
@@ -970,6 +1023,8 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
         }
     });
     view! {
+        <div class="menu-label">{tr().section(&id, &title)}</div>
+        {make}
         <button disabled=unread.is_empty() on:click=move |_| {
             close_menus(c);
             for ch in unread.clone() {
@@ -977,17 +1032,111 @@ fn section_menu_items(c: Ctx, id: String) -> impl IntoView {
             }
         }>{tr().mark_all_read}</button>
         <div class="menu-sep"></div>
+        <div class="menu-label">{tr().manage_section}</div>
+        {rename}
+        <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::New(None))); }>{tr().create_section}</button>
         <button on:click=move |_| {
             close_menus(c);
             c.collapsed.update(|set| if !set.remove(&toggle_id) { set.insert(toggle_id.clone()); });
         }>{if collapsed { tr().expand_section } else { tr().collapse_section }}</button>
         <button on:click=move |_| { close_menus(c); c.collapsed.set(all.iter().cloned().collect()); }>{tr().collapse_all}</button>
         <button on:click=move |_| { close_menus(c); c.collapsed.set(HashSet::new()); }>{tr().expand_all}</button>
-        {reset.map(|r| view! { <div class="menu-sep"></div>{r} })}
+        {reset}
         <div class="menu-sep"></div>
-        <button on:click=move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::New(None))); }>{tr().create_section}</button>
-        {folder}
+        // Filter and sorting are common to all sections in Mostik, so the label says so.
+        <div class="menu-label">{tr().sidebar_settings}</div>
+        {filter_submenu(c)}
+        {sort_submenu(c)}
+        {delete}
     }
+}
+
+/// A submenu row: the name, the current value on the right and the choices on hover.
+fn choice_submenu(
+    label: &'static str,
+    value: Signal<&'static str>,
+    items: impl Fn() -> AnyView + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    let open = RwSignal::new(false);
+    view! {
+        <div class="me-sub" on:mouseenter=move |_| open.set(true) on:mouseleave=move |_| open.set(false)>
+            <button class="me-sub-btn" on:click=move |_| open.update(|v| *v = !*v)>
+                <span>{label}</span>
+                <span class="menu-value">{value}<Icon icon=I::ChevronRight size=14/></span>
+            </button>
+            <Show when=move || open.get()>
+                <div class="me-submenu">{items()}</div>
+            </Show>
+        </div>
+    }
+}
+
+/// A radio item of a submenu: a tick at the current value.
+fn radio_item(
+    c: Ctx,
+    label: &'static str,
+    on: impl Fn(&Settings) -> bool + Copy + Send + Sync + 'static,
+    set: impl Fn(&mut Settings) + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    view! {
+        <button class="menu-radio" on:click=move |_| { close_menus(c); c.settings.update(set); }>
+            <span class="menu-tick">{move || c.settings.with(on).then(|| view! { <Icon icon=I::Check size=14/> })}</span>
+            <span>{label}</span>
+        </button>
+    }
+}
+
+fn filter_submenu(c: Ctx) -> impl IntoView {
+    let label = |f: SidebarFilter| match f {
+        SidebarFilter::Active => tr().f_active,
+        SidebarFilter::Unreads => tr().f_unreads,
+        SidebarFilter::Mentions => tr().f_mentions,
+        SidebarFilter::All => tr().f_all,
+    };
+    let item = move |f: SidebarFilter| {
+        radio_item(
+            c,
+            label(f),
+            move |s| s.sidebar_filter == f,
+            move |s| s.sidebar_filter = f,
+        )
+    };
+    let items = move || {
+        view! {
+            {item(SidebarFilter::Active)}
+            {item(SidebarFilter::Unreads)}
+            {item(SidebarFilter::Mentions)}
+            {item(SidebarFilter::All)}
+        }
+        .into_any()
+    };
+    choice_submenu(
+        tr().filter,
+        Signal::derive(move || label(c.settings.with(|s| s.sidebar_filter))),
+        items,
+    )
+}
+
+fn sort_submenu(c: Ctx) -> impl IntoView {
+    let label = |o: SidebarSort| match o {
+        SidebarSort::Alphabetical => tr().s_az,
+        SidebarSort::Recency => tr().s_recency,
+        SidebarSort::Custom => tr().s_custom,
+    };
+    let item = move |o: SidebarSort| radio_item(c, label(o), move |s| s.sidebar_sort == o, move |s| s.sidebar_sort = o);
+    let items = move || {
+        view! {
+            {item(SidebarSort::Alphabetical)}
+            {item(SidebarSort::Recency)}
+            {item(SidebarSort::Custom)}
+        }
+        .into_any()
+    };
+    choice_submenu(
+        tr().sort,
+        Signal::derive(move || label(c.settings.with(|s| s.sidebar_sort))),
+        items,
+    )
 }
 
 const ORG_KEY: &str = "mostik.org";
@@ -1068,7 +1217,7 @@ fn workspace_menu_items(c: Ctx) -> impl IntoView {
         </div>
         <div class="menu-sep"></div>
         <button on:click=move |_| { close_menus(c); c.prefs.set(true); }>{tr().preferences}</button>
-        <button on:click=move |_| { close_menus(c); c.creating_channel.set(true); }>{tr().create_channel}</button>
+        <button on:click=move |_| { close_menus(c); c.creating_channel.set(Some(NewChannel::default())); }>{tr().create_channel}</button>
         <button on:click=move |_| { close_menus(c); c.browsing.set(true); }>{tr().browse_channels}</button>
         {many.then(|| view! {
             <div class="menu-sep"></div>
@@ -2021,8 +2170,9 @@ fn Sidebar() -> impl IntoView {
             <Show when=move || c.view.get() == ViewMode::Activity>
                 <ActivityList/>
             </Show>
+            <SidebarFind/>
             <div class="sb-scroll" class:hidden=move || matches!(c.view.get(), ViewMode::Dms | ViewMode::Activity)>
-                <div class="sb-quick">
+                <div class="sb-quick" hidden=move || searching(c)>
                     {move || {
                         // Bold with the number of threads that have new replies, as in Slack.
                         let unread = c.threads.with(|l| l.iter().filter(|t| t.unread > 0).count());
@@ -2056,10 +2206,106 @@ fn Sidebar() -> impl IntoView {
                     key=|sec| (sec.id.clone(), sec.title.clone(), sec.chats.clone())
                     children=move |sec: Section| view! { <SidebarSection section=sec/> }
                 />
+                <Show when=move || searching(c) && !any_found(c)>
+                    <div class="sb-find-empty">{tr().no_conversations_found}</div>
+                </Show>
             </div>
             <CallBar/>
         </aside>
     }
+}
+
+/// "Find a conversation", as in Slack: filters the sidebar sections by conversation name.
+/// Enter opens the first one found, the down arrow goes to it, Escape clears the field.
+#[component]
+fn SidebarFind() -> impl IntoView {
+    let c = ctx();
+    let field = NodeRef::<html::Input>::new();
+    let first_row = || {
+        document()
+            .query_selector(".sb-scroll .sb-row[data-chat]")
+            .ok()
+            .flatten()
+            .and_then(|el| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(el).ok())
+    };
+    let keydown = move |e: ev::KeyboardEvent| match e.key().as_str() {
+        "Enter" => {
+            e.prevent_default();
+            if let Some(row) = first_row() {
+                row.click();
+            }
+        }
+        "ArrowDown" => {
+            e.prevent_default();
+            if let Some(row) = first_row() {
+                let _ = row.focus();
+            }
+        }
+        "Escape" => {
+            // The field's own Escape: it must not close whatever else is open.
+            e.stop_propagation();
+            if c.sb_query.with_untracked(String::is_empty) {
+                if let Some(el) = field.get_untracked() {
+                    let _ = el.blur();
+                }
+            } else {
+                c.sb_query.set(String::new());
+            }
+        }
+        _ => {}
+    };
+    view! {
+        <div class="sb-find" class:hidden=move || matches!(c.view.get(), ViewMode::Dms | ViewMode::Activity)>
+            <label class="sb-find-field">
+                <Icon icon=I::FindList size=15/>
+                <input node_ref=field type="text" placeholder=tr().find_conversation spellcheck="false" autocomplete="off"
+                    prop:value=move || c.sb_query.get()
+                    on:input=move |e| c.sb_query.set(event_target_value(&e))
+                    on:keydown=keydown/>
+                <Show when=move || searching(c)>
+                    <button class="sb-find-clear" title=tr().clear_find on:click=move |_| {
+                        c.sb_query.set(String::new());
+                        if let Some(el) = field.get_untracked() {
+                            let _ = el.focus();
+                        }
+                    }>
+                        <Icon icon=I::X size=10/>
+                    </button>
+                </Show>
+            </label>
+        </div>
+    }
+}
+
+/// "Find a conversation" has text.
+fn searching(c: Ctx) -> bool {
+    c.sb_query.with(|q| !q.trim().is_empty())
+}
+
+/// Whether the conversation's sidebar name has the "Find a conversation" text, in any case.
+fn found(s: &Snapshot, ch: &Chat, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    let notes = (ch.kind == ChatKind::Notes)
+        .then(|| s.user(&s.me).map(|u| u.display_name.to_lowercase()))
+        .flatten();
+    // A direct chat is found by the person's name and by the chat's own name from Telemost too.
+    chat_title(s, ch).to_lowercase().contains(&query)
+        || ch.name.to_lowercase().contains(&query)
+        || notes.is_some_and(|n| n.contains(&query))
+}
+
+/// Whether "Find a conversation" finds anything in the sidebar sections.
+fn any_found(c: Ctx) -> bool {
+    c.sb_query.with(|q| {
+        c.sections.with(|list| {
+            c.snap.with(|s| {
+                list.iter()
+                    .flat_map(|sec| sec.chats.iter())
+                    .filter_map(|id| s.chat(id))
+                    .any(|ch| in_current_org(c, ch) && !c.hidden.with(|h| hidden::hides(h, ch)) && found(s, ch, q))
+            })
+        })
+    })
 }
 
 /// The current call at the bottom of the sidebar, like the Slack huddle bar: where it is and "Leave".
@@ -2116,6 +2362,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
         let (chats, section_id) = (section.chats.clone(), section.id.clone());
         Memo::new(move |_| {
             let (filter, hide_muted) = c.settings.with(|s| (s.sidebar_filter, s.hide_muted));
+            let query = c.sb_query.with(|q| q.trim().to_owned());
             let current = chat_in_pane(c);
             let now = (js_sys::Date::now() * 1000.0) as Timestamp;
             c.snap.with(|s| {
@@ -2123,6 +2370,10 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     .iter()
                     .filter_map(|id| s.chat(id))
                     .filter(|ch| {
+                        // "Find a conversation" looks through all of them, the filter aside.
+                        if !query.is_empty() {
+                            return found(s, ch, &query);
+                        }
                         // The filter never hides starred chats and the chat with yourself: they are always on top.
                         section_id == "starred"
                             || current.as_ref() == Some(&ch.id)
@@ -2154,7 +2405,14 @@ fn SidebarSection(section: Section) -> impl IntoView {
         })
     };
     let empty = Memo::new(move |_| visible.with(Vec::is_empty));
-    // The section icon: a star for "Starred", the emoji of a folder; the Telemost sections have none.
+    // The section icon, as in Slack: a star for "Starred", a hash for "Channels", speech bubbles for
+    // "Direct messages", the emoji of a folder; "Meeting chats" and folders without an emoji have none.
+    let icon = match section_id.as_str() {
+        "starred" => Some(I::Star),
+        "channels" => Some(I::HashSquare),
+        "dms" => Some(I::Messages),
+        _ => None,
+    };
     let emoji = {
         let id = section_id.clone();
         Memo::new(move |_| {
@@ -2162,16 +2420,24 @@ fn SidebarSection(section: Section) -> impl IntoView {
                 .with(|f| f.iter().find(|f| f.id == id).and_then(|f| f.emoji.clone()))
         })
     };
-    let has_icon = {
-        let starred = section_id == "starred";
-        Memo::new(move |_| starred || emoji.with(Option::is_some))
+    let has_icon = Memo::new(move |_| icon.is_some() || emoji.with(Option::is_some));
+    // The "+" on hover, as in Slack: a channel in "Channels" and in one's own sections (it goes
+    // into that section), a message in "Direct messages".
+    let add = match section_id.as_str() {
+        "channels" => Some(SectionAdd::Channel(None)),
+        "dms" => Some(SectionAdd::Message),
+        id if folders::is_folder(id) => Some(SectionAdd::Channel(Some(id.to_owned()))),
+        _ => None,
     };
     move || {
-        (always || !empty.get()).then(|| {
+        ((always && !searching(c)) || !empty.get()).then(|| {
         let section_id = section_id.clone();
         view! {
             <div class="sb-section" class:drop-into=move || drop_into.get() data-section=section_id.clone()>
-                <div class="sb-section-head">
+                <div class="sb-section-head" class:menu-open={
+                    let id = section_id.clone();
+                    move || c.ctx_menu.with(|m| matches!(m, Some(CtxMenu { target: CtxTarget::Section(s), .. }) if *s == id))
+                }>
                 // As in Slack, no caret until hovered: then it shows in place of the section icon
                 // (or left of an icon-less title) and turns down over an expanded section.
                 <button class="sb-section-title" class:with-icon=move || has_icon.get()
@@ -2184,9 +2450,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     }
                 }>
                     <span class="sb-section-slot">
-                        {(section_id == "starred").then(|| view! {
-                            <span class="sb-section-icon"><Icon icon=I::Star size=15/></span>
-                        })}
+                        {icon.map(|i| view! { <span class="sb-section-icon"><Icon icon=i size=15/></span> })}
                         {move || emoji.get().map(|e| view! { <span class="sb-section-icon emoji">{e}</span> })}
                         <span class="caret" class:collapsed=move || collapsed.get()>
                             <Icon icon=I::ChevronDown size=12/>
@@ -2194,21 +2458,31 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     </span>
                     <span class="sb-section-name">{tr().section(&section.id, &section.title)}</span>
                 </button>
-                // A quick "+" on hover, as in Slack: works even when the section is collapsed.
-                {(section_id == "channels").then(|| view! {
-                    <button class="sb-section-add" title=tr().add_channels on:mousedown=|e| e.stop_propagation() on:click=move |e| open_menu_below(c, &e, CtxTarget::AddChannels)>
-                        <Icon icon=I::Plus size=14/>
+                // "+" and "⋮" on hover, as in Slack: they work even when the section is collapsed.
+                <div class="sb-section-tools">
+                    {add.clone().map(|add| {
+                        let title = match add { SectionAdd::Message => tr().new_message, SectionAdd::Channel(_) => tr().create_channel };
+                        view! {
+                            <button class="sb-section-tool" title=title on:click=move |_| match &add {
+                                SectionAdd::Message => c.new_message.set(true),
+                                SectionAdd::Channel(folder) => c.creating_channel.set(Some(NewChannel { folder: folder.clone() })),
+                            }>
+                                <Icon icon=I::Plus size=14/>
+                            </button>
+                        }
+                    })}
+                    <button class="sb-section-tool" title=tr().section_options on:mousedown=|e| e.stop_propagation() on:click={
+                        let id = section.id.clone();
+                        move |e| open_menu_below(c, &e, CtxTarget::Section(id.clone()))
+                    }>
+                        <Icon icon=I::Kebab size=14/>
                     </button>
-                })}
-                {(section_id == "dms").then(|| view! {
-                    <button class="sb-section-add" title=tr().new_message on:click=move |_| c.new_message.set(true)>
-                        <Icon icon=I::Plus size=14/>
-                    </button>
-                })}
+                </div>
                 </div>
                 {let section_id = section_id.clone(); move || {
                     // As in Slack: a collapsed section still shows the open chat and chats with unread messages.
-                    let folded = collapsed.get();
+                    // Found conversations show in collapsed sections too.
+                    let folded = collapsed.get() && !searching(c);
                     let open = chat_in_pane(c);
                     visible
                         .get()
@@ -2222,7 +2496,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                         .collect_view()
                 }}
                 {(section_id == "dms").then(|| view! {
-                    <Show when=move || !collapsed.get()>
+                    <Show when=move || !collapsed.get() && !searching(c)>
                         <button class="sb-row sb-add" on:click=move |_| c.new_message.set(true)>
                             <span class="sb-icon add"><Icon icon=I::Plus size=14/></span>
                             <span class="sb-name">{tr().write_to_colleague}</span>
@@ -2230,7 +2504,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     </Show>
                 })}
                 {(section_id == "channels").then(|| view! {
-                    <Show when=move || !collapsed.get()>
+                    <Show when=move || !collapsed.get() && !searching(c)>
                         <button class="sb-row sb-add" on:mousedown=|e| e.stop_propagation() on:click=move |e| open_menu_below(c, &e, CtxTarget::AddChannels)>
                             <span class="sb-icon add"><Icon icon=I::Plus size=14/></span>
                             <span class="sb-name">{tr().add_channels}</span>
@@ -2241,6 +2515,15 @@ fn SidebarSection(section: Section) -> impl IntoView {
         }
     })
     }
+}
+
+/// What the "+" of a section header starts.
+#[derive(Clone)]
+enum SectionAdd {
+    /// A channel; from one's own section it goes into that section.
+    Channel(Option<String>),
+    /// A direct message.
+    Message,
 }
 
 /// Section chats in sidebar order, before the filter. Starred chats keep the Telemost order
@@ -3793,8 +4076,14 @@ fn wrap_text(value: &str, start: Option<u32>, end: Option<u32>, before: &str, af
         return (value.to_owned(), caret, caret);
     }
     let (head, selected, tail, wrap) = if head.ends_with(before) && tail.starts_with(after) {
-        (&head[..head.len() - before.len()], selected, &tail[after.len()..], false)
-    } else if selected.len() >= before.len() + after.len() && selected.starts_with(before) && selected.ends_with(after) {
+        (
+            &head[..head.len() - before.len()],
+            selected,
+            &tail[after.len()..],
+            false,
+        )
+    } else if selected.len() >= before.len() + after.len() && selected.starts_with(before) && selected.ends_with(after)
+    {
         (head, &selected[before.len()..selected.len() - after.len()], tail, false)
     } else {
         (head, selected, tail, true)
@@ -4548,7 +4837,7 @@ fn BrowseChannelsDialog() -> impl IntoView {
             <div class="modal browse-modal" on:click=|ev| ev.stop_propagation()>
                 <header>
                     <h2>{tr().browse_channels}</h2>
-                    <button class="btn small" on:click=move |_| { close(); c.creating_channel.set(true); }>{tr().create_channel}</button>
+                    <button class="btn small" on:click=move |_| { close(); c.creating_channel.set(Some(NewChannel::default())); }>{tr().create_channel}</button>
                     <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
                 </header>
                 <input class="text-input" node_ref=field placeholder=tr().search_channels_ph prop:value=move || query.get()
@@ -4711,7 +5000,7 @@ fn NewMessageDialog() -> impl IntoView {
 
 /// "Create a channel", as in Slack: step 1 is the name and description, step 2 is the people.
 #[component]
-fn CreateChannelDialog() -> impl IntoView {
+fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
     let c = ctx();
     let step = RwSignal::new(1u8);
     let name = RwSignal::new(String::new());
@@ -4719,7 +5008,9 @@ fn CreateChannelDialog() -> impl IntoView {
     let public = RwSignal::new(false);
     let people: RwSignal<Vec<UserProfile>> = RwSignal::new(vec![]);
     let busy = RwSignal::new(false);
-    let close = move || c.creating_channel.set(false);
+    // A stored value keeps the closures below `Copy`.
+    let folder = StoredValue::new(to.folder);
+    let close = move || c.creating_channel.set(None);
     let name_field = NodeRef::<html::Input>::new();
     Effect::new(move |_| {
         if let Some(el) = name_field.get() {
@@ -4743,6 +5034,9 @@ fn CreateChannelDialog() -> impl IntoView {
                             sec.chats.insert(0, id.clone());
                         }
                     });
+                    if let Some(folder) = folder.get_value() {
+                        ops::change_folders(c, |f| folders::move_chat(f, &id, Some(&folder), None));
+                    }
                     close();
                     c.view.set(ViewMode::Home);
                     ops::open_chat(c, id);
@@ -6532,12 +6826,27 @@ mod tests {
     #[test]
     fn formatting_toggles() {
         // Selected text between the markers, the markers selected too, and an empty pair.
-        assert_eq!(wrap_text("a **b** c", Some(4), Some(5), "**", "**"), ("a b c".to_owned(), 2, 3));
-        assert_eq!(wrap_text("a **b** c", Some(2), Some(7), "**", "**"), ("a b c".to_owned(), 2, 3));
-        assert_eq!(wrap_text("a **** c", Some(4), Some(4), "**", "**"), ("a  c".to_owned(), 2, 2));
-        assert_eq!(wrap_text("a b c", Some(2), Some(3), "~~", "~~"), ("a ~~b~~ c".to_owned(), 4, 5));
+        assert_eq!(
+            wrap_text("a **b** c", Some(4), Some(5), "**", "**"),
+            ("a b c".to_owned(), 2, 3)
+        );
+        assert_eq!(
+            wrap_text("a **b** c", Some(2), Some(7), "**", "**"),
+            ("a b c".to_owned(), 2, 3)
+        );
+        assert_eq!(
+            wrap_text("a **** c", Some(4), Some(4), "**", "**"),
+            ("a  c".to_owned(), 2, 2)
+        );
+        assert_eq!(
+            wrap_text("a b c", Some(2), Some(3), "~~", "~~"),
+            ("a ~~b~~ c".to_owned(), 4, 5)
+        );
         // At the end of bold text: the caret leaves it.
-        assert_eq!(wrap_text("a **b** c", Some(5), Some(5), "**", "**"), ("a **b** c".to_owned(), 7, 7));
+        assert_eq!(
+            wrap_text("a **b** c", Some(5), Some(5), "**", "**"),
+            ("a **b** c".to_owned(), 7, 7)
+        );
     }
 
     #[test]

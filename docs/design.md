@@ -69,9 +69,17 @@ until then Noto Sans is used.
 - The day separator is a centred pill that sticks to the top of the feed.
 - A collapsed sidebar section still shows the open chat and chats with unread messages.
 - Sidebar section headers have no caret, as in Slack: on hover it shows in place of the section icon
-  (the star of "Starred", a folder's emoji) or left of an icon-less title, and turns down over an
-  expanded section. A section with an icon lines up with the chat rows; icon-less ones ("Channels",
-  "Direct messages") are smaller muted headers.
+  (the star of "Starred", the hash of "Channels", the speech bubbles of "Direct messages", a folder's
+  emoji) or left of an icon-less title, and turns down over an expanded section. A section with an
+  icon lines up with the chat rows; icon-less ones ("Meeting chats", folders without an emoji) are
+  smaller muted headers.
+- A section header shows "+" and "⋮" on hover: "+" creates a channel in "Channels" and in one's own
+  sections (the channel goes into that section), a message in "Direct messages"; "⋮" (or a right
+  click) opens the section menu as in Slack: what the section makes, managing it, filter and sort
+  (common to all sections in Mostik), deleting it.
+- "Find a conversation" above the sections, as in Slack: while it has text, the sidebar shows only
+  the conversations whose name has it (people's names for direct chats), collapsed sections and
+  the "Active only" filter aside. Enter opens the first one, Escape clears the field.
 - A mention of yourself is highlighted with a background and a bar on the left; "important" gets a green label
   (the counterpart of "Saved" in Slack).
 - Enter sends, Shift+Enter inserts a line break.
