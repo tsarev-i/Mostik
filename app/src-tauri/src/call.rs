@@ -58,13 +58,15 @@ pub struct CallState {
     generation: AtomicU64,
 }
 
-/// Whether the link is a Telemost meeting (`https://telemost.yandex.ru/j/…`).
+/// Whether the link is a Telemost meeting (`https://telemost.yandex.ru/j/…`, or the bare
+/// meeting page `/private-join/…`).
 pub fn is_meeting_url(url: &str) -> bool {
     Url::parse(url).is_ok_and(|u| {
         u.scheme() == "https"
             && u.host_str().is_some_and(|h| MEETING_HOSTS.contains(&h))
-            && u.path().starts_with("/j/")
-            && u.path().len() > 3
+            && ["/j/", "/private-join/"]
+                .iter()
+                .any(|p| u.path().strip_prefix(p).is_some_and(|id| !id.is_empty()))
     })
 }
 
@@ -79,7 +81,9 @@ pub async fn open(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar) -
     }
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let title = window_title(app, &info.label);
-    let launched = imp::launch(app, url, &title, jar, generation).await;
+    let english = crate::backend::text(app, "ru", "en") == "en";
+    let page = meeting_page(url, english);
+    let launched = imp::launch(app, &page, &title, jar, generation).await;
     if let Err(e) = &launched {
         eprintln!("call: {e}");
     }
@@ -113,6 +117,7 @@ pub fn close(app: &AppHandle) {
     if let Some(active) = active {
         imp::close(app, &active.handle);
         let _ = app.emit(CALL_EVENT, None::<CallInfo>);
+        crate::backend::clear_meeting_status_later(app.clone());
     }
 }
 
@@ -151,7 +156,99 @@ fn ended(app: &AppHandle, generation: u64) {
         *active = None;
         drop(active);
         let _ = app.emit(CALL_EVENT, None::<CallInfo>);
+        crate::backend::clear_meeting_status_later(app.clone());
     }
+}
+
+/// Where the page script sends the window once the call is over; the window then closes.
+const ENDED_URL: &str = "about:blank#mostik-call-ended";
+
+/// The meeting page for the call window. On `telemost.360.yandex.ru` the `/j/<id>` link opens the
+/// whole messenger (Yandex 360 bar, chats, notifications) with the meeting in an iframe; the call
+/// window shows only that iframe's page, `/private-join/<id>`, as its own. Other links stay as is.
+pub fn meeting_page(url: &str, english: bool) -> String {
+    let Ok(u) = Url::parse(url) else { return url.to_owned() };
+    let id = u
+        .path()
+        .strip_prefix("/j/")
+        .filter(|id| !id.is_empty() && !id.contains('/'));
+    match (u.host_str(), id) {
+        (Some(host @ "telemost.360.yandex.ru"), Some(id)) => format!(
+            "https://{host}/private-join/{id}?theme=dark&preview_theme=dark&lang={}",
+            if english { "en" } else { "ru" }
+        ),
+        _ => url.to_owned(),
+    }
+}
+
+/// Runs in the meeting page before its own scripts.
+///
+/// It keeps the window title ("Call · #dev"): writes to `document.title` are ignored, and a
+/// `<title>` the page changes directly is put back.
+///
+/// It also notices the end of the call. Opened on its own, the meeting page does not navigate
+/// anywhere after "Leave": it just goes blank. The "×" of the join screen does nothing at all, so
+/// a click on it ends the call right away. So once the page
+/// has shown something, has no WebRTC connection left and stays blank for two seconds, it goes
+/// to [`ENDED_URL`] and the window closes. While any connection is open the window stays, even
+/// if the page hides all its controls.
+fn page_script(title: &str) -> String {
+    let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
+    let ended = serde_json::to_string(ENDED_URL).unwrap_or_default();
+    format!(
+        r#"(() => {{
+  if (window.top !== window) return;
+  const t = {t};
+  const own = Object.getOwnPropertyDescriptor(Document.prototype, "title");
+  Object.defineProperty(document, "title", {{ configurable: true, get: () => own.get.call(document), set: () => {{}} }});
+  const fix = () => {{ if (own.get.call(document) !== t) own.set.call(document, t); }};
+  // Telemost may stay in `readyState = loading` for long, so `DOMContentLoaded` is no signal:
+  // wait for `<head>` itself, then watch only it.
+  const watch = () => {{
+    if (!document.head) return false;
+    fix();
+    new MutationObserver(fix).observe(document.head, {{ subtree: true, childList: true, characterData: true }});
+    return true;
+  }};
+  if (!watch()) {{
+    const boot = new MutationObserver(() => {{ if (watch()) boot.disconnect(); }});
+    boot.observe(document, {{ childList: true, subtree: true }});
+  }}
+
+  // The "×" of the join screen leads to the messenger's home screen, which the window does
+  // not have: here it closes the window.
+  document.addEventListener("click", e => {{
+    if (e.target instanceof Element && e.target.closest('[data-testid="to-home-screen-button"]')) {{
+      e.stopPropagation();
+      location.replace({ended});
+    }}
+  }}, true);
+
+  const Native = window.RTCPeerConnection;
+  if (!Native) return;
+  const open = new Set();
+  window.RTCPeerConnection = class RTCPeerConnection extends Native {{
+    constructor(...args) {{
+      super(...args);
+      open.add(this);
+      this.addEventListener("connectionstatechange", () => {{ if (this.connectionState === "closed") open.delete(this); }});
+    }}
+    close() {{
+      open.delete(this);
+      return super.close();
+    }}
+  }};
+  let shown = false, blankSince = 0;
+  setInterval(() => {{
+    if (open.size) {{ shown = true; blankSince = 0; return; }}
+    const blank = !document.body || !document.body.innerText.trim();
+    if (!blank) {{ shown = true; blankSince = 0; return; }}
+    if (!shown) return;
+    blankSince = blankSince || Date.now();
+    if (Date.now() - blankSince > 2000) location.replace({ended});
+  }}, 500);
+}})();"#
+    )
 }
 
 fn window_title(app: &AppHandle, label: &str) -> String {
@@ -219,6 +316,7 @@ mod imp {
             eprintln!("call: no Chromium-based browser found, opening the default browser");
             return Ok(None);
         };
+        cleanup(app);
         let profile = profile_dir(app, &browser, generation)?;
         // A tiny dark page first and the "connecting" page right after it: app mode needs a
         // real URL (`about:blank` gives an ordinary browser window), and Chromium names the
@@ -235,9 +333,7 @@ mod imp {
         let app2 = app.clone();
         let (cdp, events) = Cdp::start(cdp.0, cdp.1, move || {
             super::ended(&app2, generation);
-            let mut child = child;
-            let _ = child.wait();
-            let _ = std::fs::remove_dir_all(&profile);
+            dispose(child, &profile);
         });
         let loading = loading_page(app, title);
         match prepare(&cdp, url, title, &loading, jar).await {
@@ -270,14 +366,47 @@ mod imp {
         !h.cdp.is_closed()
     }
 
+    /// Removes call profiles left by Mostik processes that are gone (a crash, a killed process).
+    /// Profiles of another running Mostik are its own business; this process has no call open
+    /// when it calls this, so its own leftovers go too.
     pub fn cleanup(app: &AppHandle) {
         let Ok(dir) = app.path().app_cache_dir() else { return };
         let Ok(entries) = std::fs::read_dir(&dir) else { return };
         for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with(PROFILE_PREFIX) {
+            let name = e.file_name();
+            let Some(owner) = name.to_str().and_then(profile_owner) else {
+                continue;
+            };
+            let alive = Path::new("/proc").join(owner.to_string()).exists();
+            if owner == std::process::id() || !alive {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
+    }
+
+    /// The Mostik process a profile directory (`call-browser-<pid>-<n>`) belongs to.
+    pub(super) fn profile_owner(name: &str) -> Option<u32> {
+        name.strip_prefix(PROFILE_PREFIX)?.split_once('-')?.0.parse().ok()
+    }
+
+    /// The browser has closed the pipe: it is exiting. Its helper processes (network, storage,
+    /// GPU) may still write to the profile for a moment, so the whole process group goes first,
+    /// then the profile.
+    fn dispose(mut child: std::process::Child, profile: &Path) {
+        let _ = child.wait();
+        // SAFETY: plain syscall; the group was created for this browser by `process_group(0)`.
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(200));
+            match std::fs::remove_dir_all(profile) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => continue,
+                _ if profile.exists() => continue,
+                _ => return,
+            }
+        }
+        eprintln!("call: could not remove {}", profile.display());
     }
 
     /// The "connecting" page, cookies, camera and microphone, the window title, then the meeting.
@@ -312,7 +441,7 @@ mod imp {
         }
         cdp.send(
             "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": title_script(title) }),
+            json!({ "source": super::page_script(title) }),
             Some(session),
         )
         .await?;
@@ -393,8 +522,12 @@ mod imp {
                 "--disable-sync",
                 // The profile is thrown away: no reason to ask KWallet or GNOME Keyring for a key.
                 "--password-store=basic",
+                // No "Translate this page?" over the call.
+                "--disable-features=Translate",
             ])
             .args(extra)
+            // Its own process group, so that `dispose` can stop the helpers of a crashed browser.
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -443,7 +576,8 @@ mod imp {
     /// A fresh profile directory, readable only by the user. A snap browser can write only to
     /// its own directory under `~/snap`, so its profile lives there.
     fn profile_dir(app: &AppHandle, browser: &Path, generation: u64) -> Result<PathBuf, String> {
-        let name = format!("{PROFILE_PREFIX}{generation}");
+        // The pid keeps two running Mostik processes (a release and a dev build) apart.
+        let name = format!("{PROFILE_PREFIX}{}-{generation}", std::process::id());
         let dir = match snap_name(browser).zip(std::env::var_os("HOME")) {
             Some((snap, home)) => PathBuf::from(home).join("snap").join(snap).join("common").join(name),
             None => app
@@ -499,33 +633,6 @@ mod imp {
             }
         }
         out
-    }
-
-    /// Keeps the window title ("Call · #dev") on the meeting page, which sets its own: writes to
-    /// `document.title` are ignored, and a `<title>` the page changes directly is put back.
-    fn title_script(title: &str) -> String {
-        let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
-        format!(
-            r#"(() => {{
-  if (window.top !== window) return;
-  const t = {t};
-  const own = Object.getOwnPropertyDescriptor(Document.prototype, "title");
-  Object.defineProperty(document, "title", {{ configurable: true, get: () => own.get.call(document), set: () => {{}} }});
-  const fix = () => {{ if (own.get.call(document) !== t) own.set.call(document, t); }};
-  // Telemost may stay in `readyState = loading` for long, so `DOMContentLoaded` is no signal:
-  // wait for `<head>` itself, then watch only it.
-  const watch = () => {{
-    if (!document.head) return false;
-    fix();
-    new MutationObserver(fix).observe(document.head, {{ subtree: true, childList: true, characterData: true }});
-    return true;
-  }};
-  if (!watch()) {{
-    const boot = new MutationObserver(() => {{ if (watch()) boot.disconnect(); }});
-    boot.observe(document, {{ childList: true, subtree: true }});
-  }}
-}})();"#
-        )
     }
 
     /// Dark "connecting" page shown until the meeting loads, in the colours of the Slack huddle window.
@@ -649,6 +756,13 @@ b{{color:#f8f8f8;font-size:17px}}
         }
 
         #[test]
+        fn profile_owner_is_the_pid_in_the_name() {
+            assert_eq!(profile_owner("call-browser-4242-3"), Some(4242));
+            assert_eq!(profile_owner("call-browser-3"), None);
+            assert_eq!(profile_owner("other-4242-3"), None);
+        }
+
+        #[test]
         fn navigation_of_the_main_frame_only() {
             let ev = |method: &str, params: Value| Event {
                 method: method.into(),
@@ -759,7 +873,7 @@ b{{color:#f8f8f8;font-size:17px}}
             cdp.send("Page.enable", json!({}), Some(&s)).await.unwrap();
             cdp.send(
                 "Page.addScriptToEvaluateOnNewDocument",
-                json!({ "source": title_script("Call · #dev") }),
+                json!({ "source": super::super::page_script("Call · #dev") }),
                 Some(&s),
             )
             .await
@@ -777,6 +891,21 @@ b{{color:#f8f8f8;font-size:17px}}
                 seen |= main_frame_url(&e, &target).is_some_and(|u| u.starts_with("data:text/html,<title>"));
             }
             assert!(seen, "no Page.frameNavigated for the main frame");
+            // A page that showed something and went blank, with no WebRTC connection: the call is over.
+            let page =
+                "data:text/html,<p>In a call</p><script>setTimeout(()=>{document.body.textContent=''},1200)</script>";
+            cdp.send("Page.navigate", json!({ "url": page }), Some(&s))
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+            let mut ended = false;
+            while !ended && tokio::time::Instant::now() < deadline {
+                if let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
+                    // CDP reports the URL without its fragment.
+                    ended = main_frame_url(&e, &target) == super::super::ENDED_URL.split('#').next();
+                }
+            }
+            assert!(ended, "the blank page did not report the end of the call");
             cdp.send("Browser.close", json!({}), None).await.ok();
             rx.recv_timeout(Duration::from_secs(10)).expect("browser did not exit");
             let _ = child.wait();
@@ -817,8 +946,24 @@ mod imp {
         let blank = "about:blank".parse().map_err(|e| format!("{e}"))?;
         // A closing window keeps its label for a while, so each call gets its own.
         let label = format!("call-{generation}");
+        let app2 = app.clone();
+        let label2 = label.clone();
         let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(blank))
             .title(title)
+            .initialization_script(super::page_script(title))
+            // The page script reports the end of the call by going to `ENDED_URL`.
+            .on_navigation(move |url| {
+                if url.as_str() != super::ENDED_URL {
+                    return true;
+                }
+                // Not from inside the navigation handler: close once it has returned.
+                if let Some(w) = app2.get_webview_window(&label2) {
+                    tauri::async_runtime::spawn(async move {
+                        let _ = w.close();
+                    });
+                }
+                false
+            })
             .inner_size(WIDTH, HEIGHT)
             .min_inner_size(480.0, 360.0)
             .background_color(Color(0x1a, 0x1d, 0x21, 0xff))
@@ -912,5 +1057,27 @@ mod tests {
         assert!(!is_meeting_url("http://telemost.yandex.ru/j/1"));
         assert!(!is_meeting_url("https://telemost.yandex.ru.evil.example/j/1"));
         assert!(!is_meeting_url("https://example.org/j/1"));
+        assert!(is_meeting_url(
+            "https://telemost.360.yandex.ru/private-join/1?theme=dark"
+        ));
+        assert!(!is_meeting_url("https://telemost.360.yandex.ru/private-join/"));
+    }
+
+    #[test]
+    fn the_window_shows_the_bare_meeting_page() {
+        assert_eq!(
+            meeting_page("https://telemost.360.yandex.ru/j/123", false),
+            "https://telemost.360.yandex.ru/private-join/123?theme=dark&preview_theme=dark&lang=ru"
+        );
+        assert!(meeting_page("https://telemost.360.yandex.ru/j/123", true).ends_with("lang=en"));
+        // Personal Telemost has no messenger around the meeting: the link stays.
+        assert_eq!(
+            meeting_page("https://telemost.yandex.ru/j/123", false),
+            "https://telemost.yandex.ru/j/123"
+        );
+        assert_eq!(
+            meeting_page("https://telemost.360.yandex.ru/", false),
+            "https://telemost.360.yandex.ru/"
+        );
     }
 }

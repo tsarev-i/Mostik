@@ -513,6 +513,26 @@ pub fn user_status(v: &Value) -> (Availability, Option<CustomStatus>) {
     (availability, status)
 }
 
+/// Whether a `UserStatus` is the "In meeting" status that Telemost itself sets for the time of a
+/// call (📞, `IconName: telemost`), and not one the user chose.
+pub fn is_meeting_status(user_status: &Value) -> bool {
+    let Some(c) = user_status.get("CustomStatus") else {
+        return false;
+    };
+    s(c, &["IconName"]) == Some("telemost")
+        || (s(c, &["Emoji"]) == Some("📞")
+            && s(c, &["Localizations", "en"]).is_some_and(|t| t.eq_ignore_ascii_case("In meeting")))
+}
+
+/// Own raw `UserStatus` from the `subscribe` response with `MessageBodyTypes: [26]`.
+pub fn own_user_status<'a>(v: &'a Value, me: &UserId) -> Option<&'a Value> {
+    v.get("LastMessages")?
+        .as_array()?
+        .iter()
+        .find(|m| s(m, &["ServerMessageInfo", "From", "Guid"]) == Some(me.0.as_str()))?
+        .pointer("/ClientMessage/UserStatus")
+}
+
 /// Statuses from the `subscribe` response with `MessageBodyTypes: [26]`.
 pub fn statuses_from_subscribe(v: &Value) -> Vec<PresenceInfo> {
     v.get("LastMessages")
@@ -702,6 +722,31 @@ pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn meeting_status_is_telemost_own() {
+        let call = json!({"CustomStatus": {"Emoji": "📞", "Text": "На встрече",
+            "Localizations": {"en": "In meeting", "ru": "На встрече"}, "IconName": "telemost"}});
+        assert!(is_meeting_status(&call));
+        let without_icon = json!({"CustomStatus": {"Emoji": "📞", "Text": "На встрече",
+            "Localizations": {"en": "In meeting"}}});
+        assert!(is_meeting_status(&without_icon));
+        // The user's own phone status stays.
+        assert!(!is_meeting_status(
+            &json!({"CustomStatus": {"Emoji": "📞", "Text": "Созвоны до обеда"}})
+        ));
+        assert!(!is_meeting_status(&json!({"Availability": 3})));
+    }
+
+    #[test]
+    fn own_status_from_subscribe() {
+        let v = json!({"LastMessages": [
+            {"ClientMessage": {"UserStatus": {"Availability": 1}}, "ServerMessageInfo": {"From": {"Guid": "other"}}},
+            {"ClientMessage": {"UserStatus": {"Availability": 3}}, "ServerMessageInfo": {"From": {"Guid": "me"}}}]});
+        assert_eq!(own_user_status(&v, &UserId("me".into())).unwrap()["Availability"], 3);
+        assert!(own_user_status(&v, &UserId("nobody".into())).is_none());
+    }
+
     use super::*;
     use serde_json::json;
 

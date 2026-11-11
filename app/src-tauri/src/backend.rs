@@ -1569,6 +1569,34 @@ pub async fn set_status(
     Ok(())
 }
 
+/// After a call: if Telemost still shows "In meeting" a few seconds after the window closed (the
+/// page had no chance to say goodbye), take that status off. A status the user set stays.
+pub fn clear_meeting_status_later(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        if call::info(&app).is_some() {
+            return;
+        }
+        let state = app.state::<AppState>();
+        let Ok(live) = live(&state).await else { return };
+        let me = std::slice::from_ref(&live.me.0);
+        let Ok(body) = subscribe_body(&live, json!({ "ToGuids": me, "MessageBodyTypes": [26] })).await else {
+            return;
+        };
+        let Ok(v) = live.xiva.call("subscribe", &body, 20).await else {
+            return;
+        };
+        let Some(status) = convert::own_user_status(&v, &live.me).filter(|s| convert::is_meeting_status(s)) else {
+            return;
+        };
+        let availability = status.get("Availability").and_then(Value::as_u64).unwrap_or(0);
+        match push(&live, json!({ "UserStatus": { "Availability": availability } })).await {
+            Ok(_) => eprintln!("call: cleared the meeting status left after the call"),
+            Err(e) => eprintln!("call: could not clear the meeting status: {e}"),
+        }
+    });
+}
+
 /// Tells Telemost once a minute that you are online: "active" if the window is focused, otherwise "background".
 fn start_heartbeat(app: &AppHandle) {
     let state = app.state::<AppState>();
