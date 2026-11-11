@@ -85,6 +85,17 @@ fn write_meta(out: &mut Vec<u8>, meta: Meta) {
     }
 }
 
+/// The `seq` of a response frame, read from its header alone: a response whose body does not
+/// decode can still be matched to its request.
+pub fn rpc_seq(bytes: &[u8]) -> Option<u64> {
+    let (&kind, rest) = bytes.split_first()?;
+    if kind != FRAME_RPC {
+        return None;
+    }
+    let header = rmpv::decode::read_value(&mut Cursor::new(rest)).ok()?;
+    header.as_array()?.get(1)?.as_u64()
+}
+
 /// Decodes a frame received from the socket.
 pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
     let (&kind, rest) = bytes.split_first().ok_or(FrameError::Empty)?;
@@ -142,6 +153,16 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_response_that_does_not_decode_keeps_its_seq() {
+        let mut frame = encode_rpc(42, "history", &json!({})).unwrap();
+        frame.truncate(frame.len() - 1);
+        frame.extend_from_slice(b"not json");
+        assert!(decode(&frame).is_err());
+        assert_eq!(rpc_seq(&frame), Some(42));
+        assert_eq!(rpc_seq(&[]), None);
+    }
 
     /// Start of a real `subscribe` frame from the web client: kind, header `[0, 19, "subscribe"]`,
     /// three words `5, 0, 0` and `{`.

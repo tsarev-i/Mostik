@@ -1,6 +1,7 @@
 //! HTTP side of the client: the web client page, CSRF and the `/api/` RPC.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use reqwest::StatusCode;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE, USER_AGENT};
@@ -21,8 +22,34 @@ pub enum WebError {
     MissingParam(&'static str),
     #[error("bad server response: {0}")]
     BadResponse(String),
+    /// A gateway or server error (5xx): Telemost is overloaded or restarting.
+    #[error("{method}: Telemost is not responding (HTTP {status})")]
+    Unavailable { method: String, status: u16 },
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl WebError {
+    /// Whether trying again later may help: a timeout, no connection or a 5xx answer.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            WebError::Unavailable { .. } => true,
+            WebError::Http(e) => e.is_timeout() || e.is_connect(),
+            _ => false,
+        }
+    }
+}
+
+/// How long one API call may take before it counts as failed.
+const RPC_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Pauses before the repeats of a reading call that failed for a transient reason.
+const READ_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
+
+/// Whether an API method only reads, so it is safe to repeat. A write (send, create, leave)
+/// is never repeated on its own: the first attempt may have gone through.
+fn reads_only(method: &str) -> bool {
+    method.starts_with("get_") || method == "search" || method.ends_with("_suggest")
 }
 
 /// User parameters from the `globalParams` of the web client page.
@@ -98,6 +125,7 @@ impl WebClient {
     pub fn new(jar: CookieJar, user_agent: String) -> Result<Self, WebError> {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
+            .connect_timeout(Duration::from_secs(10))
             .build()?;
         let page_http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -324,27 +352,47 @@ impl WebClient {
         Ok(v.get("data").cloned().unwrap_or(v))
     }
 
-    /// `POST /api/` call in the web client format. Returns the whole response JSON.
+    /// `POST /api/` call in the web client format. Returns the whole response JSON. A reading
+    /// call that times out or gets a 5xx answer is repeated twice, after a pause.
     pub async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, WebError> {
         let request = RpcRequest::new(method, params).form_value()?;
+        let retries = if reads_only(method) { READ_RETRIES.len() } else { 0 };
+        let mut attempt = 0;
+        loop {
+            match self.rpc_once(method, &request, attempt).await {
+                Err(e) if e.is_transient() && attempt < retries => {
+                    tokio::time::sleep(READ_RETRIES[attempt]).await;
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// One attempt of [`WebClient::rpc`]; `attempt` counts the earlier ones.
+    async fn rpc_once(&mut self, method: &str, request: &str, attempt: usize) -> Result<Value, WebError> {
         let mut retried = false;
         loop {
             let csrf = self.csrf_token().await?;
-            let form = reqwest::multipart::Form::new().text(FORM_FIELD, request.clone());
+            let form = reqwest::multipart::Form::new().text(FORM_FIELD, request.to_owned());
             let mut headers = self.headers("messenger.360.yandex.ru");
             if let Ok(v) = HeaderValue::from_str(&csrf) {
                 headers.insert("X-CSRF-TOKEN", v);
             }
-            headers.insert(
-                "X-Request-Attempt",
-                HeaderValue::from_static(if retried { "1" } else { "0" }),
-            );
+            headers.insert("X-Request-Attempt", HeaderValue::from(attempt + usize::from(retried)));
             if let Some(id) = self.page.as_ref().and_then(|p| p.service_id.as_deref())
                 && let Ok(v) = HeaderValue::from_str(id)
             {
                 headers.insert("X-Origin-Service-ID", v);
             }
-            let resp = self.http.post(API_URL).headers(headers).multipart(form).send().await?;
+            let resp = self
+                .http
+                .post(API_URL)
+                .headers(headers)
+                .multipart(form)
+                .timeout(RPC_TIMEOUT)
+                .send()
+                .await?;
             let status = resp.status();
             let body = resp.text().await?;
             if status == StatusCode::UNAUTHORIZED {
@@ -356,6 +404,12 @@ impl WebClient {
                 self.invalidate_csrf(&csrf);
                 retried = true;
                 continue;
+            }
+            if status.is_server_error() && parsed.is_err() {
+                return Err(WebError::Unavailable {
+                    method: method.to_owned(),
+                    status: status.as_u16(),
+                });
             }
             return parsed.map_err(|_| WebError::BadResponse(format!("{method}: HTTP {status}, not JSON")));
         }
@@ -373,6 +427,21 @@ fn csrf_rejected(status: StatusCode, body: Option<&Value>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_reading_calls_are_repeated() {
+        for read in [
+            "get_users_data",
+            "get_members_and_contacts_suggest",
+            "search",
+            "get_buckets",
+        ] {
+            assert!(super::reads_only(read), "{read}");
+        }
+        for write in ["create_chat", "set_bucket", "leave", "create_meeting", "activate_chat"] {
+            assert!(!super::reads_only(write), "{write}");
+        }
+    }
+
     use super::*;
 
     #[test]

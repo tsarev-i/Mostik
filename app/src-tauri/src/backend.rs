@@ -62,6 +62,8 @@ pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
 const FIRST_PAGE: u32 = 20;
 const OLDER_PAGE: u32 = 40;
 const THREAD_PAGE: u32 = 50;
+/// Seconds a history page may take: twice that with the repeat, about what one wait used to be.
+const HISTORY_TIMEOUT_S: u64 = 12;
 const MAX_DIAG_EVENTS: usize = 300;
 
 /// Result of `bootstrap` and `login`: either the login screen or a ready snapshot.
@@ -300,11 +302,7 @@ pub async fn history(
         (None, Some(_)) => OLDER_PAGE,
     };
     let started = std::time::Instant::now();
-    let body = live
-        .xiva
-        .call("history", &HistoryRequest::page(&target, limit, before), 20)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (live, body) = history_page(&state, live, &target, limit, before).await?;
     let raw = body
         .pointer("/Chats/0/Messages")
         .and_then(Value::as_array)
@@ -350,6 +348,50 @@ pub async fn history(
         users,
         more: raw >= limit as usize,
     })
+}
+
+/// One history page. Reading is safe to repeat, so a slow answer is asked for once more, and
+/// a connection that closed meanwhile is waited for and asked again. Returns the connection
+/// that answered.
+async fn history_page(
+    state: &AppState,
+    mut live: Arc<Live>,
+    target: &str,
+    limit: u32,
+    before: Option<Timestamp>,
+) -> Result<(Arc<Live>, Value), String> {
+    let mut retried = false;
+    loop {
+        let result = live
+            .xiva
+            .call(
+                "history",
+                &HistoryRequest::page(target, limit, before),
+                HISTORY_TIMEOUT_S,
+            )
+            .await;
+        let err = match result {
+            Ok(body) if body.get("Chats").is_some() => return Ok((live, body)),
+            // Not a page: an error answer must not read as the end of the history.
+            Ok(body) => return Err(format!("Telemost did not return the history: {}", shape(&body))),
+            Err(e) => e,
+        };
+        if retried || !matches!(err, XivaError::Timeout(..) | XivaError::Closed) {
+            return Err(err.to_string());
+        }
+        eprintln!("history {}: {err}, asking again", id_pattern(target));
+        retried = true;
+        // After a close the reconnection brings a new connection; wait for it a little.
+        for _ in 0..20 {
+            match self::live(state).await {
+                Ok(l) if !l.xiva.is_closed() => {
+                    live = l;
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+    }
 }
 
 /// Chat the request goes to: the chat itself or the thread chat of message `thread`.
@@ -713,6 +755,20 @@ async fn fill_profiles(web: &WebClient, users: &mut [User]) -> usize {
         }
     }
     filled
+}
+
+/// An API error for the UI: a busy or unreachable Telemost gets a plain explanation.
+fn web_error(app: &AppHandle, e: WebError) -> String {
+    if e.is_transient() {
+        text(
+            app,
+            "Телемост не отвечает, попробуйте ещё раз чуть позже",
+            "Telemost isn't responding, try again in a moment",
+        )
+        .to_owned()
+    } else {
+        e.to_string()
+    }
 }
 
 fn err_json(e: impl ToString) -> Value {
@@ -1329,6 +1385,7 @@ pub async fn chat_details(state: tauri::State<'_, AppState>, chat_id: String) ->
 /// People search for invitations. Without `chat_id` the search is relative to the notes chat.
 #[tauri::command]
 pub async fn search_people(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     query: String,
     chat_id: Option<String>,
@@ -1342,7 +1399,7 @@ pub async fn search_people(
             json!({ "query": query, "chat_id": chat, "limit": 20 }),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| web_error(&app, e))?;
     rpc_ok(&v)?;
     Ok(convert::profiles(&v))
 }

@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -30,6 +30,8 @@ pub enum XivaError {
     Frame(#[from] xiva::FrameError),
     #[error("no response to {0} within {1} s")]
     Timeout(String, u64),
+    #[error("Telemost's response to {0} could not be read: {1}")]
+    BadResponse(String, String),
     #[error("connection to Telemost closed")]
     Closed,
 }
@@ -47,6 +49,57 @@ pub enum Incoming {
 
 type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
+/// The key of the stand-in body a waiter gets when its response did not decode.
+const UNDECODED: &str = "__undecoded";
+
+/// How often Xiva pings until its first ping says (`server-interval-sec`).
+const DEFAULT_PING_INTERVAL_MS: u64 = 60_000;
+
+/// Finds a connection that died without closing (sleep, a network change, a dropped NAT
+/// mapping): requests on it would wait for their timeouts and pushes would stop for good.
+/// Xiva sends a text ping every `server-interval-sec`; a connection that has been silent for
+/// one and a half of that is dead, and the reader stops, which reports it closed. (WebSocket
+/// pings do not help: Xiva answers them seconds late or not at all.)
+#[derive(Clone)]
+struct Liveness {
+    closed: Arc<AtomicBool>,
+    /// Milliseconds since the Unix epoch of the last frame received.
+    last_frame: Arc<AtomicU64>,
+    ping_interval_ms: Arc<AtomicU64>,
+    kill: Arc<Notify>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+impl Liveness {
+    /// Drops the connection if it has missed Xiva's ping.
+    fn check(&self) {
+        let interval = self.ping_interval_ms.load(Ordering::SeqCst);
+        let silent = now_ms().saturating_sub(self.last_frame.load(Ordering::SeqCst));
+        if !self.closed.load(Ordering::SeqCst) && silent > interval + interval / 2 {
+            eprintln!(
+                "xiva: nothing received for {} s, the connection is dropped",
+                silent / 1000
+            );
+            self.kill.notify_one();
+        }
+    }
+
+    /// Checks the connection every few seconds until it closes.
+    fn watch(self) {
+        tokio::spawn(async move {
+            while !self.closed.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                self.check();
+            }
+        });
+    }
+}
+
 /// Xiva connection: one writer, one background reader task.
 pub struct XivaClient {
     writer: Arc<Mutex<SplitSink<Ws, WsMessage>>>,
@@ -56,6 +109,7 @@ pub struct XivaClient {
     subscription_id: Arc<StdMutex<Option<String>>>,
     /// The reader task; aborting it drops the socket.
     reader: tokio::task::AbortHandle,
+    liveness: Liveness,
 }
 
 impl Drop for XivaClient {
@@ -90,10 +144,27 @@ impl XivaClient {
         let closed = Arc::new(AtomicBool::new(false));
         let subscription_id: Arc<StdMutex<Option<String>>> = Arc::default();
 
-        let (w, p, c, sub) = (writer.clone(), pending.clone(), closed.clone(), subscription_id.clone());
+        let liveness = Liveness {
+            closed: closed.clone(),
+            last_frame: Arc::new(AtomicU64::new(now_ms())),
+            ping_interval_ms: Arc::new(AtomicU64::new(DEFAULT_PING_INTERVAL_MS)),
+            kill: Arc::default(),
+        };
+        let (w, p, c, sub, live) = (
+            writer.clone(),
+            pending.clone(),
+            closed.clone(),
+            subscription_id.clone(),
+            liveness.clone(),
+        );
         let reader = tokio::spawn(async move {
-            while let Some(msg) = stream.next().await {
-                let Ok(msg) = msg else { break };
+            loop {
+                let msg = tokio::select! {
+                    msg = stream.next() => msg,
+                    () = live.kill.notified() => break,
+                };
+                let Some(Ok(msg)) = msg else { break };
+                live.last_frame.store(now_ms(), Ordering::SeqCst);
                 match msg {
                     WsMessage::Binary(data) => match xiva::decode(&data) {
                         Ok(Frame::Rpc { seq, body, .. }) => {
@@ -102,10 +173,23 @@ impl XivaClient {
                             }
                         }
                         Ok(Frame::Push { event, body, .. }) => on_event(Incoming::Push { event, body }),
-                        Err(_) => {}
+                        // A response that does not decode still answers its request, so the caller
+                        // does not wait for the timeout. (Some pushes carry protobuf, not JSON:
+                        // those are not read yet.)
+                        Err(e) => {
+                            if let Some(tx) = xiva::rpc_seq(&data).and_then(|seq| p.lock().ok()?.remove(&seq)) {
+                                eprintln!("xiva: response of {} bytes not decoded: {e}", data.len());
+                                let _ = tx.send(serde_json::json!({ UNDECODED: e.to_string() }));
+                            }
+                        }
                     },
                     WsMessage::Text(t) => {
                         let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                        if let Some(sec) = v.get("server-interval-sec").and_then(Value::as_u64)
+                            && sec > 0
+                        {
+                            live.ping_interval_ms.store(sec * 1000, Ordering::SeqCst);
+                        }
                         if let Some(id) = v.get("subscription-id").and_then(Value::as_str)
                             && let Ok(mut s) = sub.lock()
                         {
@@ -128,6 +212,7 @@ impl XivaClient {
             on_event(Incoming::Closed);
         });
 
+        liveness.clone().watch();
         Ok(Self {
             writer,
             pending,
@@ -135,6 +220,7 @@ impl XivaClient {
             closed,
             subscription_id,
             reader: reader.abort_handle(),
+            liveness,
         })
     }
 
@@ -189,10 +275,15 @@ impl XivaClient {
             return Err(e);
         }
         match tokio::time::timeout(Duration::from_secs(timeout_s), rx).await {
-            Ok(Ok(v)) => Ok(v),
+            Ok(Ok(v)) => match v.get(UNDECODED).and_then(Value::as_str) {
+                Some(e) => Err(XivaError::BadResponse(method.to_owned(), e.to_owned())),
+                None => Ok(v),
+            },
             Ok(Err(_)) => Err(XivaError::Closed),
             Err(_) => {
                 self.forget(seq);
+                // Maybe the connection is dead: then it is dropped and made again.
+                self.liveness.check();
                 Err(XivaError::Timeout(method.to_owned(), timeout_s))
             }
         }

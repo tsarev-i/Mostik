@@ -3802,16 +3802,28 @@ fn PeoplePicker(
             results.set(local);
             return;
         }
+        // One request once typing pauses, not one per key; only the latest query answers.
         let n = seq.get_untracked() + 1;
         seq.set(n);
         let chat = chat_id.clone();
-        spawn_local(async move {
-            match bridge::search_people(&q, chat.as_ref().map(|c| c.0.as_str())).await {
-                Ok(list) if seq.get_untracked() == n => results.set(list),
-                Ok(_) => {}
-                Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_search))),
-            }
-        });
+        set_timeout(
+            move || {
+                if seq.get_untracked() != n {
+                    return;
+                }
+                spawn_local(async move {
+                    let found = bridge::search_people(&q, chat.as_ref().map(|c| c.0.as_str())).await;
+                    if seq.get_untracked() != n {
+                        return;
+                    }
+                    match found {
+                        Ok(list) => results.set(list),
+                        Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_search))),
+                    }
+                });
+            },
+            Duration::from_millis(250),
+        );
     };
     view! {
         <div class="picker-field">
