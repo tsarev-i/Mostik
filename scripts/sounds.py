@@ -209,12 +209,10 @@ def ringtone():
 
 # Each sound: (start in seconds, gain, voice) notes and the total length, or a function that renders it.
 SOUNDS = {
+    # "Shunt", the default: two marimba notes, a falling third.
+    "marimba": ([(0.0, 1.0, marimba(1318.5)), (0.12, 0.9, marimba(1046.5))], 0.8),
     # Two soft bells a fifth apart, rising.
     "chime": ([(0.0, 1.0, bell(880.0, 0.32)), (0.11, 0.8, bell(1318.5, 0.38))], 1.0),
-    # One bright desk bell with a long ring.
-    "bell": ([(0.0, 1.0, bell(1568.0, 0.55, index=2.4, ratio=3.5))], 1.3),
-    # Two marimba notes, a falling third.
-    "marimba": ([(0.0, 1.0, marimba(1318.5)), (0.12, 0.9, marimba(1046.5))], 0.8),
     # A water drop and its smaller echo.
     "drop": ([(0.0, 1.0, sweep(520.0, 1450.0, 0.07, 0.09)), (0.13, 0.35, sweep(700.0, 1900.0, 0.05, 0.06))], 0.5),
     # Two knocks.

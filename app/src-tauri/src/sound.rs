@@ -7,9 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The sound files, by the ids of [`mostik_core::NOTIFICATION_SOUNDS`]; `none` has none.
 const FILES: &[(&str, &[u8])] = &[
-    ("chime", include_bytes!("../sounds/chime.wav")),
-    ("bell", include_bytes!("../sounds/bell.wav")),
     ("marimba", include_bytes!("../sounds/marimba.wav")),
+    ("chime", include_bytes!("../sounds/chime.wav")),
     ("drop", include_bytes!("../sounds/drop.wav")),
     ("knock", include_bytes!("../sounds/knock.wav")),
     ("glass", include_bytes!("../sounds/glass.wav")),

@@ -1093,9 +1093,8 @@ impl Tr {
     /// Name of a notification sound by its id.
     pub fn sound_name(&self, id: &str) -> &'static str {
         let (ru, en) = match id {
+            "marimba" => ("Шунт", "Shunt"),
             "chime" => ("Перезвон", "Chime"),
-            "bell" => ("Колокольчик", "Bell"),
-            "marimba" => ("Маримба", "Marimba"),
             "drop" => ("Капля", "Drop"),
             "knock" => ("Тук-тук", "Knock"),
             "glass" => ("Стекло", "Glass"),

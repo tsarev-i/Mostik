@@ -167,7 +167,7 @@ impl Default for Prefs {
         Self {
             notify: "all".into(),
             preview: true,
-            sound: "chime".into(),
+            sound: "marimba".into(),
             english,
         }
     }

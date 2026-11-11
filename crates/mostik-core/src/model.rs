@@ -484,10 +484,9 @@ impl ThreadSummary {
 
 /// Notification sounds the preferences offer, in their order there; `none` is silence.
 /// The desktop app has a file for each of the others (rendered by `scripts/sounds.py`).
-pub const NOTIFICATION_SOUNDS: [&str; 9] = [
-    "chime",
-    "bell",
+pub const NOTIFICATION_SOUNDS: [&str; 8] = [
     "marimba",
+    "chime",
     "drop",
     "knock",
     "glass",

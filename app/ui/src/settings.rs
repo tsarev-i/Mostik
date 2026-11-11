@@ -85,7 +85,7 @@ impl Default for Settings {
             theme: THEMES[0].to_owned(),
             notify: NotifyMode::All,
             notify_preview: true,
-            sound: "chime".to_owned(),
+            sound: "marimba".to_owned(),
             inline_media: true,
             clock24: true,
             mark_read_on_open: true,
