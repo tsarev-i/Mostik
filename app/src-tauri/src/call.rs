@@ -11,6 +11,10 @@
 //! One call at a time, as in Slack. The UI learns about the current call from [`CALL_EVENT`]
 //! and shows it at the bottom of the sidebar.
 
+// Elsewhere (macOS) calls open in the default browser, so the window and end-of-call helpers
+// are used only by the Linux and Windows `imp` (and by the tests).
+#![cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+
 use std::future::Future;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};

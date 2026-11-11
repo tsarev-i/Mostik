@@ -422,7 +422,12 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
         }
         let open = &rest[..open.len()];
         let close = &rest[open.len() + inner.len()..open.len() + inner.len() + close.len()];
-        out.push(EditSpan::Marked { kind, open, inner, close });
+        out.push(EditSpan::Marked {
+            kind,
+            open,
+            inner,
+            close,
+        });
         i += open.len() + inner.len() + close.len();
         plain_start = i;
     }
@@ -523,8 +528,24 @@ mod tests {
     fn edit_spans_find_markup() {
         let spans = edit_spans("a **b** [c](https://x.y)");
         assert_eq!(spans[0], EditSpan::Plain("a "));
-        assert_eq!(spans[1], EditSpan::Marked { kind: Mark::Bold, open: "**", inner: "b", close: "**" });
-        assert_eq!(spans[3], EditSpan::Marked { kind: Mark::Link, open: "[", inner: "c", close: "](https://x.y)" });
+        assert_eq!(
+            spans[1],
+            EditSpan::Marked {
+                kind: Mark::Bold,
+                open: "**",
+                inner: "b",
+                close: "**"
+            }
+        );
+        assert_eq!(
+            spans[3],
+            EditSpan::Marked {
+                kind: Mark::Link,
+                open: "[",
+                inner: "c",
+                close: "](https://x.y)"
+            }
+        );
         assert_eq!(edit_spans("****"), vec![EditSpan::Plain("****")]);
     }
 

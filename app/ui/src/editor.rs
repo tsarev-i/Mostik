@@ -5,8 +5,8 @@
 //! The field's text is what [`value`] reads back: text as is, an emoji image as its code, a line
 //! break as `\n`. Offsets are UTF-16 units of that text, the same units a textarea's selection uses.
 
-use wasm_bindgen::JsCast;
 use mostik_core::markup::{EditSpan, Mark, edit_spans};
+use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement, Node};
 
 /// Class of the `<br>` that lets a trailing line break show: it is not part of the text.
@@ -155,8 +155,17 @@ pub fn render(el: &HtmlElement, text: &str, emoji: &dyn Fn(&str) -> Option<Strin
     for (i, span) in spans.iter().enumerate() {
         match *span {
             EditSpan::Plain(t) => append_text(&doc, el, t, emoji),
-            EditSpan::Marked { kind, open, inner, close } => {
-                for (class, part) in [(marker_class(kind), open), (mark_class(kind), inner), (marker_class(kind), close)] {
+            EditSpan::Marked {
+                kind,
+                open,
+                inner,
+                close,
+            } => {
+                for (class, part) in [
+                    (marker_class(kind), open),
+                    (mark_class(kind), inner),
+                    (marker_class(kind), close),
+                ] {
                     if let Ok(span) = doc.create_element("span") {
                         let _ = span.set_attribute("class", class);
                         append_text(&doc, &span, part, emoji);
@@ -195,7 +204,9 @@ fn shape(el: &HtmlElement) -> Option<Vec<(String, String)>> {
                 match e.tag_name().as_str() {
                     "IMG" => plain.push_str(&e.get_attribute("data-code").unwrap_or_default()),
                     "BR" if e.class_list().contains(TAIL) => {}
-                    "SPAN" if e.class_list().contains(GAP) && e.text_content().unwrap_or_default() == ZWSP.to_string() => {}
+                    "SPAN"
+                        if e.class_list().contains(GAP) && e.text_content().unwrap_or_default() == ZWSP.to_string() => {
+                    }
                     "SPAN" => {
                         if !plain.is_empty() {
                             out.push((String::new(), std::mem::take(&mut plain)));
@@ -222,7 +233,12 @@ fn shape_of(text: &str) -> Vec<(String, String)> {
     for span in edit_spans(text) {
         match span {
             EditSpan::Plain(t) => out.push((String::new(), t.to_owned())),
-            EditSpan::Marked { kind, open, inner, close } => {
+            EditSpan::Marked {
+                kind,
+                open,
+                inner,
+                close,
+            } => {
                 out.push((marker_class(kind).to_owned(), open.to_owned()));
                 out.push((mark_class(kind).to_owned(), inner.to_owned()));
                 out.push((marker_class(kind).to_owned(), close.to_owned()));
@@ -244,7 +260,12 @@ fn leaves(node: &Node, hidden: bool, out: &mut Vec<(Node, u32, bool, u32)>) {
                 let t = n.node_value().unwrap_or_default();
                 let in_gap = node.unchecked_ref::<Element>().class_list().contains(GAP);
                 let skew = if in_gap && t.starts_with(ZWSP) { 1 } else { 0 };
-                let len = utf16_len(&t) - if in_gap { t.chars().filter(|&c| c == ZWSP).count() as u32 } else { 0 };
+                let len = utf16_len(&t)
+                    - if in_gap {
+                        t.chars().filter(|&c| c == ZWSP).count() as u32
+                    } else {
+                        0
+                    };
                 out.push((n, len, hidden, skew));
             }
             Node::ELEMENT_NODE => {
@@ -302,7 +323,11 @@ pub fn set_selection(el: &HtmlElement, start: u32, end: u32) {
         Some((n, o)) => range.set_end(&n, o).is_ok(),
         None => {
             let len = el.child_nodes().length();
-            if start { range.set_start(el, len).is_ok() } else { range.set_end(el, len).is_ok() }
+            if start {
+                range.set_start(el, len).is_ok()
+            } else {
+                range.set_end(el, len).is_ok()
+            }
         }
     };
     set(start, true);
