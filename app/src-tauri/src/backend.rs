@@ -70,6 +70,14 @@ struct Shared {
     /// Events of chats that are not in the list yet, held until the chat itself is fetched, so
     /// the UI gets the chat first and then its messages in order.
     pending: BTreeMap<String, Vec<LiveEvent>>,
+    /// Threads the user follows, as `(chat, parent)`: Telemost's list plus the ones the user
+    /// has replied in since. Only replies in them notify, as in Telemost and Slack.
+    followed: BTreeSet<(String, Timestamp)>,
+    /// Threads the list did not have when it was last fetched: their replies need no new fetch.
+    not_followed: BTreeSet<(String, Timestamp)>,
+    /// Replies in threads of unknown standing that wait for the list to be fetched again, to
+    /// notify about the ones the user turns out to follow.
+    thread_wait: Vec<(Message, Option<User>)>,
 }
 
 /// In-memory attachment cache: showing an image again does not hit the network.
@@ -742,17 +750,105 @@ pub struct Threads {
 pub async fn followed_threads(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Threads, String> {
     let live = live(&state).await?;
     let v = live.xiva.call("history", &wire::thread_list(0), 30).await;
-    let probe = match &v {
-        Ok(v) => {
+    if let Ok(v) = &v {
+        write_probe(&app, "probe-threads.json", &{
             let mut entry = id_patterns(v);
             entry["shape"] = shape(v);
             entry
-        }
-        Err(e) => err_json(e),
-    };
-    write_probe(&app, "probe-threads.json", &probe);
-    let (threads, users) = convert::followed_threads(&v.map_err(|e| e.to_string())?, Some(&live.me));
+        });
+    }
+    let (threads, users) = remember_threads(&live, &v.map_err(|e| e.to_string())?);
     Ok(Threads { threads, users })
+}
+
+/// Parses the followed threads and records them as the ones whose replies notify.
+fn remember_threads(live: &Live, v: &Value) -> (Vec<mostik_core::FollowedThread>, Vec<User>) {
+    let (threads, users) = convert::followed_threads(v, Some(&live.me));
+    if let Ok(mut sh) = live.shared.lock() {
+        sh.followed = threads
+            .iter()
+            .map(|t| (t.parent.chat_id.0.clone(), t.parent.ts))
+            .collect();
+    }
+    (threads, users)
+}
+
+/// Fetches the followed threads again a moment after a reply in a thread the list did not
+/// have (several replies wait for one fetch): Telemost may have subscribed the user to it,
+/// for example for a mention. The UI gets the new list, and the waiting replies notify if
+/// their thread is followed now.
+async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let fetched = match live(&app.state::<AppState>()).await {
+        Ok(live) if Arc::ptr_eq(&live.shared, &shared) => live
+            .xiva
+            .call("history", &wire::thread_list(0), 30)
+            .await
+            .map(|v| remember_threads(&live, &v))
+            .map_err(|e| eprintln!("threads: {e}"))
+            .ok(),
+        _ => None,
+    };
+    let waiting = {
+        let Ok(mut sh) = shared.lock() else { return };
+        let waiting = std::mem::take(&mut sh.thread_wait);
+        if fetched.is_some() {
+            for (m, _) in &waiting {
+                if let Some(key) = thread_key(m)
+                    && !sh.followed.contains(&key)
+                {
+                    sh.not_followed.insert(key);
+                }
+            }
+        }
+        waiting
+    };
+    let Some((threads, users)) = fetched else { return };
+    eprintln!(
+        "threads fetched again for {} replies: {} followed",
+        waiting.len(),
+        threads.len()
+    );
+    let _ = app.emit(EVENT, &LiveEvent::Threads { threads, users });
+    for (m, author) in waiting {
+        let followed = shared
+            .lock()
+            .is_ok_and(|sh| thread_key(&m).is_some_and(|k| sh.followed.contains(&k)));
+        if followed {
+            notify(&app, &shared, &m, author.as_ref());
+        }
+    }
+}
+
+/// `(chat, parent)` of a thread reply.
+fn thread_key(m: &Message) -> Option<(String, Timestamp)> {
+    m.thread_parent.map(|p| (m.chat_id.0.clone(), p))
+}
+
+/// Whether a reply can notify now: it is in a followed thread or is not a reply. A reply in a
+/// thread of unknown standing waits for the list to be fetched again (see [`refresh_threads`]).
+fn reply_notifies_now(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, m: &Message, author: Option<&User>) -> bool {
+    let Some(key) = thread_key(m) else { return true };
+    let Ok(mut sh) = shared.lock() else { return false };
+    if sh.me.as_ref() == Some(&m.author) {
+        // Telemost subscribes the user to a thread they reply in.
+        sh.not_followed.remove(&key);
+        sh.followed.insert(key);
+        return false;
+    }
+    if sh.followed.contains(&key) {
+        return true;
+    }
+    if m.edited || !sh.ready || (sh.not_followed.contains(&key) && !mentions_me(&sh, m)) {
+        return false;
+    }
+    let first = sh.thread_wait.is_empty();
+    sh.thread_wait.push((m.clone(), author.cloned()));
+    if first {
+        let (app, shared) = (app.clone(), shared.clone());
+        tauri::async_runtime::spawn(async move { refresh_threads(app, shared).await });
+    }
+    false
 }
 
 /// Marks the thread of message `parent` read up to its reply `ts` with number `seq_no`
@@ -827,7 +923,9 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             if let LiveEvent::Upsert { message, mentioned, .. } = &ev {
                 learn_mentions(app, shared, message, mentioned);
             }
-            if let LiveEvent::Upsert { message, author, .. } = &ev {
+            if let LiveEvent::Upsert { message, author, .. } = &ev
+                && reply_notifies_now(app, shared, message, author.as_ref())
+            {
                 notify(app, shared, message, author.as_ref());
             }
             let _ = app.emit(EVENT, &ev);
@@ -897,7 +995,9 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
         } = &ev
         {
             learn_mentions(&app, &shared, message, mentioned);
-            notify(&app, &shared, message, author.as_ref());
+            if reply_notifies_now(&app, &shared, message, author.as_ref()) {
+                notify(&app, &shared, message, author.as_ref());
+            }
         }
     }
 }
@@ -989,6 +1089,29 @@ async fn fetch_chat(live: &Live, chat_id: &str) -> Option<(mostik_core::Chat, Ve
     Some((chat, users))
 }
 
+/// Runs `f` with the people, public chats and ids `@` can point at.
+fn with_names<R>(sh: &Shared, f: impl FnOnce(&mostik_core::markup::Mentionable) -> R) -> R {
+    let people: Vec<&str> = sh.names.values().map(String::as_str).collect();
+    let channels: Vec<&str> = sh.channels.iter().map(String::as_str).collect();
+    let ids: Vec<(&str, &str)> = sh.names.iter().map(|(i, n)| (i.as_str(), n.as_str())).collect();
+    f(&mostik_core::markup::Mentionable {
+        people: &people,
+        channels: &channels,
+        ids: &ids,
+    })
+}
+
+/// Whether message `m` mentions the user: by id, by name, through a public chat or `@all`.
+fn mentions_me(sh: &Shared, m: &Message) -> bool {
+    sh.me.as_ref().is_some_and(|me| {
+        let me = mostik_core::markup::Me {
+            id: &me.0,
+            name: sh.names.get(&me.0).map_or("", String::as_str),
+        };
+        with_names(sh, |names| mostik_core::markup::mentions_me(&m.text, names, me))
+    })
+}
+
 fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>) {
     let Ok(mut sh) = shared.lock() else { return };
     // A thread reply lives in the thread chat: its time and number mean nothing in the parent chat.
@@ -1014,23 +1137,7 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         .unwrap_or_default();
     let direct = !m.chat_id.0.contains('/');
     // Only "direct and mentions" needs to know about mentions.
-    let people: Vec<&str> = sh.names.values().map(String::as_str).collect();
-    let channels: Vec<&str> = sh.channels.iter().map(String::as_str).collect();
-    let ids: Vec<(&str, &str)> = sh.names.iter().map(|(i, n)| (i.as_str(), n.as_str())).collect();
-    let names = mostik_core::markup::Mentionable {
-        people: &people,
-        channels: &channels,
-        ids: &ids,
-    };
-    let mentioned = || {
-        sh.me.as_ref().is_some_and(|me| {
-            let me = mostik_core::markup::Me {
-                id: &me.0,
-                name: sh.names.get(&me.0).map_or("", String::as_str),
-            };
-            mostik_core::markup::mentions_me(&m.text, &names, me)
-        })
-    };
+    let mentioned = || mentions_me(&sh, m);
     match prefs.notify.as_str() {
         "nothing" => return,
         "direct" if !direct && !mentioned() => return,
@@ -1054,7 +1161,10 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
     let body: String = if m.call.is_some() {
         text(app, "📞 Начался созвон", "📞 A call started").to_owned()
     } else if prefs.preview {
-        mostik_core::markup::plain(&m.text, &names).chars().take(200).collect()
+        with_names(&sh, |names| mostik_core::markup::plain(&m.text, names))
+            .chars()
+            .take(200)
+            .collect()
     } else {
         text(app, "Новое сообщение", "New message").to_owned()
     };

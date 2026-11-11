@@ -101,6 +101,8 @@ pub struct Ctx {
     /// People picked from `@` suggestions or named in an edited message, by the name the
     /// text shows: sending turns `@Name` into their `@<guid>` even when the name is not unique.
     pub picked: RwSignal<std::collections::HashMap<String, UserId>>,
+    /// Messages already removed as deleted, so a deletion is counted once.
+    pub deleted: RwSignal<HashSet<(ChatId, Timestamp)>>,
 }
 
 /// A sidebar chat held with the mouse button.
@@ -376,6 +378,7 @@ pub fn App() -> impl IntoView {
         active_calls: Memo::new(move |_| snap.with(Snapshot::active_calls)),
         threads: RwSignal::new(vec![]),
         picked: RwSignal::new(Default::default()),
+        deleted: RwSignal::new(Default::default()),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -2683,6 +2686,9 @@ fn threads_supported(chat: &ChatId) -> bool {
     chat.0.starts_with("0/")
 }
 
+/// Avatars under a message with a thread, as in Slack.
+const MAX_THREAD_FACES: usize = 5;
+
 /// Message text: paragraphs with inline markup and code blocks.
 fn render_text(text: &str, who: &Mentionable, me: Me) -> AnyView {
     mostik_core::markup::parse_blocks(text)
@@ -2720,7 +2726,11 @@ fn render_inline(text: &str, who: &Mentionable, me: Me) -> AnyView {
                 view! { <span class=cls>"@"{n}</span> }.into_any()
             }
             Inline::UserMention { id, name } => {
-                let cls = if id == me.id { "mention me person" } else { "mention person" };
+                let cls = if id == me.id {
+                    "mention me person"
+                } else {
+                    "mention person"
+                };
                 let name = name.unwrap_or_else(|| tr().unknown_user.to_owned());
                 let profile = UserId(id);
                 view! {
@@ -2864,9 +2874,15 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
     });
     let thread = msg.thread.clone().filter(|t| !in_thread && t.reply_count > 0).map(|t| {
         let faces = c.snap.with_untracked(|s| {
-            t.participants
-                .iter()
+            // Telemost does not say who replied: the ones seen replying, or the loaded replies.
+            let ids = if t.participants.is_empty() {
+                s.thread_participants(&msg.chat_id, msg.ts)
+            } else {
+                t.participants.clone()
+            };
+            ids.iter()
                 .filter_map(|id| s.user(id).cloned())
+                .take(MAX_THREAD_FACES)
                 .collect::<Vec<_>>()
         });
         view! {
@@ -4717,7 +4733,15 @@ fn ThreadsView() -> impl IntoView {
                     ));
                     let name = author.as_ref().map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
                     let text = names.with(|who| render_text(&t.parent.text, who, Me { id: &me_id.0, name: &me_name }));
-                    let replies = t.parent.thread.as_ref().map(|th| th.reply_count).unwrap_or(0);
+                    // The parent loaded in its chat is the fresher copy: deletions lower its count.
+                    let replies = c.snap.with(|s| {
+                        s.messages
+                            .iter()
+                            .find(|m| m.chat_id == t.parent.chat_id && m.ts == t.parent.ts)
+                            .and_then(|m| m.thread.as_ref())
+                            .or(t.parent.thread.as_ref())
+                            .map_or(0, |th| th.reply_count)
+                    });
                     let selected = open.as_ref() == Some(&(t.parent.chat_id.clone(), t.parent.ts));
                     let unread = t.unread;
                     let has_unread = unread > 0;

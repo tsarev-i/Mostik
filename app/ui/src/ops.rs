@@ -55,7 +55,13 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
         if let Some(old) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
             // An edit push may come without reactions or a sequence number: keep the known ones.
             // Reaction changes arrive as separate `Reactions` events.
-            let thread = m.thread.clone().or_else(|| old.thread.clone());
+            let thread = match (m.thread.clone(), &old.thread) {
+                (Some(mut t), Some(known)) => {
+                    t.keep_known(known);
+                    Some(t)
+                }
+                (t, known) => t.or_else(|| known.clone()),
+            };
             let reactions = if m.reactions.is_empty() {
                 std::mem::take(&mut old.reactions)
             } else {
@@ -141,19 +147,61 @@ fn sort_sections(s: &mut Snapshot) {
     }
 }
 
-pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp) {
+/// Removes a deleted message. A reply lowers its thread's reply count even when the replies
+/// are not loaded; a deleted parent takes its thread along, from the list and the thread pane.
+/// Each deletion counts once: the user's own comes back from Telemost as a push.
+pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timestamp>) {
+    let first = c.deleted.try_update(|d| d.insert((chat.clone(), ts))).unwrap_or(true);
+    if !first {
+        return;
+    }
+    let mut parent = thread_parent;
     c.snap.update(|s| {
-        let Some(pos) = s.messages.iter().position(|m| &m.chat_id == chat && m.ts == ts) else {
-            return;
-        };
-        let removed = s.messages.remove(pos);
-        if let Some(parent) = removed.thread_parent
-            && let Some(p) = s.messages.iter_mut().find(|x| &x.chat_id == chat && x.ts == parent)
-            && let Some(t) = p.thread.as_mut()
-        {
-            t.reply_count = t.reply_count.saturating_sub(1);
+        let removed = s
+            .messages
+            .iter()
+            .position(|m| &m.chat_id == chat && m.ts == ts)
+            .map(|pos| s.messages.remove(pos));
+        parent = parent.or_else(|| removed.as_ref().and_then(|m| m.thread_parent));
+        match parent {
+            Some(parent) => {
+                let participants = s.thread_participants(chat, parent);
+                if let Some(p) = s.messages.iter_mut().find(|x| &x.chat_id == chat && x.ts == parent)
+                    && let Some(t) = p.thread.as_mut()
+                {
+                    t.reply_count = t.reply_count.saturating_sub(1);
+                    if let Some(r) = &removed
+                        && !participants.contains(&r.author)
+                    {
+                        t.participants.retain(|a| a != &r.author);
+                    }
+                }
+            }
+            None => s
+                .messages
+                .retain(|m| !(&m.chat_id == chat && m.thread_parent == Some(ts))),
         }
     });
+    c.threads.update(|list| match parent {
+        Some(parent) => {
+            if let Some(i) = list
+                .iter()
+                .position(|t| &t.parent.chat_id == chat && t.parent.ts == parent)
+            {
+                let t = &mut list[i];
+                if let Some(th) = t.parent.thread.as_mut() {
+                    th.reply_count = th.reply_count.saturating_sub(1);
+                    if th.reply_count == 0 {
+                        list.remove(i);
+                    }
+                }
+            }
+        }
+        None => list.retain(|t| !(&t.parent.chat_id == chat && t.parent.ts == ts)),
+    });
+    if parent.is_none() && c.thread.get_untracked() == Some(ts) && c.current.with_untracked(|cur| cur == chat) {
+        c.thread.set(None);
+    }
 }
 
 pub fn handle_event(c: Ctx, ev: LiveEvent) {
@@ -168,7 +216,11 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             }
             upsert(c, *message, author)
         }
-        LiveEvent::Deleted { chat_id, ts } => remove(c, &chat_id, ts),
+        LiveEvent::Deleted {
+            chat_id,
+            ts,
+            thread_parent,
+        } => remove(c, &chat_id, ts, thread_parent),
         LiveEvent::Reactions {
             chat_id,
             ts,
@@ -228,6 +280,10 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
         }),
         LiveEvent::Connection { online } => c.online.set(online),
         LiveEvent::Users { users } => c.snap.update(|s| learn_users(s, users)),
+        LiveEvent::Threads { threads, users } => {
+            c.snap.update(|s| learn_users(s, users));
+            merge_threads(c, threads);
+        }
     }
 }
 
@@ -287,8 +343,12 @@ async fn load_latest(c: Ctx, id: &ChatId) {
             let full = !page.more;
             c.snap.update(|s| {
                 learn_users(s, page.users);
-                s.messages.retain(|m| &m.chat_id != id || m.thread_parent.is_some());
-                s.messages.extend(page.messages);
+                let old: Vec<Message> = s
+                    .messages
+                    .extract_if(.., |m| &m.chat_id == id && m.thread_parent.is_none())
+                    .collect();
+                s.messages
+                    .extend(page.messages.into_iter().map(|m| keep_known(m, &old)));
             });
             c.exhausted.update(|e| {
                 if full {
@@ -492,11 +552,27 @@ fn load_thread(c: Ctx, id: ChatId, parent: Timestamp) {
         match bridge::history(&id.0, None, Some(parent)).await {
             Ok(page) => {
                 let last = page.messages.iter().max_by_key(|m| m.ts).map(|m| (m.ts, m.seq_no));
+                // A thread that fits in one page gives the exact reply count, without the
+                // deleted replies Telemost's count still has.
+                let exact = (!page.more).then_some(page.messages.len() as u32);
+                let mut summary = None;
                 c.snap.update(|s| {
                     learn_users(s, page.users);
                     s.messages
                         .retain(|m| !(m.chat_id == id && m.thread_parent == Some(parent)));
                     s.messages.extend(page.messages);
+                    let participants = s.thread_participants(&id, parent);
+                    if let Some(p) = s.messages.iter_mut().find(|m| m.chat_id == id && m.ts == parent)
+                        && let Some(t) = p.thread.as_mut()
+                    {
+                        if !participants.is_empty() {
+                            t.participants = participants;
+                        }
+                        if let Some(n) = exact {
+                            t.reply_count = n;
+                        }
+                        summary = Some(t.clone());
+                    }
                 });
                 // The open thread is read, as in Slack.
                 let mut unread = false;
@@ -507,6 +583,9 @@ fn load_thread(c: Ctx, id: ChatId, parent: Timestamp) {
                     {
                         if let Some((ts, seq)) = last.filter(|(ts, _)| *ts >= t.last_ts) {
                             (t.last_ts, t.last_seq) = (ts, seq.max(t.last_seq));
+                        }
+                        if let Some(summary) = &summary {
+                            t.parent.thread = Some(summary.clone());
                         }
                         unread = t.unread > 0;
                     }
@@ -554,10 +633,48 @@ pub fn load_threads(c: Ctx) {
     });
 }
 
+/// A message Telemost sent again, with the thread details this session knows from `old`.
+fn keep_known(mut m: Message, old: &[Message]) -> Message {
+    if let Some(t) = m.thread.as_mut()
+        && let Some(known) = old
+            .iter()
+            .find(|o| o.chat_id == m.chat_id && o.ts == m.ts)
+            .and_then(|o| o.thread.as_ref())
+    {
+        t.keep_known(known);
+    }
+    m
+}
+
+/// Takes a freshly fetched thread list. A thread that got replies since the fetch went out
+/// keeps its newer local state; one only known locally (just replied in) stays.
+fn merge_threads(c: Ctx, fresh: Vec<FollowedThread>) {
+    c.threads.update(|list| {
+        let same =
+            |a: &FollowedThread, b: &FollowedThread| a.parent.chat_id == b.parent.chat_id && a.parent.ts == b.parent.ts;
+        let mut out = fresh;
+        for t in out.iter_mut() {
+            if let Some(old) = list.iter().find(|o| same(o, t))
+                && old.last_ts > t.last_ts
+            {
+                (t.unread, t.last_ts, t.last_seq) = (old.unread, old.last_ts, old.last_seq);
+            }
+        }
+        for old in list.iter() {
+            if !out.iter().any(|t| same(t, old)) {
+                out.push(old.clone());
+            }
+        }
+        out.sort_by_key(|t| std::cmp::Reverse(t.last_ts));
+        *list = out;
+    });
+}
+
 /// A new reply in the thread of message `parent`: the thread list follows it. Someone else's
 /// reply is unread unless that thread is open in front of the user. A thread not in the list
 /// yet joins it when the user replied, started it or is mentioned in the reply, as Telemost
-/// subscribes them.
+/// subscribes them; when its parent is not loaded, the backend fetches the list again and
+/// sends it as [`LiveEvent::Threads`].
 fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
     let (me, mentioned, parent_msg) = c.snap.with_untracked(|s| {
         let mentioned = s.mentions_me(&m.text);
@@ -759,7 +876,7 @@ pub fn delete(c: Ctx, m: Message) {
         {
             return report(c, format!("{}: {e}", tr().err_delete));
         }
-        remove(c, &m.chat_id, m.ts);
+        remove(c, &m.chat_id, m.ts, m.thread_parent);
     });
 }
 
@@ -1235,7 +1352,7 @@ fn reconnected(c: Ctx, mut fresh: Snapshot) {
             }
         }
         learn_users(&mut fresh, std::mem::take(&mut s.users));
-        let mut messages = fresh.messages;
+        let mut messages: Vec<Message> = fresh.messages.into_iter().map(|m| keep_known(m, &old)).collect();
         for m in old {
             if !messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
                 messages.push(m);

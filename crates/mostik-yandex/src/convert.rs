@@ -198,6 +198,8 @@ pub enum Parsed {
     Deleted {
         chat_id: ChatId,
         ts: Timestamp,
+        /// For a thread reply, the time of the parent message.
+        thread_parent: Option<Timestamp>,
     },
     /// A service message or a system one the feed does not show.
     Skip,
@@ -221,7 +223,11 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
     };
     let forwarded = forwarded(sm);
     if (is_deletion(plain) && forwarded.is_empty()) || info.get("Deleted").and_then(Value::as_bool) == Some(true) {
-        return Parsed::Deleted { chat_id, ts };
+        return Parsed::Deleted {
+            chat_id,
+            ts,
+            thread_parent: parent,
+        };
     }
     let thread = n(info, &["ThreadState", "LastSeqNo"])
         .filter(|c| *c > 0)
@@ -457,9 +463,12 @@ pub enum LiveEvent {
         #[serde(default)]
         mentioned: Vec<User>,
     },
+    /// A message was deleted; `thread_parent` is set for a thread reply.
     Deleted {
         chat_id: ChatId,
         ts: Timestamp,
+        #[serde(default)]
+        thread_parent: Option<Timestamp>,
     },
     Typing {
         chat_id: ChatId,
@@ -508,6 +517,11 @@ pub enum LiveEvent {
     },
     /// Directory profiles (photo, position, real name) of authors that came with a history page.
     Users {
+        users: Vec<User>,
+    },
+    /// The followed threads fetched again after a reply in a thread the list did not have.
+    Threads {
+        threads: Vec<FollowedThread>,
         users: Vec<User>,
     },
 }
@@ -580,7 +594,15 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
             mentioned: mentioned_users(sm),
             message,
         }),
-        Parsed::Deleted { chat_id, ts } => Some(LiveEvent::Deleted { chat_id, ts }),
+        Parsed::Deleted {
+            chat_id,
+            ts,
+            thread_parent,
+        } => Some(LiveEvent::Deleted {
+            chat_id,
+            ts,
+            thread_parent,
+        }),
         Parsed::Skip => None,
     }
 }
@@ -1324,7 +1346,19 @@ mod tests {
             from_push(&del, Some(&me)),
             Some(LiveEvent::Deleted {
                 chat_id: ChatId("c".into()),
-                ts: 7
+                ts: 7,
+                thread_parent: None
+            })
+        );
+        // A deleted thread reply names its thread: the parent's reply count goes down.
+        let reply = json!({"ClientMessage": {"Plain": {"ChatId": "100/0/abc_42", "Timestamp": 9}},
+                           "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 9}});
+        assert_eq!(
+            from_push(&reply, Some(&me)),
+            Some(LiveEvent::Deleted {
+                chat_id: ChatId("0/0/abc".into()),
+                ts: 9,
+                thread_parent: Some(42)
             })
         );
         let del2 = json!({"ClientMessage": {"Plain": {"ChatId": "c", "PayloadId": "p"}}, "ServerMessageInfo": {"Deleted": true, "Timestamp": 8, "From": {"Guid": "u1"}}});
@@ -1332,7 +1366,8 @@ mod tests {
             from_push(&del2, Some(&me)),
             Some(LiveEvent::Deleted {
                 chat_id: ChatId("c".into()),
-                ts: 8
+                ts: 8,
+                thread_parent: None
             })
         );
         let react = json!({"ClientMessage": {"Reaction": {"ChatId": "c", "Timestamp": 7, "Type": 100102, "Action": 2}},

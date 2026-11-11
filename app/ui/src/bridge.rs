@@ -63,6 +63,8 @@ pub enum LiveEvent {
     Deleted {
         chat_id: ChatId,
         ts: Timestamp,
+        #[serde(default)]
+        thread_parent: Option<Timestamp>,
     },
     Typing {
         chat_id: ChatId,
@@ -100,6 +102,10 @@ pub enum LiveEvent {
         online: bool,
     },
     Users {
+        users: Vec<User>,
+    },
+    Threads {
+        threads: Vec<mostik_core::FollowedThread>,
         users: Vec<User>,
     },
 }

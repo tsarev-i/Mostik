@@ -385,6 +385,32 @@ impl Snapshot {
         list.sort_by_key(|m| m.ts);
         list
     }
+
+    /// Authors of the loaded replies in the thread of message `parent`, in the order they
+    /// first replied: Telemost does not say who took part in a thread.
+    pub fn thread_participants(&self, chat: &ChatId, parent: Timestamp) -> Vec<UserId> {
+        let mut out: Vec<UserId> = Vec::new();
+        for m in self.thread_replies(chat, parent) {
+            if !out.contains(&m.author) {
+                out.push(m.author);
+            }
+        }
+        out
+    }
+}
+
+impl ThreadSummary {
+    /// Keeps what this session knows about a thread when Telemost sends the parent again:
+    /// Telemost names no participants, and its reply count (the thread's last `SeqNo`) still
+    /// counts deleted replies, so a lower known count stands until newer replies come.
+    pub fn keep_known(&mut self, known: &ThreadSummary) {
+        if self.participants.is_empty() {
+            self.participants = known.participants.clone();
+        }
+        if self.last_reply_ts <= known.last_reply_ts {
+            self.reply_count = self.reply_count.min(known.reply_count);
+        }
+    }
 }
 
 /// Display name of a chat: the peer's name for a direct chat.
@@ -497,5 +523,22 @@ mod tests {
                 assert!(s.chat(id).is_some(), "section refers to an unknown chat");
             }
         }
+    }
+
+    #[test]
+    fn thread_summary_keeps_what_the_session_knows() {
+        let summary = |count, last, who: &[&str]| ThreadSummary {
+            reply_count: count,
+            last_reply_ts: last,
+            participants: who.iter().map(|w| UserId((*w).into())).collect(),
+        };
+        // Telemost's count still has a reply deleted in this session; no participants.
+        let mut fresh = summary(5, 100, &[]);
+        fresh.keep_known(&summary(4, 100, &["a", "b"]));
+        assert_eq!(fresh, summary(4, 100, &["a", "b"]));
+        // A newer reply came: Telemost's count is taken.
+        let mut fresh = summary(6, 120, &[]);
+        fresh.keep_known(&summary(4, 100, &["a"]));
+        assert_eq!(fresh, summary(6, 120, &["a"]));
     }
 }
