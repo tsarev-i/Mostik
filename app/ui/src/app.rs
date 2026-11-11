@@ -2116,7 +2116,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
         let (chats, section_id) = (section.chats.clone(), section.id.clone());
         Memo::new(move |_| {
             let (filter, hide_muted) = c.settings.with(|s| (s.sidebar_filter, s.hide_muted));
-            let current = c.current.get();
+            let current = chat_in_pane(c);
             let now = (js_sys::Date::now() * 1000.0) as Timestamp;
             c.snap.with(|s| {
                 section_order(c, s, &section_id, &chats)
@@ -2125,7 +2125,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     .filter(|ch| {
                         // The filter never hides starred chats and the chat with yourself: they are always on top.
                         section_id == "starred"
-                            || ch.id == current
+                            || current.as_ref() == Some(&ch.id)
                             || shown_in_sidebar(
                                 ch,
                                 filter,
@@ -2209,12 +2209,13 @@ fn SidebarSection(section: Section) -> impl IntoView {
                 {let section_id = section_id.clone(); move || {
                     // As in Slack: a collapsed section still shows the open chat and chats with unread messages.
                     let folded = collapsed.get();
+                    let open = chat_in_pane(c);
                     visible
                         .get()
                         .into_iter()
                         .filter(|id| {
                             !folded
-                                || c.current.with(|cur| cur == id)
+                                || open.as_ref() == Some(id)
                                 || c.snap.with(|s| s.chat(id).is_some_and(|ch| ch.unread > 0 && !ch.muted))
                         })
                         .map(|id| view! { <ChatRow id=id section=section_id.clone()/> })
@@ -2444,6 +2445,12 @@ fn chat_drop(c: Ctx) {
     }
 }
 
+/// The chat shown in the main pane, highlighted in the sidebar. `current` keeps the last opened
+/// chat while "Threads" or "Drafts & sent" is shown in its place: then no chat is open.
+fn chat_in_pane(c: Ctx) -> Option<ChatId> {
+    (!c.view.get().is_home_page()).then(|| c.current.get())
+}
+
 /// A conversation without new messages for longer than this is inactive ("Active only" in Slack).
 const INACTIVE_AFTER_MCS: Timestamp = 30 * 24 * 3600 * 1_000_000;
 
@@ -2491,7 +2498,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
     };
     let selected = {
         let id = id.clone();
-        Memo::new(move |_| !c.view.get().is_home_page() && c.current.with(|cur| cur == &id))
+        Memo::new(move |_| chat_in_pane(c).as_ref() == Some(&id))
     };
     let ctx_open = {
         let id = id.clone();
