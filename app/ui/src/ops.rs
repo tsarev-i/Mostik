@@ -947,7 +947,8 @@ pub fn delete(c: Ctx, m: Message) {
     });
 }
 
-/// Adds reaction `kind`, or removes it if it is already mine.
+/// Adds reaction `kind`, or removes it if it is already mine. Telemost keeps one reaction per
+/// person on a message, so a new one replaces the one the user had.
 pub fn toggle_reaction(c: Ctx, m: &Message, kind: u64) {
     let add = !m.reactions.iter().any(|r| r.kind == kind && r.mine);
     let m = m.clone();
@@ -963,6 +964,13 @@ pub fn toggle_reaction(c: Ctx, m: &Message, kind: u64) {
             let Some(msg) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == m.ts) else {
                 return;
             };
+            if add {
+                for r in msg.reactions.iter_mut().filter(|r| r.kind != kind && r.mine) {
+                    r.count = r.count.saturating_sub(1);
+                    r.mine = false;
+                    r.users.retain(|u| u != &me);
+                }
+            }
             match msg.reactions.iter_mut().find(|r| r.kind == kind) {
                 Some(r) if add && !r.mine => {
                     r.count += 1;
