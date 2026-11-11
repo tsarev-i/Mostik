@@ -1,9 +1,9 @@
 //! Session cookies are kept in the system password store via `keyring`: the Secret Service
-//! (KWallet / GNOME Keyring) on Linux, the Credential Manager on Windows.
+//! (KWallet / GNOME Keyring) on Linux, the Credential Manager on Windows, the login keychain on macOS.
 //!
 //! The Credential Manager holds at most 1280 UTF-16 characters per credential, less than a typical
 //! cookie jar, so there the secret is split into parts: `yandex-session`, `yandex-session.1`, …
-//! On Linux it always fits into the first one.
+//! On Linux and macOS it always fits into the first one.
 
 use mostik_yandex::session::CookieJar;
 
