@@ -113,13 +113,16 @@ pub fn thread_list(min_timestamp: u64) -> Value {
     json!({ "RequestId": request_id(), "Threads": true, "Limit": 0, "ChatDataFilter": {}, "MinTimestamp": min_timestamp })
 }
 
-/// New text message. `payload_id` is a client UUID that deduplicates retries.
-pub fn plain_text(chat_id: &str, payload_id: &str, text: &str, mentioned: &[String]) -> Value {
+/// New text message. `payload_id` is a client UUID that deduplicates retries. The people
+/// mentioned as `@<guid>` go into `MentionedUserIds`, as the web client sends them: Telemost
+/// notifies them and returns their names in `MentionedUsers`.
+pub fn plain_text(chat_id: &str, payload_id: &str, text: &str) -> Value {
     let mut plain = json!({
         "ChatId": chat_id,
         "PayloadId": payload_id,
         "Text": { "MessageText": text },
     });
+    let mentioned = mostik_core::markup::mentioned_ids(text);
     if !mentioned.is_empty() {
         plain["MentionedUserIds"] = json!(mentioned);
     }
@@ -128,7 +131,7 @@ pub fn plain_text(chat_id: &str, payload_id: &str, text: &str, mentioned: &[Stri
 
 /// Edit: the same `Plain`, but with the `Timestamp` of the original message.
 pub fn edit_text(chat_id: &str, ts: u64, payload_id: &str, text: &str) -> Value {
-    let mut msg = plain_text(chat_id, payload_id, text, &[]);
+    let mut msg = plain_text(chat_id, payload_id, text);
     msg["Plain"]["Timestamp"] = json!(ts);
     msg
 }
@@ -159,14 +162,17 @@ mod tests {
 
     #[test]
     fn plain_edit_delete_shapes() {
-        let send = plain_text("c", "p", "hello", &["u1".into()]);
+        let id = "aaaa0001-0000-4000-8000-000000000001";
+        let text = format!("@{id} hello");
+        let send = plain_text("c", "p", &text);
         assert_eq!(
             send,
-            json!({"Plain": {"ChatId": "c", "PayloadId": "p", "Text": {"MessageText": "hello"}, "MentionedUserIds": ["u1"]}})
+            json!({"Plain": {"ChatId": "c", "PayloadId": "p", "Text": {"MessageText": text}, "MentionedUserIds": [id]}})
         );
         let edit = edit_text("c", 42, "p", "edited");
         assert_eq!(edit["Plain"]["Timestamp"], 42);
         assert!(edit["Plain"].get("MentionedUserIds").is_none());
+        assert_eq!(edit_text("c", 42, "p", &text)["Plain"]["MentionedUserIds"], json!([id]));
         assert_eq!(delete("c", 42), json!({"Plain": {"ChatId": "c", "Timestamp": 42}}));
     }
 

@@ -297,7 +297,41 @@ impl Snapshot {
         crate::markup::MentionNames {
             people: self.users.iter().map(|u| u.display_name.clone()).collect(),
             channels: self.mention_channels(),
+            ids: self
+                .users
+                .iter()
+                .filter(|u| u.has_name())
+                .map(|u| (u.id.0.clone(), u.display_name.clone()))
+                .collect(),
         }
+    }
+
+    /// Whether `text` mentions the user: by id, by name, through a public chat or with `@all`.
+    pub fn mentions_me(&self, text: &str) -> bool {
+        let name = self.user(&self.me).map_or("", |u| u.display_name.as_str());
+        let me = crate::markup::Me { id: &self.me.0, name };
+        self.mention_names()
+            .with(|who| crate::markup::mentions_me(text, who, me))
+    }
+
+    /// Text without markup for previews, with the names of the people mentioned as `@<guid>`.
+    pub fn plain(&self, text: &str) -> String {
+        if !text.contains('@') {
+            return crate::markup::plain(text, &Default::default());
+        }
+        let ids: Vec<(&str, &str)> = self
+            .users
+            .iter()
+            .filter(|u| u.has_name())
+            .map(|u| (u.id.0.as_str(), u.display_name.as_str()))
+            .collect();
+        crate::markup::plain(
+            text,
+            &crate::markup::Mentionable {
+                ids: &ids,
+                ..Default::default()
+            },
+        )
     }
 
     /// Names of the public group chats in the list, which `@<name>` mentions.

@@ -105,6 +105,17 @@ pub fn reaction_authors(sm: &Value) -> Vec<User> {
         .collect()
 }
 
+/// People the message mentions (`MentionedUsers`, which Telemost adds next to `ClientMessage`),
+/// so `@<guid>` in the text can show their names.
+pub fn mentioned_users(sm: &Value) -> Vec<User> {
+    sm.get("MentionedUsers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(user_from)
+        .collect()
+}
+
 /// `Plain` fields that a deleted message still has.
 const PLAIN_SERVICE_KEYS: &[&str] = &["ChatId", "Timestamp", "PayloadId"];
 
@@ -336,7 +347,7 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
                     users.entry(u.id.0.clone()).or_insert(u);
                 }
             }
-            for u in reaction_authors(sm) {
+            for u in reaction_authors(sm).into_iter().chain(mentioned_users(sm)) {
                 users.entry(u.id.0.clone()).or_insert(u);
             }
             if let Parsed::Message(m) = parse_server_message(sm, Some(id), me) {
@@ -389,7 +400,7 @@ pub fn search_messages(v: &Value, me: Option<&UserId>) -> (Vec<Message>, Vec<Use
         if let Some(u) = sm.pointer("/ServerMessageInfo/From").and_then(user_from) {
             users.entry(u.id.0.clone()).or_insert(u);
         }
-        for u in reaction_authors(sm) {
+        for u in reaction_authors(sm).into_iter().chain(mentioned_users(sm)) {
             users.entry(u.id.0.clone()).or_insert(u);
         }
         if let Parsed::Message(m) = parse_server_message(sm, None, me) {
@@ -412,7 +423,8 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
         let Some(sm) = chat.get("ThreadParentMessage") else {
             continue;
         };
-        if let Some(u) = sm.pointer("/ServerMessageInfo/From").and_then(user_from) {
+        let from = sm.pointer("/ServerMessageInfo/From").and_then(user_from);
+        for u in from.into_iter().chain(mentioned_users(sm)) {
             users.entry(u.id.0.clone()).or_insert(u);
         }
         let Parsed::Message(mut parent) = parse_server_message(sm, Some(&parent_chat), me) else {
@@ -437,10 +449,13 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveEvent {
-    /// New or changed message; `author` in case the UI does not know the sender.
+    /// New or changed message; `author` in case the UI does not know the sender, `mentioned`
+    /// for the names of the people it mentions.
     Upsert {
         message: Box<Message>,
         author: Option<User>,
+        #[serde(default)]
+        mentioned: Vec<User>,
     },
     Deleted {
         chat_id: ChatId,
@@ -562,6 +577,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     match parse_server_message(sm, None, me) {
         Parsed::Message(message) => Some(LiveEvent::Upsert {
             author: sm.pointer("/ServerMessageInfo/From").and_then(user_from),
+            mentioned: mentioned_users(sm),
             message,
         }),
         Parsed::Deleted { chat_id, ts } => Some(LiveEvent::Deleted { chat_id, ts }),
@@ -991,7 +1007,7 @@ mod tests {
             &push("MeetingStartedMessage", "https://telemost.360.yandex.ru/j/123"),
             None,
         ) {
-            Some(LiveEvent::Upsert { message, author }) => {
+            Some(LiveEvent::Upsert { message, author, .. }) => {
                 assert_eq!(message.chat_id, ChatId("0/0/abc".into()));
                 assert_eq!((message.ts, message.seq_no, message.author.0.as_str()), (7, 51, "u1"));
                 assert_eq!(
@@ -1281,9 +1297,25 @@ mod tests {
         let new = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Text": {"MessageText": "hi"}}},
                          "ServerMessageInfo": {"From": {"Guid": "u1", "DisplayName": "Anna"}, "Timestamp": 7, "SeqNo": 3}});
         match from_push(&new, Some(&me)) {
-            Some(LiveEvent::Upsert { message, author }) => {
+            Some(LiveEvent::Upsert { message, author, .. }) => {
                 assert_eq!((message.ts, message.text.as_str(), message.seq_no), (7, "hi", 3));
                 assert_eq!(author.unwrap().display_name, "Anna");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Telemost names the people a message mentions as `@<guid>` in `MentionedUsers`.
+        let mention = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Text": {"MessageText": "@u2 look"}}},
+                             "MentionedUsers": [{"Guid": "u2", "DisplayName": "Boris", "Version": 1}],
+                             "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 8}});
+        match from_push(&mention, Some(&me)) {
+            Some(LiveEvent::Upsert { mentioned, .. }) => {
+                assert_eq!(
+                    mentioned
+                        .iter()
+                        .map(|u| (u.id.0.as_str(), u.display_name.as_str()))
+                        .collect::<Vec<_>>(),
+                    vec![("u2", "Boris")]
+                );
             }
             other => panic!("{other:?}"),
         }

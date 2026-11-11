@@ -5,7 +5,7 @@ use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use mostik_core::markup::{Inline, MENTION_ALL, Mentionable, parse_inline};
+use mostik_core::markup::{Inline, MENTION_ALL, Me, Mentionable, parse_inline};
 use mostik_core::*;
 
 use crate::i18n::{Lang, tr};
@@ -98,6 +98,9 @@ pub struct Ctx {
     pub active_calls: Memo<std::collections::BTreeMap<ChatId, String>>,
     /// Followed threads with their unread replies, newest first.
     pub threads: RwSignal<Vec<FollowedThread>>,
+    /// People picked from `@` suggestions or named in an edited message, by the name the
+    /// text shows: sending turns `@Name` into their `@<guid>` even when the name is not unique.
+    pub picked: RwSignal<std::collections::HashMap<String, UserId>>,
 }
 
 /// A sidebar chat held with the mouse button.
@@ -372,6 +375,7 @@ pub fn App() -> impl IntoView {
         call: RwSignal::new(None),
         active_calls: Memo::new(move |_| snap.with(Snapshot::active_calls)),
         threads: RwSignal::new(vec![]),
+        picked: RwSignal::new(Default::default()),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -1381,12 +1385,13 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                 }
             });
             out.extend(people.into_iter().take(6).map(Hit::Person));
-            let mut messages: Vec<Message> = s
-                .messages
-                .iter()
-                .filter(|m| mostik_core::markup::plain(&m.text).to_lowercase().contains(&q))
-                .cloned()
-                .collect();
+            let mut messages: Vec<Message> = s.mention_names().with(|who| {
+                s.messages
+                    .iter()
+                    .filter(|m| mostik_core::markup::plain(&m.text, who).to_lowercase().contains(&q))
+                    .cloned()
+                    .collect()
+            });
             remote.with(|(rq, rm, _)| {
                 if rq.to_lowercase() == q {
                     for m in rm {
@@ -1442,7 +1447,7 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     }
                     Hit::Message(m, chat) => {
                         let author = c.snap.with_untracked(|s| s.user(&m.author).map(|u| u.display_name.clone())).unwrap_or_default();
-                        let text: String = mostik_core::markup::plain(&m.text).chars().take(120).collect();
+                        let text: String = c.snap.with(|s| s.plain(&m.text)).chars().take(120).collect();
                         view! {
                             <span class="sr-msg-head"><span class="sr-chat">{chat}</span><span class="sr-sub">{author}" · "{time::relative(m.ts)}</span></span>
                             <span class="sr-text">{text}</span>
@@ -2381,7 +2386,15 @@ fn MessageList() -> impl IntoView {
 #[component]
 fn InlineEditor(msg: Message) -> impl IntoView {
     let c = ctx();
-    let text = RwSignal::new(msg.text.clone());
+    // Mentions are edited by name and sent back as ids.
+    let (shown, named) = c.snap.with_untracked(|s| {
+        s.mention_names()
+            .with(|who| mostik_core::markup::ids_to_names(&msg.text, who))
+    });
+    c.picked
+        .update(|p| p.extend(named.into_iter().map(|(name, id)| (name, UserId(id)))));
+    let original = shown.trim().to_owned();
+    let text = RwSignal::new(shown);
     let busy = RwSignal::new(false);
     let area = NodeRef::<html::Textarea>::new();
     Effect::new(move |_| {
@@ -2412,7 +2425,7 @@ fn InlineEditor(msg: Message) -> impl IntoView {
                 c.editing.set(None);
                 return c.confirm_delete.set(Some(msg.clone()));
             }
-            if t == msg.text.trim() {
+            if t == original {
                 return c.editing.set(None);
             }
             busy.set(true);
@@ -2671,18 +2684,18 @@ fn threads_supported(chat: &ChatId) -> bool {
 }
 
 /// Message text: paragraphs with inline markup and code blocks.
-fn render_text(text: &str, who: &Mentionable, me_name: &str) -> AnyView {
+fn render_text(text: &str, who: &Mentionable, me: Me) -> AnyView {
     mostik_core::markup::parse_blocks(text)
         .into_iter()
         .map(|b| match b {
             mostik_core::markup::Block::Code(code) => view! { <pre class="code-block">{code}</pre> }.into_any(),
-            mostik_core::markup::Block::Text(t) => render_inline(&t, who, me_name),
+            mostik_core::markup::Block::Text(t) => render_inline(&t, who, me),
         })
         .collect_view()
         .into_any()
 }
 
-fn render_inline(text: &str, who: &Mentionable, me_name: &str) -> AnyView {
+fn render_inline(text: &str, who: &Mentionable, me: Me) -> AnyView {
     parse_inline(text, who)
         .into_iter()
         .map(|p| match p {
@@ -2703,8 +2716,20 @@ fn render_inline(text: &str, who: &Mentionable, me_name: &str) -> AnyView {
                 .into_any()
             }
             Inline::Mention(n) => {
-                let cls = if n == me_name { "mention me" } else { "mention" };
+                let cls = if n == me.name { "mention me" } else { "mention" };
                 view! { <span class=cls>"@"{n}</span> }.into_any()
+            }
+            Inline::UserMention { id, name } => {
+                let cls = if id == me.id { "mention me person" } else { "mention person" };
+                let name = name.unwrap_or_else(|| tr().unknown_user.to_owned());
+                let profile = UserId(id);
+                view! {
+                    <span class=cls on:click=move |e| {
+                        e.stop_propagation();
+                        ops::open_profile(ctx(), profile.clone());
+                    }>"@"{name}</span>
+                }
+                .into_any()
             }
             // The user is in every public chat that can be mentioned, and in the chat for `@all`.
             Inline::ChannelMention(n) => view! { <span class="mention me group">"@"{n}</span> }.into_any(),
@@ -2726,7 +2751,11 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
         )
     });
     let mine = msg.author == me_id;
-    let mentions_me = !mine && names.with(|who| mostik_core::markup::mentions_me(&msg.text, who, &me_name));
+    let me = Me {
+        id: &me_id.0,
+        name: &me_name,
+    };
+    let mentions_me = !mine && names.with(|who| mostik_core::markup::mentions_me(&msg.text, who, me));
     let key = (msg.chat_id.clone(), msg.ts);
 
     let mut cls = String::from("msg");
@@ -2908,7 +2937,8 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                         view! { <InlineEditor msg=m_editor.clone()/> }.into_any()
                     } else {
                         {
-                            let body = names.with(|who| render_text(&m_editor.text, who, &me_name));
+                            let me = Me { id: &me_id.0, name: &me_name };
+                            let body = names.with(|who| render_text(&m_editor.text, who, me));
                             let edited = m_editor.edited.then(|| view! { <span class="edited">{tr().edited}</span> });
                             (!m_editor.text.is_empty() || m_editor.edited).then(|| view! { <div class="msg-text">{body}{edited}</div> }).into_any()
                         }
@@ -2969,11 +2999,12 @@ fn reaction_title(s: &Snapshot, r: &Reaction) -> String {
 #[component]
 fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     let c = ctx();
-    let (author, names, me_name, chat) = c.snap.with_untracked(|s| {
+    let (author, names, me_name, me_id, chat) = c.snap.with_untracked(|s| {
         (
             s.user(&f.author).cloned(),
             s.mention_names(),
             s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
+            s.me.clone(),
             f.chat_id
                 .as_ref()
                 .and_then(|id| s.chat(id))
@@ -3014,7 +3045,7 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     view! {
         <div class="fwd">
             <div class="fwd-head"><Avatar user=face size=20/><b>{name}</b></div>
-            {(!f.text.is_empty()).then(|| view! { <div class="msg-text">{names.with(|who| render_text(&f.text, who, &me_name))}</div> })}
+            {(!f.text.is_empty()).then(|| view! { <div class="msg-text">{names.with(|who| render_text(&f.text, who, Me { id: &me_id.0, name: &me_name }))}</div> })}
             <Attachments list=f.attachments.clone()/>
             {footer}
         </div>
@@ -3125,7 +3156,10 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool) -> impl IntoView {
             <button on:click=move |_| { close_menus(c); ops::mark_unread(c, &m_unread); }>{tr().mark_unread}</button>
         })}
         <button on:click=move |_| { close_menus(c); copy(ops::message_link(&m_link)); c.notice.set(Some(tr().link_copied.into())); }>{tr().copy_link}</button>
-        <button on:click=move |_| { close_menus(c); copy(msg.text.clone()); }>{tr().copy_text}</button>
+        <button on:click=move |_| {
+            close_menus(c);
+            copy(c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0)));
+        }>{tr().copy_text}</button>
         <div class="menu-sep"></div>
         <button on:click=move |_| { close_menus(c); c.forwarding.set(Some(m_fwd.clone())); }>{tr().forward_message}</button>
         {(!in_thread).then(|| view! {
@@ -3446,7 +3480,12 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 }
                 Suggestion::Person(_) | Suggestion::Channel(_) | Suggestion::All => {
                     let name = match pick {
-                        Suggestion::Person(u) => u.display_name,
+                        Suggestion::Person(u) => {
+                            c.picked.update(|p| {
+                                p.insert(u.display_name.clone(), u.id);
+                            });
+                            u.display_name
+                        }
                         Suggestion::Channel(n) => n,
                         _ => MENTION_ALL.to_owned(),
                     };
@@ -4447,8 +4486,8 @@ fn DmList() -> impl IntoView {
                     if let Some(note) = &m.call {
                         return format!("📞 {}", if matches!(note, CallNote::Started { .. }) { tr().call_started } else { tr().call_ended });
                     }
-                    let text = mostik_core::markup::plain(&m.text);
-                    let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", mostik_core::markup::plain(&m.forwarded[0].text)) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
+                    let text = c.snap.with(|s| s.plain(&m.text));
+                    let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", c.snap.with(|s| s.plain(&m.forwarded[0].text))) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
                     if m.author == me && ch.kind != ChatKind::Notes { format!("{}: {text}", tr().you_label) } else { text }
                 }).unwrap_or_default();
                 let when = last.as_ref().map(|m| time::short_date(m.ts)).unwrap_or_default();
@@ -4537,11 +4576,9 @@ fn ActivityList() -> impl IntoView {
             let me = s.me.clone();
             let my_name = s.user(&me).map(|u| u.display_name.clone()).unwrap_or_default();
             let names = s.mention_names();
-            let people: Vec<&str> = names.people.iter().map(String::as_str).collect();
-            let channels: Vec<&str> = names.channels.iter().map(String::as_str).collect();
-            let who = Mentionable {
-                people: &people,
-                channels: &channels,
+            let my = Me {
+                id: &me.0,
+                name: &my_name,
             };
             let mut seen = HashSet::new();
             let mut out: Vec<(Message, ActivityKind)> = vec![];
@@ -4549,7 +4586,7 @@ fn ActivityList() -> impl IntoView {
                 if !seen.insert((m.chat_id.clone(), m.ts)) {
                     continue;
                 }
-                if m.author != me && mostik_core::markup::mentions_me(&m.text, &who, &my_name) {
+                if m.author != me && names.with(|who| mostik_core::markup::mentions_me(&m.text, who, my)) {
                     out.push((m.clone(), ActivityKind::Mention));
                 } else if let Some(parent) = m.thread_parent
                     && m.author != me
@@ -4620,7 +4657,7 @@ fn ActivityList() -> impl IntoView {
                         ActivityKind::Reactions(e) => format!("{} {}", e.join(" "), tr().act_reacted_in(&chat)),
                     };
                     let who = author.map(|u| u.display_name).unwrap_or_default();
-                    let text: String = mostik_core::markup::plain(&m.text).chars().take(140).collect();
+                    let text: String = c.snap.with(|s| s.plain(&m.text)).chars().take(140).collect();
                     let (id, ts, parent) = (m.chat_id.clone(), m.ts, m.thread_parent);
                     let selected = move || c.highlight.with(|h| h.as_ref().is_some_and(|(hc, hts)| *hc == id && *hts == ts));
                     let id2 = m.chat_id.clone();
@@ -4671,14 +4708,15 @@ fn ThreadsView() -> impl IntoView {
                 }
                 let open = c.thread.get().map(|p| (c.current.get(), p));
                 list.into_iter().map(|t| {
-                    let (author, title, names, me_name) = c.snap.with(|s| (
+                    let (author, title, names, me_name, me_id) = c.snap.with(|s| (
                         s.user(&t.parent.author).cloned(),
                         s.chat(&t.parent.chat_id).map(|ch| display_title(s, ch)).unwrap_or_default(),
                         s.mention_names(),
                         s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
+                        s.me.clone(),
                     ));
                     let name = author.as_ref().map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
-                    let text = names.with(|who| render_text(&t.parent.text, who, &me_name));
+                    let text = names.with(|who| render_text(&t.parent.text, who, Me { id: &me_id.0, name: &me_name }));
                     let replies = t.parent.thread.as_ref().map(|th| th.reply_count).unwrap_or(0);
                     let selected = open.as_ref() == Some(&(t.parent.chat_id.clone(), t.parent.ts));
                     let unread = t.unread;
@@ -4780,7 +4818,7 @@ fn DraftsView() -> impl IntoView {
                                 }}</span>
                                 <span class="dm-body">
                                     <span class="dm-name">{title}</span>
-                                    <span class="dm-preview">{mostik_core::markup::plain(&text)}</span>
+                                    <span class="dm-preview">{c.snap.with(|s| s.plain(&text))}</span>
                                 </span>
                                 <button class="icon-btn" title=tr().delete_draft on:click=move |e| {
                                     e.stop_propagation();
@@ -4797,8 +4835,8 @@ fn DraftsView() -> impl IntoView {
                     }
                     list.into_iter().map(|(m, title)| {
                         let id = m.chat_id.clone();
-                        let text = mostik_core::markup::plain(&m.text);
-                        let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", mostik_core::markup::plain(&m.forwarded[0].text)) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
+                        let text = c.snap.with(|s| s.plain(&m.text));
+                        let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", c.snap.with(|s| s.plain(&m.forwarded[0].text))) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
                         view! {
                             <div class="draft-row" on:click=move |_| go(id.clone())>
                                 <span class="dm-body">
@@ -5440,12 +5478,9 @@ fn DeleteDialog() -> impl IntoView {
         close();
     };
     let preview = move || {
-        c.confirm_delete.get().map(|m| {
-            mostik_core::markup::plain(&m.text)
-                .chars()
-                .take(200)
-                .collect::<String>()
-        })
+        c.confirm_delete
+            .get()
+            .map(|m| c.snap.with(|s| s.plain(&m.text)).chars().take(200).collect::<String>())
     };
     view! {
         <div class="modal-backdrop" on:click=move |_| close()>

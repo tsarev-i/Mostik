@@ -57,6 +57,8 @@ pub enum LiveEvent {
     Upsert {
         message: Box<Message>,
         author: Option<User>,
+        #[serde(default)]
+        mentioned: Vec<User>,
     },
     Deleted {
         chat_id: ChatId,

@@ -158,7 +158,7 @@ async fn run() -> Res<()> {
 
     // 1. Send.
     let text = format!("Mostik: self-test {}", request_id());
-    let resp = ctx.push(wire::plain_text(&chat_id, &request_id(), &text, &[])).await?;
+    let resp = ctx.push(wire::plain_text(&chat_id, &request_id(), &text)).await?;
     println!("   push response: {}", shape(&resp));
     let ts = sent_ts(&resp)?;
     tokio::time::sleep(SETTLE).await;
@@ -238,12 +238,12 @@ async fn run() -> Res<()> {
     // 7. Thread: message → thread reply → check → delete both.
     let parent_text = format!("Mostik: thread parent {}", request_id());
     let r = ctx
-        .push(wire::plain_text(&chat_id, &request_id(), &parent_text, &[]))
+        .push(wire::plain_text(&chat_id, &request_id(), &parent_text))
         .await?;
     let pts = sent_ts(&r)?;
     let thread = mostik_yandex::convert::thread_chat_id(&chat_id, pts).ok_or("this chat does not support threads")?;
     let r = ctx
-        .push(wire::plain_text(&thread, &request_id(), "Mostik: thread reply", &[]))
+        .push(wire::plain_text(&thread, &request_id(), "Mostik: thread reply"))
         .await;
     all_ok &= step(
         "thread reply",

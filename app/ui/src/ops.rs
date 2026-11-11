@@ -76,11 +76,7 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
             && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
         // Only an unread feed message from someone else can add a mention.
         let counts = !mine && !viewing && m.thread_parent.is_none();
-        let mentioned = counts && {
-            let me_name = s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default();
-            s.mention_names()
-                .with(|who| mostik_core::markup::mentions_me(&m.text, who, &me_name))
-        };
+        let mentioned = counts && s.mentions_me(&m.text);
         if let Some(parent) = m.thread_parent {
             if let Some(p) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == parent) {
                 let t = p.thread.get_or_insert(ThreadSummary {
@@ -162,7 +158,16 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp) {
 
 pub fn handle_event(c: Ctx, ev: LiveEvent) {
     match ev {
-        LiveEvent::Upsert { message, author } => upsert(c, *message, author),
+        LiveEvent::Upsert {
+            message,
+            author,
+            mentioned,
+        } => {
+            if !mentioned.is_empty() {
+                c.snap.update(|s| learn_users(s, mentioned));
+            }
+            upsert(c, *message, author)
+        }
         LiveEvent::Deleted { chat_id, ts } => remove(c, &chat_id, ts),
         LiveEvent::Reactions {
             chat_id,
@@ -555,10 +560,7 @@ pub fn load_threads(c: Ctx) {
 /// subscribes them.
 fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
     let (me, mentioned, parent_msg) = c.snap.with_untracked(|s| {
-        let me_name = s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default();
-        let mentioned = s
-            .mention_names()
-            .with(|who| mostik_core::markup::mentions_me(&m.text, who, &me_name));
+        let mentioned = s.mentions_me(&m.text);
         let parent_msg = s
             .messages
             .iter()
@@ -667,7 +669,34 @@ pub fn open_followed_thread(c: Ctx, parent: Message) {
     });
 }
 
+/// People the text may name in `@Name` mentions, as `(name, id)` for
+/// [`mostik_core::markup::names_to_ids`]: the ones picked from suggestions, then everyone known
+/// whose name is unique.
+fn mention_targets(c: Ctx) -> Vec<(String, String)> {
+    let mut known: Vec<(String, String)> = c
+        .picked
+        .with_untracked(|p| p.iter().map(|(name, id)| (name.clone(), id.0.clone())).collect());
+    c.snap.with_untracked(|s| {
+        for u in s.users.iter().filter(|u| u.has_name()) {
+            let unique = s.users.iter().filter(|x| x.display_name == u.display_name).count() == 1;
+            if unique && !known.iter().any(|(name, _)| name == &u.display_name) {
+                known.push((u.display_name.clone(), u.id.0.clone()));
+            }
+        }
+    });
+    known
+}
+
+/// Text to send: `@Name` mentions become `@<guid>`, the way Telemost writes them.
+fn with_mention_ids(c: Ctx, text: &str) -> String {
+    if !text.contains('@') {
+        return text.to_owned();
+    }
+    mostik_core::markup::names_to_ids(text, &mention_targets(c))
+}
+
 pub async fn send(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>) -> Result<(), String> {
+    let text = with_mention_ids(c, &text);
     let me = c.snap.with_untracked(|s| s.me.clone());
     let message = if c.live {
         bridge::send_message(&chat.0, &text, thread).await?
@@ -698,7 +727,7 @@ pub async fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Times
         return Err(tr().only_in_app_files.into());
     }
     let paths: Vec<String> = c.pending_files.get_untracked().into_iter().map(|f| f.path).collect();
-    let sent = bridge::send_files(&chat.0, thread, paths, &text).await?;
+    let sent = bridge::send_files(&chat.0, thread, paths, &with_mention_ids(c, &text)).await?;
     c.pending_files.set(vec![]);
     for m in sent {
         upsert(c, m, None);
@@ -707,6 +736,7 @@ pub async fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Times
 }
 
 pub async fn edit(c: Ctx, m: Message, text: String) -> Result<(), String> {
+    let text = with_mention_ids(c, &text);
     if c.live {
         bridge::edit_message(&m, &text).await?;
     }

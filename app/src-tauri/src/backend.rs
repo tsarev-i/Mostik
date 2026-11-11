@@ -278,6 +278,7 @@ pub async fn history(
         .map_or(0, Vec::len);
     let data = convert::from_history(&body, Some(&live.me));
     let mut users = data.users;
+    users.extend(unnamed_mentions(&data.messages, &users));
     if let Ok(mut sh) = live.shared.lock() {
         if before.is_none() && thread.is_none() {
             sh.last.extend(data.last);
@@ -361,7 +362,7 @@ pub async fn send_message(
 ) -> Result<Message, String> {
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    let resp = push(&live, wire::plain_text(&target, &request_id(), &text, &[])).await?;
+    let resp = push(&live, wire::plain_text(&target, &request_id(), &text)).await?;
     let ts = resp
         .pointer("/MessageInfo/TimestampMcs")
         .and_then(Value::as_u64)
@@ -823,7 +824,10 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
                 }
                 return;
             }
-            if let LiveEvent::Upsert { message, author } = &ev {
+            if let LiveEvent::Upsert { message, mentioned, .. } = &ev {
+                learn_mentions(app, shared, message, mentioned);
+            }
+            if let LiveEvent::Upsert { message, author, .. } = &ev {
                 notify(app, shared, message, author.as_ref());
             }
             let _ = app.emit(EVENT, &ev);
@@ -886,10 +890,80 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
         held
     };
     for ev in held {
-        if let LiveEvent::Upsert { message, author } = &ev {
+        if let LiveEvent::Upsert {
+            message,
+            author,
+            mentioned,
+        } = &ev
+        {
+            learn_mentions(&app, &shared, message, mentioned);
             notify(&app, &shared, message, author.as_ref());
         }
     }
+}
+
+/// People mentioned as `@<guid>` in `messages` who are not among `known`: stand-ins for the
+/// directory to name.
+fn unnamed_mentions(messages: &[Message], known: &[User]) -> Vec<User> {
+    let mut out: Vec<User> = Vec::new();
+    for id in messages
+        .iter()
+        .flat_map(|m| mostik_core::markup::mentioned_ids(&m.text))
+    {
+        if !known.iter().chain(&out).any(|u| u.id.0 == id) {
+            out.push(stand_in(UserId(id)));
+        }
+    }
+    out
+}
+
+/// A person known only by id, until the directory names them.
+fn stand_in(id: UserId) -> User {
+    User {
+        id,
+        display_name: String::new(),
+        title: None,
+        presence: mostik_core::Presence::Offline,
+        status: None,
+        availability: Default::default(),
+        is_robot: false,
+        avatar: None,
+    }
+}
+
+/// Names of the people a new message mentions: the ones Telemost sent with it are recorded,
+/// the rest are asked from the directory and handed to the UI as [`LiveEvent::Users`].
+fn learn_mentions(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, m: &Message, mentioned: &[User]) {
+    let unknown: Vec<User> = {
+        let Ok(mut sh) = shared.lock() else { return };
+        for u in mentioned.iter().filter(|u| u.has_name()) {
+            sh.names.insert(u.id.0.clone(), u.display_name.clone());
+        }
+        let mut unknown = unnamed_mentions(std::slice::from_ref(m), mentioned);
+        unknown.retain(|u| !sh.names.contains_key(&u.id.0));
+        unknown
+    };
+    if unknown.is_empty() {
+        return;
+    }
+    let (app, shared) = (app.clone(), shared.clone());
+    tauri::async_runtime::spawn(async move {
+        let Ok(live) = live(&app.state::<AppState>()).await else {
+            return;
+        };
+        let mut users = unknown;
+        fill_profiles(&live.web, &mut users).await;
+        users.retain(User::has_name);
+        if users.is_empty() {
+            return;
+        }
+        if let Ok(mut sh) = shared.lock() {
+            for u in &users {
+                sh.names.insert(u.id.0.clone(), u.display_name.clone());
+            }
+        }
+        let _ = app.emit(EVENT, &LiveEvent::Users { users });
+    });
 }
 
 async fn fetch_chat(live: &Live, chat_id: &str) -> Option<(mostik_core::Chat, Vec<User>)> {
@@ -902,16 +976,7 @@ async fn fetch_chat(live: &Live, chat_id: &str) -> Option<(mostik_core::Chat, Ve
     if let ChatKind::Direct { peer } = &chat.kind {
         let known = live.shared.lock().is_ok_and(|sh| sh.names.contains_key(&peer.0));
         if !known {
-            let mut peer = vec![User {
-                id: peer.clone(),
-                display_name: String::new(),
-                title: None,
-                presence: mostik_core::Presence::Offline,
-                status: None,
-                availability: Default::default(),
-                is_robot: false,
-                avatar: None,
-            }];
+            let mut peer = vec![stand_in(peer.clone())];
             fill_profiles(&live.web, &mut peer).await;
             for u in &mut peer {
                 if !u.has_name() {
@@ -949,19 +1014,22 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         .unwrap_or_default();
     let direct = !m.chat_id.0.contains('/');
     // Only "direct and mentions" needs to know about mentions.
+    let people: Vec<&str> = sh.names.values().map(String::as_str).collect();
+    let channels: Vec<&str> = sh.channels.iter().map(String::as_str).collect();
+    let ids: Vec<(&str, &str)> = sh.names.iter().map(|(i, n)| (i.as_str(), n.as_str())).collect();
+    let names = mostik_core::markup::Mentionable {
+        people: &people,
+        channels: &channels,
+        ids: &ids,
+    };
     let mentioned = || {
-        sh.me
-            .as_ref()
-            .and_then(|me| sh.names.get(&me.0))
-            .is_some_and(|me_name| {
-                let people: Vec<&str> = sh.names.values().map(String::as_str).collect();
-                let channels: Vec<&str> = sh.channels.iter().map(String::as_str).collect();
-                let who = mostik_core::markup::Mentionable {
-                    people: &people,
-                    channels: &channels,
-                };
-                mostik_core::markup::mentions_me(&m.text, &who, me_name)
-            })
+        sh.me.as_ref().is_some_and(|me| {
+            let me = mostik_core::markup::Me {
+                id: &me.0,
+                name: sh.names.get(&me.0).map_or("", String::as_str),
+            };
+            mostik_core::markup::mentions_me(&m.text, &names, me)
+        })
     };
     match prefs.notify.as_str() {
         "nothing" => return,
@@ -986,7 +1054,7 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
     let body: String = if m.call.is_some() {
         text(app, "📞 Начался созвон", "📞 A call started").to_owned()
     } else if prefs.preview {
-        mostik_core::markup::plain(&m.text).chars().take(200).collect()
+        mostik_core::markup::plain(&m.text, &names).chars().take(200).collect()
     } else {
         text(app, "Новое сообщение", "New message").to_owned()
     };
@@ -1684,7 +1752,7 @@ pub async fn send_files(
                 &live,
                 &chat_id,
                 thread,
-                wire::plain_text(&target, &request_id(), &text, &[]),
+                wire::plain_text(&target, &request_id(), &text),
                 &text,
             )
             .await?,

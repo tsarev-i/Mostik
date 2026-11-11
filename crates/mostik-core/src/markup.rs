@@ -3,8 +3,9 @@
 //! Supports the same as the Messenger: `**bold**`, `__italic__`, `~~strike~~`,
 //! `++underline++`, `` `code` ``, `[text](url)` links and bare `http(s)://…` links,
 //! code blocks between ```` ``` ```` lines. Nesting is not supported.
-//! Mentions are recognised by known names: `@First Last` for people, `@<name>` for public group chats
-//! (a group mention, like user groups in Slack) and `@all` for everyone in the chat.
+//! Mentions: `@<guid>` for people, as Telemost writes them (shown by name), and by known names:
+//! `@First Last` for people (how older Mostik versions wrote them), `@<name>` for public group
+//! chats (a group mention, like user groups in Slack) and `@all` for everyone in the chat.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inline {
@@ -16,6 +17,11 @@ pub enum Inline {
     Code(String),
     /// Person's name without the `@`.
     Mention(String),
+    /// `@<guid>`: a person by their Telemost id, with the name if it is known.
+    UserMention {
+        id: String,
+        name: Option<String>,
+    },
     /// Public group chat name without the `@`: mentions its members.
     ChannelMention(String),
     /// `@all`: everyone in the chat.
@@ -37,12 +43,32 @@ pub struct Mentionable<'a> {
     pub people: &'a [&'a str],
     /// Names of public group chats the user is a member of.
     pub channels: &'a [&'a str],
+    /// Known people as `(id, display name)`, for `@<guid>`.
+    pub ids: &'a [(&'a str, &'a str)],
 }
 
 impl Mentionable<'_> {
+    /// Name of the person with Telemost id `id`, if known.
+    pub fn name_of(&self, id: &str) -> Option<&str> {
+        self.ids
+            .iter()
+            .find(|(i, n)| *i == id && !n.is_empty() && *n != id)
+            .map(|(_, n)| *n)
+    }
+
     /// Mention at the start of `after` (the text right after `@`): the span and its length in bytes.
     /// The mention must end at a word boundary; the longest name wins, a person over a chat of the same name.
     fn find(&self, after: &str) -> Option<(Inline, usize)> {
+        if let Some(id) = guid_at(after) {
+            let name = self.name_of(id).map(str::to_owned);
+            return Some((
+                Inline::UserMention {
+                    id: id.to_owned(),
+                    name,
+                },
+                id.len(),
+            ));
+        }
         let ends_word = |len: usize| ends_word(&after[len..]);
         let fits = |n: &&&str| !n.is_empty() && after.starts_with(**n) && ends_word(n.len());
         let person = self.people.iter().filter(fits).max_by_key(|n| n.len());
@@ -79,11 +105,31 @@ fn ends_word(rest: &str) -> bool {
     }
 }
 
+/// Length of a Telemost user id: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` in hex digits.
+const GUID_LEN: usize = 36;
+
+/// Whether `s` is a Telemost user id.
+pub fn is_guid(s: &str) -> bool {
+    s.len() == GUID_LEN
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
+}
+
+/// The user id at the start of `after` (the text right after `@`), ending at a word boundary.
+fn guid_at(after: &str) -> Option<&str> {
+    let id = after.get(..GUID_LEN)?;
+    (is_guid(id) && ends_word(&after[GUID_LEN..])).then_some(id)
+}
+
 /// Owned names behind a [`Mentionable`], for keeping them in state.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MentionNames {
     pub people: Vec<String>,
     pub channels: Vec<String>,
+    /// Known people as `(id, display name)`.
+    pub ids: Vec<(String, String)>,
 }
 
 impl MentionNames {
@@ -91,11 +137,87 @@ impl MentionNames {
     pub fn with<R>(&self, f: impl FnOnce(&Mentionable) -> R) -> R {
         let people: Vec<&str> = self.people.iter().map(String::as_str).collect();
         let channels: Vec<&str> = self.channels.iter().map(String::as_str).collect();
+        let ids: Vec<(&str, &str)> = self.ids.iter().map(|(i, n)| (i.as_str(), n.as_str())).collect();
         f(&Mentionable {
             people: &people,
             channels: &channels,
+            ids: &ids,
         })
     }
+}
+
+/// Copies `text`, letting `f` replace what follows an `@` at the start of a word: `f` gets the
+/// text after the `@` and returns the replacement and how many bytes it replaces. Code spans and
+/// code blocks are copied as they are.
+fn map_mentions(text: &str, mut f: impl FnMut(&str) -> Option<(String, usize)>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(ch) = rest.chars().next() {
+        let code = if let Some(after) = rest.strip_prefix("```") {
+            after.find("```").map(|end| 3 + end + 3)
+        } else if let Some(after) = rest.strip_prefix('`') {
+            after.find('`').map(|end| 1 + end + 1)
+        } else {
+            None
+        };
+        if let Some(len) = code {
+            out.push_str(&rest[..len]);
+            rest = &rest[len..];
+            continue;
+        }
+        let word_start = out.chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        if ch == '@'
+            && word_start
+            && let Some((with, len)) = f(&rest[1..])
+        {
+            out.push('@');
+            out.push_str(&with);
+            rest = &rest[1 + len..];
+            continue;
+        }
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
+/// Ids of the people mentioned as `@<guid>` outside code, each once: Telemost's `MentionedUserIds`.
+pub fn mentioned_ids(text: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    map_mentions(text, |after| {
+        if let Some(id) = guid_at(after)
+            && !ids.iter().any(|i| i == id)
+        {
+            ids.push(id.to_owned());
+        }
+        None
+    });
+    ids
+}
+
+/// For editing: `@<guid>` of known people becomes `@Name`. Returns the text and the people it
+/// named as `(name, id)`, so [`names_to_ids`] can turn them back.
+pub fn ids_to_names(text: &str, who: &Mentionable) -> (String, Vec<(String, String)>) {
+    let mut named = Vec::new();
+    let out = map_mentions(text, |after| {
+        let id = guid_at(after)?;
+        let name = who.name_of(id)?;
+        named.push((name.to_owned(), id.to_owned()));
+        Some((name.to_owned(), id.len()))
+    });
+    (out, named)
+}
+
+/// For sending: `@Name` of a person in `known` (`(name, id)`) becomes `@<guid>`, the way Telemost
+/// writes mentions. The longest name wins; the name must end at a word boundary.
+pub fn names_to_ids(text: &str, known: &[(String, String)]) -> String {
+    map_mentions(text, |after| {
+        known
+            .iter()
+            .filter(|(name, _)| !name.is_empty() && after.starts_with(name.as_str()) && ends_word(&after[name.len()..]))
+            .max_by_key(|(name, _)| name.len())
+            .map(|(name, id)| (id.clone(), name.len()))
+    })
 }
 
 /// Message block: plain text with inline markup, or a code block.
@@ -228,44 +350,61 @@ pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
     out
 }
 
-/// Text without markup, for previews in search, notifications and dialogs.
-pub fn plain(text: &str) -> String {
-    parse_inline(&text.replace("```", ""), &Mentionable::default())
+/// Text without markup, for previews in search, notifications and dialogs; `who` names the
+/// people mentioned as `@<guid>`.
+pub fn plain(text: &str, who: &Mentionable) -> String {
+    // Names are left as they are written: only ids need replacing.
+    let who = Mentionable {
+        people: &[],
+        channels: &[],
+        ..*who
+    };
+    plain_inline(&text.replace("```", ""), &who)
+}
+
+fn plain_inline(text: &str, who: &Mentionable) -> String {
+    parse_inline(text, who)
         .into_iter()
         .map(|p| match p {
+            Inline::Bold(t) | Inline::Italic(t) | Inline::Strike(t) | Inline::Underline(t) => plain_inline(&t, who),
+            // A bare link is its own caption: parsing that again gives the same link, forever.
+            Inline::Link { text, url } if text != url => plain_inline(&text, who),
             Inline::Text(t)
-            | Inline::Bold(t)
-            | Inline::Italic(t)
-            | Inline::Strike(t)
-            | Inline::Underline(t)
             | Inline::Code(t)
             | Inline::Mention(t)
             | Inline::ChannelMention(t)
             | Inline::Link { text: t, .. } => t,
+            Inline::UserMention { name, .. } => format!("@{}", name.as_deref().unwrap_or(crate::UNKNOWN_USER)),
             Inline::MentionAll => format!("@{MENTION_ALL}"),
         })
         .collect()
 }
 
-/// Whether `text` mentions the user named `me_name`: by name, through a public chat they are in
+/// The user a mention may point at: their Telemost id and display name.
+#[derive(Debug, Clone, Copy)]
+pub struct Me<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+}
+
+/// Whether `text` mentions the user `me`: by id, by name, through a public chat they are in
 /// (`who.channels` holds only such chats) or with `@all`. A mention inside bold, italic, strike,
 /// underline or a link caption counts; code does not.
-pub fn mentions_me(text: &str, who: &Mentionable, me_name: &str) -> bool {
+pub fn mentions_me(text: &str, who: &Mentionable, me: Me) -> bool {
     parse_blocks(text).iter().any(|b| match b {
-        Block::Text(t) => inline_mentions(t, who, me_name),
+        Block::Text(t) => inline_mentions(t, who, me),
         Block::Code(_) => false,
     })
 }
 
-fn inline_mentions(text: &str, who: &Mentionable, me_name: &str) -> bool {
+fn inline_mentions(text: &str, who: &Mentionable, me: Me) -> bool {
     parse_inline(text, who).iter().any(|p| match p {
-        Inline::Mention(n) => !me_name.is_empty() && n == me_name,
+        Inline::Mention(n) => !me.name.is_empty() && n == me.name,
+        Inline::UserMention { id, .. } => !me.id.is_empty() && id == me.id,
         Inline::ChannelMention(_) | Inline::MentionAll => true,
-        Inline::Bold(t) | Inline::Italic(t) | Inline::Strike(t) | Inline::Underline(t) => {
-            inline_mentions(t, who, me_name)
-        }
+        Inline::Bold(t) | Inline::Italic(t) | Inline::Strike(t) | Inline::Underline(t) => inline_mentions(t, who, me),
         // A bare link is its own caption: parsing that again gives the same link, forever.
-        Inline::Link { text, url } => text != url && inline_mentions(text, who, me_name),
+        Inline::Link { text, url } => text != url && inline_mentions(text, who, me),
         Inline::Text(_) | Inline::Code(_) => false,
     })
 }
@@ -287,14 +426,15 @@ mod tests {
         let who = Mentionable {
             people: &[],
             channels: &channels,
+            ids: &[],
         };
-        assert!(!mentions_me("встреча @all-hands в 15:00", &who, "Ivan"));
-        assert!(!mentions_me("@all_devs", &who, "Ivan"));
-        assert!(!mentions_me("@backend-team, @backend.team", &who, "Ivan"));
-        assert!(mentions_me("всем @all.", &who, "Ivan"));
-        assert!(mentions_me("@all, привет", &who, "Ivan"));
-        assert!(mentions_me("в @backend: деплой", &who, "Ivan"));
-        assert!(mentions_me("@backend's deploy", &who, "Ivan"));
+        assert!(!mentions_me("встреча @all-hands в 15:00", &who, me("Ivan")));
+        assert!(!mentions_me("@all_devs", &who, me("Ivan")));
+        assert!(!mentions_me("@backend-team, @backend.team", &who, me("Ivan")));
+        assert!(mentions_me("всем @all.", &who, me("Ivan")));
+        assert!(mentions_me("@all, привет", &who, me("Ivan")));
+        assert!(mentions_me("в @backend: деплой", &who, me("Ivan")));
+        assert!(mentions_me("@backend's deploy", &who, me("Ivan")));
     }
 
     #[test]
@@ -303,25 +443,31 @@ mod tests {
         let who = Mentionable {
             people: &names,
             channels: &[],
+            ids: &[],
         };
-        assert!(mentions_me("**@Ivan Petrov** please review", &who, "Ivan Petrov"));
-        assert!(mentions_me("__@all__ release", &who, "Ivan Petrov"));
-        assert!(mentions_me("[@all now](https://example.org)", &who, "Ivan Petrov"));
+        assert!(mentions_me("**@Ivan Petrov** please review", &who, me("Ivan Petrov")));
+        assert!(mentions_me("__@all__ release", &who, me("Ivan Petrov")));
+        assert!(mentions_me("[@all now](https://example.org)", &who, me("Ivan Petrov")));
         // Bare links and links captioned with a link end, with or without a mention around.
         assert!(!mentions_me(
             "see https://example.org/x and [https://a.example](https://b.example)",
             &who,
-            "Ivan Petrov"
+            me("Ivan Petrov")
         ));
-        assert!(mentions_me("@all https://example.org", &who, "Ivan Petrov"));
-        assert!(!mentions_me("`@all` in code", &who, "Ivan Petrov"));
-        assert!(!mentions_me("```\n@all\n```", &who, "Ivan Petrov"));
+        assert!(mentions_me("@all https://example.org", &who, me("Ivan Petrov")));
+        assert!(!mentions_me("`@all` in code", &who, me("Ivan Petrov")));
+        assert!(!mentions_me("```\n@all\n```", &who, me("Ivan Petrov")));
     }
 
     const NONE: Mentionable = Mentionable {
         people: &[],
         channels: &[],
+        ids: &[],
     };
+
+    fn me(name: &str) -> Me<'_> {
+        Me { id: "", name }
+    }
 
     fn t(s: &str) -> Inline {
         Text(s.into())
@@ -331,6 +477,7 @@ mod tests {
         Mentionable {
             people: names,
             channels: &[],
+            ids: &[],
         }
     }
 
@@ -381,6 +528,7 @@ mod tests {
         let who = Mentionable {
             people: &["Ivan"],
             channels: &["backend", "Ivan team"],
+            ids: &[],
         };
         assert_eq!(
             parse_inline("@backend, @Ivan team and @ALL!", &who),
@@ -397,7 +545,7 @@ mod tests {
             parse_inline("@backends @allow a@all", &who),
             vec![t("@backends @allow a@all")]
         );
-        assert_eq!(plain("hi @all"), "hi @all");
+        assert_eq!(plain("hi @all", &NONE), "hi @all");
     }
 
     #[test]
@@ -405,19 +553,89 @@ mod tests {
         let who = Mentionable {
             people: &["Ivan", "Anna"],
             channels: &["backend"],
+            ids: &[],
         };
-        assert!(mentions_me("hi @Ivan", &who, "Ivan"));
-        assert!(!mentions_me("hi @Anna", &who, "Ivan"));
-        assert!(mentions_me("ping @backend", &who, "Ivan"));
-        assert!(mentions_me("@all release", &who, "Ivan"));
-        assert!(!mentions_me("ping @frontend", &who, "Ivan"));
-        assert!(!mentions_me("```\n@all\n```", &who, "Ivan"));
-        assert!(!mentions_me("@Ivan", &who, ""));
+        assert!(mentions_me("hi @Ivan", &who, me("Ivan")));
+        assert!(!mentions_me("hi @Anna", &who, me("Ivan")));
+        assert!(mentions_me("ping @backend", &who, me("Ivan")));
+        assert!(mentions_me("@all release", &who, me("Ivan")));
+        assert!(!mentions_me("ping @frontend", &who, me("Ivan")));
+        assert!(!mentions_me("```\n@all\n```", &who, me("Ivan")));
+        assert!(!mentions_me("@Ivan", &who, me("")));
+    }
+
+    const ANNA: &str = "aaaa0001-0000-4000-8000-000000000001";
+    const IVAN: &str = "bbbb0002-0000-4000-8000-000000000002";
+
+    #[test]
+    fn mentions_by_id() {
+        let ids = [(ANNA, "Anna Smirnova")];
+        let who = Mentionable {
+            people: &["Anna Smirnova"],
+            channels: &[],
+            ids: &ids,
+        };
+        assert_eq!(
+            parse_inline(&format!("@{ANNA} hi, CC @{IVAN}"), &who),
+            vec![
+                UserMention {
+                    id: ANNA.into(),
+                    name: Some("Anna Smirnova".into())
+                },
+                t(" hi, CC "),
+                UserMention {
+                    id: IVAN.into(),
+                    name: None
+                },
+            ]
+        );
+        // Not an id: too short, longer, or not at the start of a word.
+        assert_eq!(
+            parse_inline(&format!("@{}", &ANNA[..35]), &who),
+            vec![t(&format!("@{}", &ANNA[..35]))]
+        );
+        assert_eq!(parse_inline(&format!("@{ANNA}0"), &who), vec![t(&format!("@{ANNA}0"))]);
+        assert_eq!(parse_inline(&format!("a@{ANNA}"), &who), vec![t(&format!("a@{ANNA}"))]);
+        assert_eq!(
+            plain(&format!("**@{ANNA}** and @{IVAN}"), &who),
+            "@Anna Smirnova and @Unknown user"
+        );
+        let me_ivan = Me { id: IVAN, name: "Ivan" };
+        assert!(mentions_me(&format!("CC @{IVAN}, look"), &who, me_ivan));
+        assert!(!mentions_me(&format!("CC @{ANNA}"), &who, me_ivan));
+        assert!(!mentions_me(&format!("`@{IVAN}`"), &who, me_ivan));
+    }
+
+    #[test]
+    fn converts_mentions_for_sending_and_editing() {
+        let known = vec![
+            ("Anna".to_owned(), IVAN.to_owned()),
+            ("Anna Smirnova".to_owned(), ANNA.to_owned()),
+        ];
+        assert_eq!(
+            names_to_ids("@Anna Smirnova, @Anna and @all; `@Anna` a@Anna @Annabel", &known),
+            format!("@{ANNA}, @{IVAN} and @all; `@Anna` a@Anna @Annabel")
+        );
+        assert_eq!(
+            names_to_ids("```\n@Anna\n``` @Anna", &known),
+            format!("```\n@Anna\n``` @{IVAN}")
+        );
+        let text = format!("hi @{ANNA} and @{IVAN} `@{ANNA}` @{ANNA}");
+        assert_eq!(mentioned_ids(&text), vec![ANNA.to_owned(), IVAN.to_owned()]);
+        let ids = [(ANNA, "Anna Smirnova")];
+        let who = Mentionable { ids: &ids, ..NONE };
+        let (edit, named) = ids_to_names(&text, &who);
+        assert_eq!(edit, format!("hi @Anna Smirnova and @{IVAN} `@{ANNA}` @Anna Smirnova"));
+        assert_eq!(named[0], ("Anna Smirnova".to_owned(), ANNA.to_owned()));
+        assert_eq!(names_to_ids(&edit, &named), text);
     }
 
     #[test]
     fn plain_strips_markers() {
-        assert_eq!(plain("build **rc2**, `code` and ~~old~~"), "build rc2, code and old");
+        assert_eq!(
+            plain("build **rc2**, `code` and ~~old~~", &NONE),
+            "build rc2, code and old"
+        );
     }
 
     #[test]
@@ -452,7 +670,7 @@ mod tests {
                 t(")")
             ]
         );
-        assert_eq!(plain("[docs](https://e.org)"), "docs");
+        assert_eq!(plain("[docs](https://e.org)", &NONE), "docs");
     }
 
     #[test]

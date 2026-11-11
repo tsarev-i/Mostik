@@ -52,6 +52,8 @@ pub struct Tr {
     pub you_short: &'static str,
     pub someone: &'static str,
     pub user: &'static str,
+    /// A mentioned person whose name is not known yet.
+    pub unknown_user: &'static str,
     pub bot: &'static str,
     pub notes: &'static str,
     // Login
@@ -379,6 +381,7 @@ pub static RU: Tr = Tr {
     you_short: "вы",
     someone: "Кто-то",
     user: "Пользователь",
+    unknown_user: "Неизвестный пользователь",
     bot: "БОТ",
     notes: "Заметки",
     login_button: "Войти через Яндекс ID",
@@ -710,6 +713,7 @@ pub static EN: Tr = Tr {
     you_short: "you",
     someone: "Someone",
     user: "User",
+    unknown_user: "Unknown user",
     bot: "APP",
     notes: "Notes",
     login_button: "Sign in with Yandex ID",
