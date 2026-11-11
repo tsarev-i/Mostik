@@ -277,6 +277,11 @@ button:disabled { opacity: 0.4; cursor: default; }
 .sb-row.selected { background: var(--sidebar-selected); color: #fff; }
 .sb-row.unread { color: #fff; font-weight: 900; }
 .sb-row.muted { opacity: 0.55; }
+.window.chat-dragging { cursor: grabbing; user-select: none; }
+.window.chat-dragging .sb-row:hover:not(.selected) { background: transparent; }
+.sb-row.dragging { opacity: 0.4; }
+.sb-row.drop-before { box-shadow: 0 -2px 0 #1d9bd1; }
+.sb-row.drop-after { box-shadow: 0 2px 0 #1d9bd1; }
 
 .sb-icon { width: 20px; display: grid; place-items: center; flex: none; opacity: 0.85; }
 .sb-icon.face { opacity: 1; }

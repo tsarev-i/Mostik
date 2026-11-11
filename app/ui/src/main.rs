@@ -6,6 +6,7 @@ mod emoji;
 mod i18n;
 mod icons;
 mod ops;
+mod order;
 mod settings;
 mod sound;
 mod time;

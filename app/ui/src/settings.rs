@@ -38,6 +38,8 @@ pub enum SidebarSort {
     Alphabetical,
     #[default]
     Recency,
+    /// The order the user dragged the chats into; sections never reordered stay by recency.
+    Custom,
 }
 
 /// Sidebar themes. Own colours and names, not copies of Slack themes.
