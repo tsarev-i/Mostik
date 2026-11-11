@@ -1734,6 +1734,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
         let section_id = section_id.clone();
         view! {
             <div class="sb-section" data-section=section_id.clone()>
+                <div class="sb-section-head">
                 <button class="sb-section-title" on:click=toggle.clone() on:contextmenu={
                     let id = section.id.clone();
                     move |e: ev::MouseEvent| {
@@ -1746,6 +1747,18 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     </span>
                     <span>{tr().section(&section.id, &section.title)}</span>
                 </button>
+                // A quick "+" on hover, as in Slack: works even when the section is collapsed.
+                {(section_id == "channels").then(|| view! {
+                    <button class="sb-section-add" title=tr().add_channels on:mousedown=|e| e.stop_propagation() on:click=move |e| open_menu_below(c, &e, CtxTarget::AddChannels)>
+                        <Icon icon=I::Plus size=14/>
+                    </button>
+                })}
+                {(section_id == "dms").then(|| view! {
+                    <button class="sb-section-add" title=tr().new_message on:click=move |_| c.new_message.set(true)>
+                        <Icon icon=I::Plus size=14/>
+                    </button>
+                })}
+                </div>
                 {let section_id = section_id.clone(); move || {
                     // As in Slack: a collapsed section still shows the open chat and chats with unread messages.
                     let folded = collapsed.get();

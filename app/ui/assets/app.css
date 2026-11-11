@@ -282,6 +282,23 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .sb-section-title:hover { background: var(--sidebar-hover); }
 
+.sb-section-head { position: relative; }
+.sb-section-add {
+  position: absolute;
+  top: 2px;
+  right: 12px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.75);
+  opacity: 0;
+}
+.sb-section-head:hover .sb-section-add,
+.sb-section-add:focus-visible { opacity: 1; }
+.sb-section-add:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+
 .caret { display: grid; place-items: center; width: 20px; transition: transform 0.12s; }
 .caret.collapsed { transform: rotate(-90deg); }
 
