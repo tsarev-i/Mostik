@@ -211,6 +211,12 @@ pub fn EmojiPicker(
     let service_chat = StoredValue::new(custom.as_ref().map(|s| s.chat_id.clone()));
     let body = NodeRef::<html::Div>::new();
     let search = NodeRef::<html::Input>::new();
+    // Esc closes the picker wherever the focus is; the search box handles its own Esc.
+    crate::app::scoped_window_listener(leptos::ev::keydown, move |e| {
+        if e.key() == "Escape" {
+            on_close.run(());
+        }
+    });
     Effect::new(move |_| {
         if let Some(el) = search.get() {
             let _ = el.focus();

@@ -20,6 +20,10 @@ pub fn available() -> bool {
 }
 
 async fn call<T: DeserializeOwned>(cmd: &str, args: impl Serialize) -> Result<T, String> {
+    // In the browser demo there is no backend: an error instead of a JS exception that kills the UI.
+    if !available() {
+        return Err(format!("{cmd}: no Tauri backend"));
+    }
     let args = serde_wasm_bindgen::to_value(&args).map_err(|e| e.to_string())?;
     let value = tauri_invoke(cmd, args)
         .await

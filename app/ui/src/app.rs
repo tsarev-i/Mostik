@@ -667,6 +667,15 @@ pub fn App() -> impl IntoView {
             c.me_menu.set(false);
             return;
         }
+        // An emoji picker or a nested dialog closes itself, leaving the dialog under it open.
+        if document()
+            .query_selector(".emoji-picker, .modal-backdrop.nested")
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
         if c.adding_emoji.get_untracked() {
             c.adding_emoji.set(false);
         } else if c.confirm_delete.with_untracked(Option::is_some) {
@@ -699,13 +708,18 @@ pub fn App() -> impl IntoView {
 
     // The right-click menu closes on a click outside it, on scroll and when the window loses focus.
     let _ctx_down = window_event_listener(ev::mousedown, move |e| {
-        let inside = e
-            .target()
-            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
-            .and_then(|el| el.closest(".ctx-menu").ok().flatten())
-            .is_some();
-        if !inside {
+        let inside = |sel: &str| {
+            e.target()
+                .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
+                .and_then(|el| el.closest(sel).ok().flatten())
+                .is_some()
+        };
+        if !inside(".ctx-menu") {
             c.ctx_menu.set(None);
+        }
+        // The avatar menu too; its own button toggles it.
+        if c.me_menu.get_untracked() && !inside(".me-menu, .rail-me") {
+            c.me_menu.set(false);
         }
     });
     let _ctx_wheel = window_event_listener(ev::wheel, move |_| c.ctx_menu.set(None));
@@ -1060,7 +1074,7 @@ fn choice_submenu(
     let open = RwSignal::new(false);
     view! {
         <div class="me-sub" on:mouseenter=move |_| open.set(true) on:mouseleave=move |_| open.set(false)>
-            <button class="me-sub-btn" on:click=move |_| open.update(|v| *v = !*v)>
+            <button class="me-sub-btn" on:click=move |_| open.set(true)>
                 <span>{label}</span>
                 <span class="menu-value">{value}<Icon icon=I::ChevronRight size=14/></span>
             </button>
@@ -1291,7 +1305,7 @@ fn sidebar_menu_items(c: Ctx) -> impl IntoView {
     };
     view! {
         <div class="me-sub" on:mouseenter=move |_| sub_open.set(true) on:mouseleave=move |_| sub_open.set(false)>
-            <button class="me-sub-btn" on:click=move |_| sub_open.update(|v| *v = !*v)>
+            <button class="me-sub-btn" on:click=move |_| sub_open.set(true)>
                 <span>{tr().filter_and_sort}</span><Icon icon=I::ChevronRight size=14/>
             </button>
             <Show when=move || sub_open.get()>
@@ -1439,7 +1453,7 @@ fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
     };
     view! {
         <div class="me-sub" on:mouseenter=move |_| sub_open.set(true) on:mouseleave=move |_| sub_open.set(false)>
-            <button class="me-sub-btn" on:click=move |_| sub_open.update(|v| *v = !*v)>
+            <button class="me-sub-btn" on:click=move |_| sub_open.set(true)>
                 <span>{tr().move_to_section}</span><Icon icon=I::ChevronRight size=14/>
             </button>
             <Show when=move || sub_open.get()>
@@ -1481,6 +1495,8 @@ fn TopBar() -> impl IntoView {
                 let _ = el.focus();
                 open.set(true);
             }
+        } else if e.key() == "Escape" && history_open.get_untracked() {
+            history_open.set(false);
         } else if e.alt_key() && !e.ctrl_key() && (e.key() == "ArrowLeft" || e.key() == "ArrowRight") {
             e.prevent_default();
             ops::navigate(c, e.key() == "ArrowLeft");
@@ -3901,6 +3917,15 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     }
 }
 
+/// A window event listener that lives as long as the component that adds it.
+pub(crate) fn scoped_window_listener<E: ev::EventDescriptor + 'static>(event: E, cb: impl Fn(E::EventType) + 'static)
+where
+    E::EventType: wasm_bindgen::JsCast,
+{
+    let handle = leptos::__reexports::send_wrapper::SendWrapper::new(window_event_listener(event, cb));
+    on_cleanup(move || handle.take().remove());
+}
+
 fn human_size(bytes: u64) -> String {
     tr().size(bytes)
 }
@@ -3926,11 +3951,26 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
                         (max_w, max_h)
                     };
                     let src = if c.live { bridge::file_url(&a.file_id, Some("middle")) } else { String::new() };
+                    let full = if c.live { bridge::file_url(&a.file_id, None) } else { String::new() };
+                    let (real_w, real_h) = (a.width, a.height);
+                    let img = NodeRef::<html::Img>::new();
+                    // Telemost's "middle" preview of a very wide or tall image is a crop of its centre:
+                    // then the original is shown, otherwise the box shows a magnified piece of it.
+                    let check_preview = move |_| {
+                        let Some(el) = img.get_untracked() else { return };
+                        if real_w == 0 || real_h == 0 || el.natural_height() == 0 || !el.src().contains("size=") {
+                            return;
+                        }
+                        let preview = f64::from(el.natural_width()) / f64::from(el.natural_height());
+                        if (preview / (real_w as f64 / real_h as f64) - 1.0).abs() > 0.05 {
+                            el.set_src(&full);
+                        }
+                    };
                     let shown = a.clone();
                     view! {
                         <button class="image" style=format!("width:{w:.0}px;height:{h:.0}px") title=a.name.clone()
                             on:click=move |_| c.lightbox.set(Some(shown.clone()))>
-                            <img src=src alt=a.name.clone() loading="lazy"/>
+                            <img node_ref=img src=src alt=a.name.clone() loading="lazy" on:load=check_preview/>
                         </button>
                     }
                 }).collect_view()}
@@ -5200,6 +5240,9 @@ fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
         let id = chat_id.clone();
         let load = load.clone();
         move |guids: Vec<UserId>, add: bool| {
+            if !c.live {
+                return c.error.set(Some(tr().in_app_only_groups.into()));
+            }
             let (id, load) = (id.clone(), load.clone());
             spawn_local(async move {
                 match bridge::change_members(&id.0, guids.into_iter().map(|g| g.0).collect(), add).await {
@@ -5327,6 +5370,12 @@ fn AddPeopleDialog(
     on_add: Callback<Vec<UserId>>,
 ) -> impl IntoView {
     let people: RwSignal<Vec<UserProfile>> = RwSignal::new(vec![]);
+    // Esc closes this dialog, not the details under it (the App handler leaves nested dialogs alone).
+    scoped_window_listener(ev::keydown, move |e| {
+        if e.key() == "Escape" {
+            on_close.run(());
+        }
+    });
     let all_excluded = Signal::derive(move || {
         let mut v = exclude.get();
         v.extend(people.with(|p| p.iter().map(|x| x.id.clone()).collect::<Vec<_>>()));
@@ -5832,7 +5881,7 @@ fn MeMenu() -> impl IntoView {
                     } else {
                         view! {
                             <div class="me-sub" on:mouseenter=move |_| pause_open.set(true) on:mouseleave=move |_| pause_open.set(false)>
-                                <button class="me-sub-btn" on:click=move |_| pause_open.update(|v| *v = !*v)>
+                                <button class="me-sub-btn" on:click=move |_| pause_open.set(true)>
                                     <span>{tr().pause_for}</span><Icon icon=I::ChevronRight size=14/>
                                 </button>
                                 <Show when=move || pause_open.get()>
