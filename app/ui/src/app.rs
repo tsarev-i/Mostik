@@ -11,7 +11,7 @@ use mostik_core::*;
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
 use crate::settings::{ColorMode, NotifyMode, Settings, SidebarFilter, SidebarSort, THEME_SWATCHES, THEMES};
-use crate::{bridge, ops, order, time};
+use crate::{bridge, hidden, ops, order, time};
 
 /// Window state shared by all components.
 #[derive(Clone, Copy)]
@@ -103,6 +103,8 @@ pub struct Ctx {
     pub picked: RwSignal<std::collections::HashMap<String, UserId>>,
     /// Messages already removed as deleted, so a deletion is counted once.
     pub deleted: RwSignal<HashSet<(ChatId, Timestamp)>>,
+    /// Chats hidden from the sidebar with "×", kept between runs.
+    pub hidden: RwSignal<hidden::Hidden>,
 }
 
 /// A sidebar chat held with the mouse button.
@@ -379,6 +381,7 @@ pub fn App() -> impl IntoView {
         threads: RwSignal::new(vec![]),
         picked: RwSignal::new(Default::default()),
         deleted: RwSignal::new(Default::default()),
+        hidden: RwSignal::new(hidden::load()),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -421,6 +424,24 @@ pub fn App() -> impl IntoView {
     );
     Effect::new(move |_| c.drafts.with(save_drafts));
     Effect::new(move |_| c.chat_order.with(order::save));
+    Effect::new(move |_| c.hidden.with(hidden::save));
+    // A hidden chat that got something new is an ordinary chat again.
+    Effect::new(move |_| {
+        if c.hidden.with(|h| h.is_empty()) {
+            return;
+        }
+        let back: Vec<ChatId> = c.snap.with(|s| {
+            c.hidden.with_untracked(|h| {
+                h.iter()
+                    .filter(|(id, at)| s.chat(id).is_some_and(|ch| hidden::came_back(ch, **at)))
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+        });
+        if !back.is_empty() {
+            c.hidden.update(|h| h.retain(|id, _| !back.contains(id)));
+        }
+    });
 
     // Unread count in the window title, as in Slack.
     Effect::new(move |_| {
@@ -1048,7 +1069,9 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
         return ().into_any();
     };
     let starred = ops::is_starred(c, &id);
-    let (leave_id, star_id, mute_id, read_id, open_id) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+    let (leave_id, star_id, mute_id, read_id, open_id, hide_id) =
+        (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+    let notes = kind == ChatKind::Notes;
     let copy = move |_| {
         close_menus(c);
         let _ = window().navigator().clipboard().write_text(&title);
@@ -1082,6 +1105,9 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
         <button on:click=move |_| { close_menus(c); ops::toggle_star(c, star_id.clone()); }>
             {if starred { tr().unstar } else { tr().star }}
         </button>
+        {(!notes).then(|| view! {
+            <button on:click=move |_| { close_menus(c); ops::hide_chat(c, hide_id.clone()); }>{tr().hide_chat}</button>
+        })}
         <div class="menu-sep"></div>
         <div class="menu-label">{tr().notify_label}</div>
         {[NotifyLevel::All, NotifyLevel::Mentions, NotifyLevel::Nothing].map(|level| {
@@ -1825,6 +1851,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                             )
                     })
                     .filter(|ch| in_current_org(c, ch))
+                    .filter(|ch| !c.hidden.with(|h| hidden::hides(h, ch)))
                     .map(|ch| ch.id.clone())
                     .collect::<Vec<_>>()
             })
@@ -2190,6 +2217,21 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
             let has_draft = !selected.get() && c.drafts.with(|d| d.get(&ch.id).is_some_and(|t| !t.trim().is_empty()));
             let pencil = (has_draft && ch.mentions == 0)
                 .then(|| view! { <span class="sb-pencil"><Icon icon=I::Compose size=13/></span> });
+            // "×" on hover hides the chat, as closing a conversation in Slack. Not a nested button:
+            // the row is one already.
+            let close = (ch.kind != ChatKind::Notes).then(|| {
+                let id = ch.id.clone();
+                view! {
+                    <span class="sb-close" role="button" title=tr().hide_chat
+                        on:mousedown=|e| e.stop_propagation()
+                        on:click=move |e| {
+                            e.stop_propagation();
+                            ops::hide_chat(c, id.clone());
+                        }>
+                        <Icon icon=I::X size=12/>
+                    </span>
+                }
+            });
             view! {
                 <button class=cls data-chat=data_chat.clone() on:mousedown=hold.clone() on:click=select.clone() on:contextmenu=on_ctx.clone()>
                     {icon}
@@ -2199,6 +2241,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                     {live_call}
                     {pencil}
                     {badge}
+                    {close}
                 </button>
             }
         })

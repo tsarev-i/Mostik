@@ -1387,6 +1387,21 @@ button:disabled { opacity: 0.4; cursor: default; }
 /* A call is going on in the chat: green headphones, like Slack's huddle mark. */
 .sb-call { margin-left: auto; display: grid; place-items: center; color: var(--online); }
 .sb-call ~ .sb-pencil, .sb-call ~ .badge { margin-left: 6px; }
+/* "×" that hides a chat: only on hover, after the other marks on the right. */
+.sb-close {
+  display: none;
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  place-items: center;
+  border-radius: 4px;
+  opacity: 0.75;
+}
+.sb-call ~ .sb-close, .sb-pencil ~ .sb-close, .badge ~ .sb-close { margin-left: 4px; }
+.sb-row:hover .sb-close { display: grid; }
+.window.chat-dragging .sb-close { display: none; }
+.sb-close:hover { opacity: 1; background: rgba(255, 255, 255, 0.16); }
 .sb-draft-count { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 12px; opacity: 0.8; }
 .dm-list { flex: 1; overflow-y: auto; padding: 4px 0 12px; }
 .dm-list-title { padding: 4px 16px 8px; font-size: 13px; font-weight: 700; opacity: 0.8; }

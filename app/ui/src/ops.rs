@@ -298,6 +298,16 @@ pub fn open_chat(c: Ctx, id: ChatId) {
     });
 }
 
+/// Hides the chat from the sidebar until something new comes in it.
+pub fn hide_chat(c: Ctx, id: ChatId) {
+    let Some(last) = c.snap.with_untracked(|s| s.chat(&id).map(|ch| ch.last_ts)) else {
+        return;
+    };
+    c.hidden.update(|h| {
+        h.insert(id, last);
+    });
+}
+
 /// Makes the chat current (recording it in the navigation history if `record`). Returns `true`
 /// if the chat history needs to be loaded from the server.
 fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
@@ -318,6 +328,12 @@ fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
         r.insert(0, id.clone());
         r.truncate(20);
     });
+    // An opened chat is back in the sidebar.
+    if c.hidden.with_untracked(|h| h.contains_key(&id)) {
+        c.hidden.update(|h| {
+            h.remove(&id);
+        });
+    }
     if c.view.get_untracked().is_home_page() {
         c.view.set(crate::app::ViewMode::Home);
     }
