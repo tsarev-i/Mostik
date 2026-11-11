@@ -17,7 +17,7 @@ use mostik_yandex::identity;
 use mostik_yandex::session::CookieJar;
 use mostik_yandex::web::{WebClient, WebError};
 use mostik_yandex::wire::{self, HistoryRequest, PushRequest, request_id};
-use mostik_yandex::xiva_client::{Incoming, XivaClient};
+use mostik_yandex::xiva_client::{Incoming, XivaClient, XivaError};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
@@ -1655,6 +1655,26 @@ fn id_patterns(v: &Value) -> Value {
     json!({ "chats": chats.map_or(0, Vec::len), "id_patterns": patterns })
 }
 
+/// `whoami` over the socket, tried a few times: an answer without `UserInfo` counts as a failure.
+/// Every attempt goes to the probe; `Null` if none succeeded.
+async fn whoami(xiva: &XivaClient, probe: &mut Value) -> Value {
+    let mut attempts = Vec::new();
+    for _ in 0..3 {
+        let who = xiva.call("whoami", &json!({ "RequestId": request_id() }), 10).await;
+        attempts.push(who.as_ref().map(shape).unwrap_or_else(err_json));
+        match who {
+            Ok(v) if v.pointer("/UserInfo/Guid").and_then(Value::as_str).is_some() => {
+                probe["ws_whoami"] = json!(attempts);
+                return v;
+            }
+            Err(XivaError::Closed) => break,
+            _ => tokio::time::sleep(Duration::from_millis(500)).await,
+        }
+    }
+    probe["ws_whoami"] = json!(attempts);
+    Value::Null
+}
+
 async fn connect_inner(
     app: &AppHandle,
     state: &AppState,
@@ -1689,15 +1709,33 @@ async fn connect_inner(
     })?;
     probe["xiva"] = json!({ "connected": true });
 
-    let who = xiva.call("whoami", &json!({ "RequestId": request_id() }), 15).await;
-    probe["ws_whoami"] = who.as_ref().map(shape).unwrap_or_else(err_json);
-    let who = who.unwrap_or(Value::Null);
-    let me_id = UserId(
-        who.pointer("/UserInfo/Guid")
-            .and_then(Value::as_str)
-            .unwrap_or("me")
-            .to_owned(),
-    );
+    // Xiva may ignore requests sent before it has subscribed the socket, so wait for that first.
+    probe["subscription"] = json!(xiva.wait_subscription(Duration::from_secs(5)).await.is_some());
+    let who = whoami(&xiva, probe).await;
+
+    let list = xiva.call("history", &wire::chat_list(0), 40).await;
+    probe["history"] = list.as_ref().map(id_patterns).unwrap_or_else(err_json);
+    let list = list.map_err(|e| ConnectError::Other(format!("Telemost did not return the chat list: {e}")))?;
+
+    // Without `whoami` every direct chat would show its first member, often yourself: take the
+    // GUID from the chat IDs and the name, photo and organization from the directory instead.
+    let (who, me_id) = match who.pointer("/UserInfo/Guid").and_then(Value::as_str).map(str::to_owned) {
+        Some(guid) => (who, UserId(guid)),
+        None => match convert::own_guid(&list) {
+            Some(me) => {
+                let profile = web.rpc("get_users_data", json!({ "guids": [me.0] })).await;
+                probe["me_fallback"] = profile.as_ref().map(shape).unwrap_or_else(err_json);
+                let profile = profile
+                    .ok()
+                    .and_then(|v| convert::profiles(&v).into_iter().find(|p| p.id == me));
+                (convert::whoami_from_profile(&me, profile.as_ref()), me)
+            }
+            None => {
+                probe["me_fallback"] = json!("unknown");
+                (Value::Null, UserId("me".into()))
+            }
+        },
+    };
     if me_id.0 != "me"
         && let Ok(mut sh) = shared.lock()
     {
@@ -1707,18 +1745,14 @@ async fn connect_inner(
     let me_name = who
         .pointer("/UserInfo/DisplayName")
         .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())
         .map(str::to_owned);
     let organization = who
         .pointer("/UserInfo/OrganizationInfos/0/OrganizationName")
         .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())
         .unwrap_or("Telemost")
         .to_owned();
-
-    let list = xiva.call("history", &wire::chat_list(0), 40).await;
-    probe["history"] = list.as_ref().map(id_patterns).unwrap_or_else(err_json);
-    let list = list.map_err(|e| ConnectError::Other(format!("Telemost did not return the chat list: {e}")))?;
-
-    probe["subscription"] = json!(xiva.wait_subscription(Duration::from_secs(3)).await.is_some());
 
     let mut data = convert::from_history(&list, Some(&me_id));
     // The chat with oneself, as in Slack: create it if it does not exist yet (the call is idempotent).
@@ -1747,6 +1781,7 @@ async fn connect_inner(
         avatar: who
             .pointer("/UserInfo/AvatarId")
             .and_then(Value::as_str)
+            .filter(|a| !a.is_empty())
             .map(str::to_owned),
     };
     let mut snapshot = convert::snapshot(me, organization, data);
