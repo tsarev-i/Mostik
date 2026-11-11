@@ -393,6 +393,10 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
     for chat in v.get("Chats").and_then(Value::as_array).into_iter().flatten() {
         let Some(id) = s(chat, &["ChatId"]) else { continue };
         let chat_id = ChatId(id.to_owned());
+        // The peer of a direct chat, even when none of the chat's messages is theirs.
+        if let Some(u) = chat.get("PartnerInfo").and_then(user_from) {
+            users.entry(u.id.0.clone()).or_insert(u);
+        }
         let mut last_ts = n(chat, &["LastTsMcs"]).unwrap_or(0);
         for item in chat.get("Messages").and_then(Value::as_array).into_iter().flatten() {
             let sm = item.get("ServerMessage").unwrap_or(item);
@@ -832,6 +836,10 @@ pub fn online_from_heartbeat(v: &Value) -> Option<bool> {
     Some(now.saturating_sub(last) < ONLINE_WINDOW_MCS)
 }
 
+/// `get_users_data` answers about at most this many people: the rest of a longer list is
+/// silently left out (checked on 2026-11-11: 40 asked, the first 32 returned).
+pub const PROFILES_PER_REQUEST: usize = 32;
+
 /// Profiles from the HTTP RPC `get_users_data` response (`{guids: [...]}`).
 pub fn profiles(v: &Value) -> Vec<UserProfile> {
     let text = |u: &Value, path: &[&str]| s(u, path).filter(|x| !x.is_empty()).map(str::to_owned);
@@ -994,6 +1002,22 @@ pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn direct_chat_peer_is_named_by_partner_info() {
+        let me = UserId("me".into());
+        let list = json!({"Chats": [{"ChatId": "os_me", "LastSeqNo": 1,
+            "PartnerInfo": {"DisplayName": "Olga Sokolova", "Guid": "os", "PublicName": "Olga Sokolova"},
+            "Messages": [{"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "os_me", "Text": {"MessageText": "hi"}}},
+                "ServerMessageInfo": {"From": {"DisplayName": "Me", "Guid": "me"}, "SeqNo": 1, "Timestamp": 5}}}]}]});
+        let data = from_history(&list, Some(&me));
+        let peer = data
+            .users
+            .iter()
+            .find(|u| u.id.0 == "os")
+            .map(|u| u.display_name.as_str());
+        assert_eq!(peer, Some("Olga Sokolova"));
+    }
 
     #[test]
     fn meeting_status_is_telemost_own() {

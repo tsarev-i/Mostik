@@ -750,7 +750,7 @@ pub(crate) fn open_external(url: &str) -> Result<(), String> {
 async fn fill_profiles(web: &WebClient, users: &mut [User]) -> usize {
     let guids: Vec<String> = users.iter().map(|u| u.id.0.clone()).collect();
     let mut filled = 0;
-    let jobs = guids.chunks(100).map(|chunk| {
+    let jobs = guids.chunks(convert::PROFILES_PER_REQUEST).map(|chunk| {
         let mut web = web.clone_light();
         async move { web.rpc("get_users_data", json!({ "guids": chunk })).await }
     });
