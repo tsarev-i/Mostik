@@ -218,11 +218,18 @@ pub async fn install_update() -> Result<(), String> {
     call("install_update", NoArgs {}).await
 }
 
+/// A history page and the authors of its messages the app has not seen yet.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HistoryPage {
+    pub messages: Vec<Message>,
+    pub users: Vec<User>,
+}
+
 pub async fn history(
     chat_id: &str,
     before: Option<Timestamp>,
     thread: Option<Timestamp>,
-) -> Result<Vec<Message>, String> {
+) -> Result<HistoryPage, String> {
     call(
         "history",
         HistoryArgs {
@@ -673,10 +680,12 @@ pub async fn forward_message(m: &Message, to_chat: &str, text: &str) -> Result<S
 struct CallArgs<'a> {
     chat_id: &'a str,
     label: &'a str,
+    url: Option<&'a str>,
 }
 
-pub async fn start_call(chat_id: &str, label: &str) -> Result<(), String> {
-    call("start_call", CallArgs { chat_id, label }).await
+/// `url` joins a call already going on in the chat instead of starting one.
+pub async fn start_call(chat_id: &str, label: &str, url: Option<&str>) -> Result<(), String> {
+    call("start_call", CallArgs { chat_id, label, url }).await
 }
 
 pub async fn focus_call() -> Result<(), String> {

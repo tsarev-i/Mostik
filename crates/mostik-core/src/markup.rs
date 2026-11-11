@@ -43,7 +43,7 @@ impl Mentionable<'_> {
     /// Mention at the start of `after` (the text right after `@`): the span and its length in bytes.
     /// The mention must end at a word boundary; the longest name wins, a person over a chat of the same name.
     fn find(&self, after: &str) -> Option<(Inline, usize)> {
-        let ends_word = |len: usize| after[len..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        let ends_word = |len: usize| ends_word(&after[len..]);
         let fits = |n: &&&str| !n.is_empty() && after.starts_with(**n) && ends_word(n.len());
         let person = self.people.iter().filter(fits).max_by_key(|n| n.len());
         let channel = self.channels.iter().filter(fits).max_by_key(|n| n.len());
@@ -63,6 +63,19 @@ impl Mentionable<'_> {
         let all = after.get(..MENTION_ALL.len())?;
         (all.eq_ignore_ascii_case(MENTION_ALL) && ends_word(MENTION_ALL.len()))
             .then_some((Inline::MentionAll, all.len()))
+    }
+}
+
+/// Whether a mention ends where `rest` begins. Letters, digits, `-` and `_` go on with the word
+/// (`@all-hands`, `@all_devs`); so does a `.` followed by one (`@backend.team`), while a full
+/// stop at the end of a sentence (`@all.`) ends it, and so does `'` (`@Anna's`).
+fn ends_word(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    match chars.next() {
+        None => true,
+        Some(c) if c.is_alphanumeric() || c == '-' || c == '_' => false,
+        Some('.') => chars.next().is_none_or(|c| !c.is_alphanumeric()),
+        Some(_) => true,
     }
 }
 
@@ -235,15 +248,25 @@ pub fn plain(text: &str) -> String {
 }
 
 /// Whether `text` mentions the user named `me_name`: by name, through a public chat they are in
-/// (`who.channels` holds only such chats) or with `@all`. Code blocks do not count.
+/// (`who.channels` holds only such chats) or with `@all`. A mention inside bold, italic, strike,
+/// underline or a link caption counts; code does not.
 pub fn mentions_me(text: &str, who: &Mentionable, me_name: &str) -> bool {
     parse_blocks(text).iter().any(|b| match b {
-        Block::Text(t) => parse_inline(t, who).iter().any(|p| match p {
-            Inline::Mention(n) => !me_name.is_empty() && n == me_name,
-            Inline::ChannelMention(_) | Inline::MentionAll => true,
-            _ => false,
-        }),
+        Block::Text(t) => inline_mentions(t, who, me_name),
         Block::Code(_) => false,
+    })
+}
+
+fn inline_mentions(text: &str, who: &Mentionable, me_name: &str) -> bool {
+    parse_inline(text, who).iter().any(|p| match p {
+        Inline::Mention(n) => !me_name.is_empty() && n == me_name,
+        Inline::ChannelMention(_) | Inline::MentionAll => true,
+        Inline::Bold(t) | Inline::Italic(t) | Inline::Strike(t) | Inline::Underline(t) => {
+            inline_mentions(t, who, me_name)
+        }
+        // A bare link is its own caption: parsing that again gives the same link, forever.
+        Inline::Link { text, url } => text != url && inline_mentions(text, who, me_name),
+        Inline::Text(_) | Inline::Code(_) => false,
     })
 }
 
@@ -257,6 +280,43 @@ fn flush(out: &mut Vec<Inline>, plain: &mut String) {
 mod tests {
     use super::Inline::*;
     use super::*;
+
+    #[test]
+    fn longer_words_are_not_mentions() {
+        let channels = ["backend"];
+        let who = Mentionable {
+            people: &[],
+            channels: &channels,
+        };
+        assert!(!mentions_me("встреча @all-hands в 15:00", &who, "Ivan"));
+        assert!(!mentions_me("@all_devs", &who, "Ivan"));
+        assert!(!mentions_me("@backend-team, @backend.team", &who, "Ivan"));
+        assert!(mentions_me("всем @all.", &who, "Ivan"));
+        assert!(mentions_me("@all, привет", &who, "Ivan"));
+        assert!(mentions_me("в @backend: деплой", &who, "Ivan"));
+        assert!(mentions_me("@backend's deploy", &who, "Ivan"));
+    }
+
+    #[test]
+    fn mentions_inside_markup_count() {
+        let names = ["Ivan Petrov"];
+        let who = Mentionable {
+            people: &names,
+            channels: &[],
+        };
+        assert!(mentions_me("**@Ivan Petrov** please review", &who, "Ivan Petrov"));
+        assert!(mentions_me("__@all__ release", &who, "Ivan Petrov"));
+        assert!(mentions_me("[@all now](https://example.org)", &who, "Ivan Petrov"));
+        // Bare links and links captioned with a link end, with or without a mention around.
+        assert!(!mentions_me(
+            "see https://example.org/x and [https://a.example](https://b.example)",
+            &who,
+            "Ivan Petrov"
+        ));
+        assert!(mentions_me("@all https://example.org", &who, "Ivan Petrov"));
+        assert!(!mentions_me("`@all` in code", &who, "Ivan Petrov"));
+        assert!(!mentions_me("```\n@all\n```", &who, "Ivan Petrov"));
+    }
 
     const NONE: Mentionable = Mentionable {
         people: &[],

@@ -175,6 +175,17 @@ pub struct Message {
     /// Forwarded messages (`ForwardedMessages`), like a "shared message" in Slack.
     #[serde(default)]
     pub forwarded: Vec<Forwarded>,
+    /// Not a text message but Telemost's note that a call in the chat started or ended.
+    #[serde(default)]
+    pub call: Option<CallNote>,
+}
+
+/// A call in the chat started or ended, like Slack's huddle messages. `url` is the meeting link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CallNote {
+    Started { url: String },
+    Ended { url: String },
 }
 
 /// Forwarded message: author, time, text and attachments of the original.
@@ -258,13 +269,17 @@ impl Snapshot {
     pub fn mention_names(&self) -> crate::markup::MentionNames {
         crate::markup::MentionNames {
             people: self.users.iter().map(|u| u.display_name.clone()).collect(),
-            channels: self
-                .chats
-                .iter()
-                .filter(|c| c.kind == ChatKind::Group { public: true } && !c.name.is_empty())
-                .map(|c| c.name.clone())
-                .collect(),
+            channels: self.mention_channels(),
         }
+    }
+
+    /// Names of the public group chats in the list, which `@<name>` mentions.
+    pub fn mention_channels(&self) -> Vec<String> {
+        self.chats
+            .iter()
+            .filter(|c| c.kind == ChatKind::Group { public: true } && !c.name.is_empty())
+            .map(|c| c.name.clone())
+            .collect()
     }
 
     /// Chat feed messages without thread replies, oldest first.
@@ -277,6 +292,25 @@ impl Snapshot {
             .collect();
         list.sort_by_key(|m| m.ts);
         list
+    }
+
+    /// Calls going on in chats, with their links: the latest call note of a chat among the
+    /// loaded messages says the call started and nothing yet says it ended.
+    pub fn active_calls(&self) -> std::collections::BTreeMap<ChatId, String> {
+        let mut last: std::collections::BTreeMap<&ChatId, (Timestamp, &CallNote)> = Default::default();
+        for m in self.messages.iter().filter(|m| m.thread_parent.is_none()) {
+            if let Some(note) = &m.call
+                && last.get(&m.chat_id).is_none_or(|(ts, _)| m.ts >= *ts)
+            {
+                last.insert(&m.chat_id, (m.ts, note));
+            }
+        }
+        last.into_iter()
+            .filter_map(|(chat, (_, note))| match note {
+                CallNote::Started { url } => Some((chat.clone(), url.clone())),
+                CallNote::Ended { .. } => None,
+            })
+            .collect()
     }
 
     /// Thread replies, oldest first.
@@ -307,8 +341,11 @@ pub fn chat_title(snapshot: &Snapshot, chat: &Chat) -> String {
 pub const GROUPING_WINDOW_MCS: Timestamp = 5 * 60 * 1_000_000;
 
 /// Whether `next` continues the visual group started by `prev`.
+/// Call notes stand apart and never join a group.
 pub fn continues_group(prev: Option<&Message>, next: &Message) -> bool {
     match prev {
+        Some(_) if next.call.is_some() => false,
+        Some(p) if p.call.is_some() => false,
         Some(p) => p.author == next.author && next.ts.saturating_sub(p.ts) < GROUPING_WINDOW_MCS,
         None => false,
     }
@@ -332,7 +369,44 @@ mod tests {
             seq_no: 0,
             attachments: vec![],
             forwarded: vec![],
+            call: None,
         }
+    }
+
+    #[test]
+    fn active_calls_follow_the_latest_note() {
+        let note = |chat: &str, ts, started: bool| Message {
+            chat_id: ChatId(chat.into()),
+            call: Some(if started {
+                CallNote::Started {
+                    url: format!("u-{chat}"),
+                }
+            } else {
+                CallNote::Ended {
+                    url: format!("u-{chat}"),
+                }
+            }),
+            ..msg("u1", ts)
+        };
+        let snap = Snapshot {
+            messages: vec![
+                note("a", 10, true),
+                msg("u2", 20),
+                note("b", 10, true),
+                note("b", 30, false),
+                note("c", 30, false),
+                note("c", 40, true),
+            ],
+            me: UserId("u1".into()),
+            organization: String::new(),
+            organization_avatar: None,
+            organizations: vec![],
+            users: vec![],
+            chats: vec![],
+            sections: vec![],
+        };
+        let active: Vec<_> = snap.active_calls().into_iter().map(|(c, u)| (c.0, u)).collect();
+        assert_eq!(active, [("a".into(), "u-a".into()), ("c".into(), "u-c".into())]);
     }
 
     #[test]

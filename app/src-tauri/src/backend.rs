@@ -231,6 +231,14 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
     Ok(())
 }
 
+/// A history page and the authors of its messages the app has not seen yet: the chat list at
+/// start-up holds one message per chat, so most authors of an opened chat arrive only here.
+#[derive(Serialize)]
+pub struct HistoryPage {
+    messages: Vec<Message>,
+    users: Vec<User>,
+}
+
 /// History page: the latest messages before `before` (exclusive).
 #[tauri::command]
 pub async fn history(
@@ -238,7 +246,7 @@ pub async fn history(
     chat_id: String,
     before: Option<Timestamp>,
     thread: Option<Timestamp>,
-) -> Result<Vec<Message>, String> {
+) -> Result<HistoryPage, String> {
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
     let body = live
@@ -247,15 +255,33 @@ pub async fn history(
         .await
         .map_err(|e| e.to_string())?;
     let data = convert::from_history(&body, Some(&live.me));
-    if before.is_none()
-        && thread.is_none()
-        && let Ok(mut sh) = live.shared.lock()
-    {
-        sh.last.extend(data.last);
+    let mut users = data.users;
+    if let Ok(mut sh) = live.shared.lock() {
+        if before.is_none() && thread.is_none() {
+            sh.last.extend(data.last);
+        }
+        // Someone already known needs no directory request.
+        users.retain(|u| !sh.names.contains_key(&u.id.0));
     }
-    eprintln!("history {}: {} messages", id_pattern(&chat_id), data.messages.len());
+    if !users.is_empty() {
+        fill_profiles(&live.web, &mut users).await;
+        if let Ok(mut sh) = live.shared.lock() {
+            for u in &users {
+                sh.names.insert(u.id.0.clone(), u.display_name.clone());
+            }
+        }
+    }
+    eprintln!(
+        "history {}: {} messages, {} new authors",
+        id_pattern(&chat_id),
+        data.messages.len(),
+        users.len()
+    );
     prefetch_previews(live.clone(), &data.messages);
-    Ok(data.messages)
+    Ok(HistoryPage {
+        messages: data.messages,
+        users,
+    })
 }
 
 /// Chat the request goes to: the chat itself or the thread chat of message `thread`.
@@ -319,6 +345,7 @@ pub async fn send_message(
         seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(Value::as_u64).unwrap_or(0),
         attachments: vec![],
         forwarded: vec![],
+        call: None,
     })
 }
 
@@ -555,18 +582,69 @@ pub async fn open_url(app: AppHandle, state: tauri::State<'_, AppState>, url: St
     open_external(&url)
 }
 
+/// Opens a link or a file in the program the system has for it.
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn open_external(url: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
-    let (program, args) = ("xdg-open", vec![url]);
+    let mut command = std::process::Command::new("xdg-open");
     #[cfg(target_os = "macos")]
-    let (program, args) = ("open", vec![url]);
-    #[cfg(target_os = "windows")]
-    let (program, args) = ("cmd", vec!["/C", "start", "", url]);
-    std::process::Command::new(program)
-        .args(args)
+    let mut command = std::process::Command::new("open");
+    command.arg(url);
+    // With the AppImage's libraries xdg-open and the browser it starts would crash on startup.
+    #[cfg(target_os = "linux")]
+    crate::appimage::outside(&mut command);
+    command
         .spawn()
-        .map(|_| ())
+        .map(drop)
         .map_err(|e| format!("could not open the browser: {e}"))
+}
+
+/// Opens a link or a file in the program the system has for it. ShellExecuteW, not
+/// `cmd /C start`: cmd would treat `&`, `|` and `^` in a link as its own syntax, cutting the
+/// link short or running what follows `&` as a command.
+#[cfg(target_os = "windows")]
+pub(crate) fn open_external(url: &str) -> Result<(), String> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, PCWSTR, w};
+
+    let target = HSTRING::from(url);
+    // SAFETY: both strings are NUL-terminated UTF-16 that live until the call returns.
+    let result = unsafe { ShellExecuteW(None, w!("open"), &target, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    // Values above 32 mean success; the rest are error codes.
+    if result.0 as usize > 32 {
+        Ok(())
+    } else {
+        Err(format!("could not open the browser: error {}", result.0 as usize))
+    }
+}
+
+/// Photos, job titles and names from the directory: the history does not always carry
+/// `AvatarId`, and `From` may hold only the GUID. Returns how many photos were filled in.
+async fn fill_profiles(web: &WebClient, users: &mut [User]) -> usize {
+    let guids: Vec<String> = users.iter().map(|u| u.id.0.clone()).collect();
+    let mut filled = 0;
+    let jobs = guids.chunks(100).map(|chunk| {
+        let mut web = web.clone_light();
+        async move { web.rpc("get_users_data", json!({ "guids": chunk })).await }
+    });
+    for v in futures_util::future::join_all(jobs).await.into_iter().flatten() {
+        for p in convert::profiles(&v) {
+            if let Some(u) = users.iter_mut().find(|u| u.id == p.id) {
+                if u.avatar.is_none() && p.avatar.is_some() {
+                    u.avatar = p.avatar.clone();
+                    filled += 1;
+                }
+                if u.title.is_none() {
+                    u.title = p.position.clone();
+                }
+                if !p.display_name.is_empty() && (u.display_name == u.id.0 || u.display_name.is_empty()) {
+                    u.display_name = p.display_name.clone();
+                }
+            }
+        }
+    }
+    filled
 }
 
 fn err_json(e: impl ToString) -> Value {
@@ -684,7 +762,9 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
             *entry = (m.ts, m.seq_no.max(entry.1));
         }
     }
-    if !sh.ready || sh.me.as_ref() == Some(&m.author) || sh.muted.contains(&m.chat_id.0) || m.edited {
+    // Only the start of a call notifies; "the call ended" is just a line in the chat.
+    let ended = matches!(m.call, Some(mostik_core::CallNote::Ended { .. }));
+    if !sh.ready || sh.me.as_ref() == Some(&m.author) || sh.muted.contains(&m.chat_id.0) || m.edited || ended {
         return;
     }
     if sh.my_availability == mostik_core::Availability::DoNotDisturb {
@@ -697,20 +777,24 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         .map(|p| p.clone())
         .unwrap_or_default();
     let direct = !m.chat_id.0.contains('/');
-    let mentioned = sh
-        .me
-        .as_ref()
-        .and_then(|me| sh.names.get(&me.0))
-        .is_some_and(|me_name| {
-            let who = mostik_core::markup::MentionNames {
-                people: sh.names.values().cloned().collect(),
-                channels: sh.channels.clone(),
-            };
-            who.with(|who| mostik_core::markup::mentions_me(&m.text, who, me_name))
-        });
+    // Only "direct and mentions" needs to know about mentions.
+    let mentioned = || {
+        sh.me
+            .as_ref()
+            .and_then(|me| sh.names.get(&me.0))
+            .is_some_and(|me_name| {
+                let people: Vec<&str> = sh.names.values().map(String::as_str).collect();
+                let channels: Vec<&str> = sh.channels.iter().map(String::as_str).collect();
+                let who = mostik_core::markup::Mentionable {
+                    people: &people,
+                    channels: &channels,
+                };
+                mostik_core::markup::mentions_me(&m.text, &who, me_name)
+            })
+    };
     match prefs.notify.as_str() {
         "nothing" => return,
-        "direct" if !direct && !mentioned => return,
+        "direct" if !direct && !mentioned() => return,
         _ => {}
     }
     let focused = app
@@ -728,7 +812,9 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         Some(chat) if chat != &who => format!("{who} · {chat}"),
         _ => who,
     };
-    let body: String = if prefs.preview {
+    let body: String = if m.call.is_some() {
+        text(app, "📞 Начался созвон", "📞 A call started").to_owned()
+    } else if prefs.preview {
         mostik_core::markup::plain(&m.text).chars().take(200).collect()
     } else {
         text(app, "Новое сообщение", "New message").to_owned()
@@ -955,7 +1041,7 @@ pub async fn create_channel(
     if public && !server_public {
         eprintln!("channel created, but Telemost did not make it public");
     }
-    Ok(mostik_core::Chat {
+    let chat = mostik_core::Chat {
         id: ChatId(id),
         kind: ChatKind::Group { public: server_public },
         name: server_name,
@@ -970,7 +1056,9 @@ pub async fn create_channel(
         last_ts: js_now_mcs(),
         pinned: None,
         organizations: vec![],
-    })
+    };
+    note_chat(&live, &chat);
+    Ok(chat)
 }
 
 fn js_now_mcs() -> u64 {
@@ -1062,7 +1150,24 @@ pub async fn leave_chat(state: tauri::State<'_, AppState>, chat_id: String) -> R
         .rpc("leave", json!({ "chat_id": chat_id, "version": version }))
         .await
         .map_err(|e| e.to_string())?;
-    rpc_ok(&v)
+    rpc_ok(&v)?;
+    if let Ok(mut sh) = live.shared.lock()
+        && let Some(name) = sh.titles.remove(&chat_id)
+    {
+        sh.channels.retain(|c| c != &name);
+    }
+    Ok(())
+}
+
+/// A chat joined or created after the start: its title for notifications, and its name for
+/// `@channel` mentions if it is public.
+fn note_chat(live: &Live, chat: &mostik_core::Chat) {
+    let Ok(mut sh) = live.shared.lock() else { return };
+    sh.titles.insert(chat.id.0.clone(), chat.name.clone());
+    let public = chat.kind == ChatKind::Group { public: true };
+    if public && !chat.name.is_empty() && !sh.channels.contains(&chat.name) {
+        sh.channels.push(chat.name.clone());
+    }
 }
 
 /// Changes a synced setting (`set_bucket`): reads the current value and version,
@@ -1223,21 +1328,27 @@ pub async fn forward_message(
 
 /// A call from a chat, like a Slack huddle: the meeting bound to the chat (`create_meeting`) opens
 /// in the call window (`call.rs`). `meeting_id` is the meeting link itself. `label` is what the
-/// window title and the sidebar show: `#dev` or the person's name.
+/// window title and the sidebar show: `#dev` or the person's name. `url` is the link of a call
+/// already going on in the chat: joining it needs no `create_meeting`.
 #[tauri::command]
 pub async fn start_call(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     chat_id: String,
     label: String,
+    url: Option<String>,
 ) -> Result<(), String> {
-    let live = live(&state).await?;
     let info = call::CallInfo {
         chat_id: Some(chat_id.clone()),
         label,
     };
-    // `create_meeting` runs only when no call is open: it announces the call in the chat.
-    let meeting = || async {
+    // Runs only when no call is open: `create_meeting` announces the call in the chat. An open
+    // call comes to the front even without a connection.
+    let prepare = || async {
+        let live = live(&state).await?;
+        if let Some(url) = url {
+            return Ok((url, live.web.jar().clone()));
+        }
         let mut web = live.web.clone_light();
         let v = web
             .rpc(
@@ -1251,13 +1362,9 @@ pub async fn start_call(
             .pointer("/data/meeting_id")
             .and_then(Value::as_str)
             .ok_or("Telemost did not return the meeting link")?;
-        Ok(if id.starts_with("https://") {
-            id.to_owned()
-        } else {
-            format!("https://telemost.360.yandex.ru/j/{id}")
-        })
+        Ok((convert::meeting_url(id), live.web.jar().clone()))
     };
-    call::open_chat_call(&app, info, live.web.jar(), meeting).await
+    call::open_chat_call(&app, info, prepare).await
 }
 
 /// The call window comes to the front (where the desktop lets an app raise its windows:
@@ -1339,9 +1446,12 @@ pub async fn join_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Re
         .await
         .map_err(|e| e.to_string())?;
     rpc_ok(&v)?;
-    v.pointer("/data/chat")
+    let chat = v
+        .pointer("/data/chat")
         .and_then(|c| rpc_chat(c, &live.me))
-        .ok_or_else(|| "Telemost did not return the chat".to_owned())
+        .ok_or_else(|| "Telemost did not return the chat".to_owned())?;
+    note_chat(&live, &chat);
+    Ok(chat)
 }
 
 /// "+" in the composer: the system file picker.
@@ -1893,29 +2003,7 @@ async fn connect_inner(
             })
         })
         .collect();
-    // Photos and job titles: the history does not always carry `AvatarId`, so fill them in from the directory.
-    let guids: Vec<String> = snapshot.users.iter().map(|u| u.id.0.clone()).collect();
-    let mut filled = 0;
-    let jobs = guids.chunks(100).map(|chunk| {
-        let mut web = web.clone_light();
-        async move { web.rpc("get_users_data", json!({ "guids": chunk })).await }
-    });
-    for v in futures_util::future::join_all(jobs).await.into_iter().flatten() {
-        for p in convert::profiles(&v) {
-            if let Some(u) = snapshot.users.iter_mut().find(|u| u.id == p.id) {
-                if u.avatar.is_none() && p.avatar.is_some() {
-                    u.avatar = p.avatar.clone();
-                    filled += 1;
-                }
-                if u.title.is_none() {
-                    u.title = p.position.clone();
-                }
-                if !p.display_name.is_empty() && (u.display_name == u.id.0 || u.display_name.is_empty()) {
-                    u.display_name = p.display_name.clone();
-                }
-            }
-        }
-    }
+    let filled = fill_profiles(&web, &mut snapshot.users).await;
     probe["profiles_filled"] = json!(filled);
     match web.rpc("get_buckets", json!({ "version": 0 })).await {
         Ok(b) => {
@@ -1943,7 +2031,7 @@ async fn connect_inner(
         for u in &snapshot.users {
             sh.names.insert(u.id.0.clone(), u.display_name.clone());
         }
-        sh.channels = snapshot.mention_names().channels;
+        sh.channels = snapshot.mention_channels();
         sh.ready = true;
     }
     probe["snapshot"] = json!({

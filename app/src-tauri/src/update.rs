@@ -241,18 +241,7 @@ fn relaunch_appimage(appimage: &std::ffi::OsStr) -> Result<(), String> {
     close_fds_on_exec();
     let mut command = std::process::Command::new(appimage);
     command.args(std::env::args_os().skip(1));
-    if let Some(appdir) = crate::appimage::appdir() {
-        command.env_clear();
-        command.envs(crate::appimage::clean_env(std::env::vars_os(), &appdir));
-    }
-    // AppRun keeps the directory the app was started from in OWD; HOME if that is gone too.
-    let cwd = ["OWD", "HOME"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .map(std::path::PathBuf::from)
-        .find(|d| d.is_dir() && !crate::appimage::appdir().is_some_and(|a| d.starts_with(a)))
-        .unwrap_or_else(|| "/".into());
-    command.current_dir(cwd);
+    crate::appimage::outside(&mut command);
     command
         .spawn()
         .map(drop)

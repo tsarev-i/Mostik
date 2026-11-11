@@ -19,6 +19,23 @@ fn now_mcs() -> Timestamp {
     (js_sys::Date::now() * 1000.0) as Timestamp
 }
 
+/// Authors that came with a history page: new ones are added, a known one keeps its data and only
+/// gets what it lacked (a push may have brought the bare `From` without a photo).
+fn learn_users(s: &mut Snapshot, users: Vec<User>) {
+    for u in users {
+        match s.users.iter_mut().find(|x| x.id == u.id) {
+            Some(known) => {
+                if known.display_name.is_empty() || known.display_name == known.id.0 {
+                    known.display_name = u.display_name;
+                }
+                known.avatar = known.avatar.take().or(u.avatar);
+                known.title = known.title.take().or(u.title);
+            }
+            None => s.users.push(u),
+        }
+    }
+}
+
 /// Inserts or replaces a message; keeps the thread and unread counters up to date.
 pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
     let current = c.current.get_untracked();
@@ -48,10 +65,16 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
             return;
         }
         let mine = m.author == s.me;
-        let me_name = s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default();
-        let mentioned = s
-            .mention_names()
-            .with(|who| mostik_core::markup::mentions_me(&m.text, who, &me_name));
+        let viewing = current == m.chat_id
+            && document_visible()
+            && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
+        // Only an unread feed message from someone else can add a mention.
+        let counts = !mine && !viewing && m.thread_parent.is_none();
+        let mentioned = counts && {
+            let me_name = s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default();
+            s.mention_names()
+                .with(|who| mostik_core::markup::mentions_me(&m.text, who, &me_name))
+        };
         if let Some(parent) = m.thread_parent {
             if let Some(p) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == parent) {
                 let t = p.thread.get_or_insert(ThreadSummary {
@@ -67,10 +90,7 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
             }
         } else if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == m.chat_id) {
             ch.last_ts = ch.last_ts.max(m.ts);
-            let viewing = current == m.chat_id
-                && document_visible()
-                && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
-            if !mine && !viewing {
+            if counts {
                 ch.unread += 1;
                 if mentioned {
                     ch.mentions += 1;
@@ -213,11 +233,12 @@ fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
 async fn load_latest(c: Ctx, id: &ChatId) {
     let read_on_open = c.settings.with_untracked(|s| s.mark_read_on_open);
     match bridge::history(&id.0, None, None).await {
-        Ok(messages) => {
-            let full = messages.len() < PAGE;
+        Ok(page) => {
+            let full = page.messages.len() < PAGE;
             c.snap.update(|s| {
+                learn_users(s, page.users);
                 s.messages.retain(|m| &m.chat_id != id || m.thread_parent.is_some());
-                s.messages.extend(messages);
+                s.messages.extend(page.messages);
             });
             c.exhausted.update(|e| {
                 if full {
@@ -295,14 +316,15 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
             });
             let Some(oldest) = oldest else { break };
             match bridge::history(&chat2.0, Some(oldest), None).await {
-                Ok(messages) => {
-                    if messages.len() < PAGE {
+                Ok(page) => {
+                    if page.messages.len() < PAGE {
                         c.exhausted.update(|e| {
                             e.insert(chat2.clone());
                         });
                     }
                     c.snap.update(|s| {
-                        for m in messages {
+                        learn_users(s, page.users);
+                        for m in page.messages {
                             if !s.messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
                                 s.messages.push(m);
                             }
@@ -359,14 +381,15 @@ pub fn load_older(c: Ctx) -> bool {
     c.loading_older.set(true);
     spawn_local(async move {
         match bridge::history(&id.0, Some(oldest), None).await {
-            Ok(messages) => {
-                if messages.len() < PAGE {
+            Ok(page) => {
+                if page.messages.len() < PAGE {
                     c.exhausted.update(|e| {
                         e.insert(id.clone());
                     });
                 }
                 c.snap.update(|s| {
-                    for m in messages {
+                    learn_users(s, page.users);
+                    for m in page.messages {
                         if !s.messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
                             s.messages.push(m);
                         }
@@ -389,10 +412,11 @@ pub fn open_thread(c: Ctx, parent: Timestamp) {
     let id = c.current.get_untracked();
     spawn_local(async move {
         match bridge::history(&id.0, None, Some(parent)).await {
-            Ok(replies) => c.snap.update(|s| {
+            Ok(page) => c.snap.update(|s| {
+                learn_users(s, page.users);
                 s.messages
                     .retain(|m| !(m.chat_id == id && m.thread_parent == Some(parent)));
-                s.messages.extend(replies);
+                s.messages.extend(page.messages);
             }),
             Err(e) => report(c, format!("{}: {e}", tr().err_thread)),
         }
@@ -417,6 +441,7 @@ pub async fn send(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>)
             seq_no: 0,
             attachments: vec![],
             forwarded: vec![],
+            call: None,
         }
     };
     upsert(c, message, None);
@@ -557,9 +582,10 @@ pub fn start_call(c: Ctx, chat: ChatId) {
             }
         })
     });
+    let url = c.active_calls.with_untracked(|a| a.get(&chat).cloned());
     c.notice.set(Some(tr().call_opening.into()));
     spawn_local(async move {
-        if let Err(e) = bridge::start_call(&chat.0, &label).await {
+        if let Err(e) = bridge::start_call(&chat.0, &label, url.as_deref()).await {
             c.notice.set(None);
             report(c, format!("{}: {e}", tr().err_call));
         }
@@ -825,6 +851,7 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
         seq_no,
         attachments: vec![],
         forwarded: original,
+        call: None,
     };
     upsert(c, message, None);
     Ok(())

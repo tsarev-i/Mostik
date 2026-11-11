@@ -60,6 +60,7 @@ fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
         seq_no: 0,
         attachments: vec![],
         forwarded: vec![],
+        call: None,
     }
 }
 
@@ -67,6 +68,18 @@ fn reply(chat: &str, parent: Timestamp, ts: Timestamp, author: &str, text: &str)
     Message {
         thread_parent: Some(parent),
         ..msg(chat, ts, author, text)
+    }
+}
+
+fn call(chat: &str, ts: Timestamp, author: &str, started: bool) -> Message {
+    let url = format!("https://telemost.360.yandex.ru/j/demo-{chat}");
+    Message {
+        call: Some(if started {
+            CallNote::Started { url }
+        } else {
+            CallNote::Ended { url }
+        }),
+        ..msg(chat, ts, author, "")
     }
 }
 
@@ -272,6 +285,9 @@ pub fn demo() -> Snapshot {
             "gleb",
             "Minor ones go into the next patch.",
         ),
+        call("design", YESTERDAY + 210 * MIN, "anna", true),
+        call("design", YESTERDAY + 245 * MIN, "anna", false),
+        call("release", TODAY + 55 * MIN, "gleb", true),
         msg("random", TODAY + 8 * MIN, "boris", "Has anyone seen my cat mug?"),
         msg(
             "news",

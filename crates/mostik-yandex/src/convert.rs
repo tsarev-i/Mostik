@@ -163,19 +163,19 @@ fn user_from(v: &Value) -> Option<User> {
 
 /// Message from a `ServerMessage` (history) or a push body: both have the same structure.
 pub enum Parsed {
-    Message(Message),
+    Message(Box<Message>),
     Deleted {
         chat_id: ChatId,
         ts: Timestamp,
     },
-    /// System or service message: never shown in the feed.
+    /// A service message or a system one the feed does not show.
     Skip,
 }
 
 fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>) -> Parsed {
     let info = &sm["ServerMessageInfo"];
     let Some(plain) = sm.pointer("/ClientMessage/Plain") else {
-        return Parsed::Skip;
+        return call_note(sm).map_or(Parsed::Skip, |m| Parsed::Message(Box::new(m)));
     };
     let Some(chat) = s(plain, &["ChatId"]).or(chat_hint) else {
         return Parsed::Skip;
@@ -199,7 +199,7 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
             last_reply_ts: n(info, &["ThreadState", "LastTsMcs"]).unwrap_or(ts),
             participants: vec![],
         });
-    Parsed::Message(Message {
+    Parsed::Message(Box::new(Message {
         chat_id,
         ts,
         author: UserId(s(info, &["From", "Guid"]).unwrap_or_default().to_owned()),
@@ -216,7 +216,50 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
         seq_no: n(info, &["SeqNo"]).unwrap_or(0),
         attachments: attachments(plain),
         forwarded,
+        call: None,
+    }))
+}
+
+/// Telemost's system message about a call in the chat:
+/// `SystemMessage{ChatId, MeetingStartedMessage | MeetingEndedMessage: {MeetingId}}`,
+/// where `MeetingId` is the meeting link. The author is whoever started or ended the call.
+fn call_note(sm: &Value) -> Option<Message> {
+    let sys = sm.pointer("/ClientMessage/SystemMessage")?;
+    let info = &sm["ServerMessageInfo"];
+    let (started, meeting) = match (sys.get("MeetingStartedMessage"), sys.get("MeetingEndedMessage")) {
+        (Some(m), _) => (true, m),
+        (None, Some(m)) => (false, m),
+        (None, None) => return None,
+    };
+    let url = meeting_url(s(meeting, &["MeetingId"])?);
+    Some(Message {
+        chat_id: ChatId(s(sys, &["ChatId"])?.to_owned()),
+        ts: n(info, &["Timestamp"])?,
+        author: UserId(s(info, &["From", "Guid"]).unwrap_or_default().to_owned()),
+        text: String::new(),
+        thread_parent: None,
+        edited: false,
+        important: false,
+        reactions: vec![],
+        thread: None,
+        seq_no: n(info, &["SeqNo"]).unwrap_or(0),
+        attachments: vec![],
+        forwarded: vec![],
+        call: Some(if started {
+            CallNote::Started { url }
+        } else {
+            CallNote::Ended { url }
+        }),
     })
+}
+
+/// A meeting link from a `MeetingId`, which is either the link itself or the bare meeting number.
+pub fn meeting_url(id: &str) -> String {
+    if id.starts_with("https://") {
+        id.to_owned()
+    } else {
+        format!("https://telemost.360.yandex.ru/j/{id}")
+    }
 }
 
 /// Forwarded messages: `ForwardedMessages[]{Payload (like Plain), ServerMessageInfo{From, Timestamp}}`.
@@ -275,7 +318,7 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
             }
             if let Parsed::Message(m) = parse_server_message(sm, Some(id), me) {
                 last_ts = last_ts.max(m.ts);
-                out.messages.push(m);
+                out.messages.push(*m);
             }
         }
         out.last
@@ -324,7 +367,7 @@ pub fn search_messages(v: &Value, me: Option<&UserId>) -> (Vec<Message>, Vec<Use
             users.entry(u.id.0.clone()).or_insert(u);
         }
         if let Parsed::Message(m) = parse_server_message(sm, None, me) {
-            out.push(m);
+            out.push(*m);
         }
     }
     (out, users.into_values().collect())
@@ -433,7 +476,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     match parse_server_message(sm, None, me) {
         Parsed::Message(message) => Some(LiveEvent::Upsert {
             author: sm.pointer("/ServerMessageInfo/From").and_then(user_from),
-            message: Box::new(message),
+            message,
         }),
         Parsed::Deleted { chat_id, ts } => Some(LiveEvent::Deleted { chat_id, ts }),
         Parsed::Skip => None,
@@ -740,6 +783,44 @@ mod tests {
             &json!({"CustomStatus": {"Emoji": "📞", "Text": "Созвоны до обеда"}})
         ));
         assert!(!is_meeting_status(&json!({"Availability": 3})));
+    }
+
+    #[test]
+    fn meeting_messages_are_call_notes() {
+        let push = |kind: &str, id: &str| {
+            json!({"ServerMessage": {"ClientMessage": {"NotificationBehaviour": 2, "SystemMessage": {
+                    "ChatId": "0/0/abc", kind: {"MeetingId": id}, "PayloadId": "p"}},
+                "ServerMessageInfo": {"From": {"DisplayName": "Sergey", "Guid": "u1"}, "SeqNo": 51, "Timestamp": 7}}})
+        };
+        match from_push(
+            &push("MeetingStartedMessage", "https://telemost.360.yandex.ru/j/123"),
+            None,
+        ) {
+            Some(LiveEvent::Upsert { message, author }) => {
+                assert_eq!(message.chat_id, ChatId("0/0/abc".into()));
+                assert_eq!((message.ts, message.seq_no, message.author.0.as_str()), (7, 51, "u1"));
+                assert_eq!(
+                    message.call,
+                    Some(CallNote::Started {
+                        url: "https://telemost.360.yandex.ru/j/123".into()
+                    })
+                );
+                assert_eq!(author.map(|a| a.display_name), Some("Sergey".into()));
+            }
+            other => panic!("{other:?}"),
+        }
+        match from_push(&push("MeetingEndedMessage", "123"), None) {
+            Some(LiveEvent::Upsert { message, .. }) => assert_eq!(
+                message.call,
+                Some(CallNote::Ended {
+                    url: "https://telemost.360.yandex.ru/j/123".into()
+                })
+            ),
+            other => panic!("{other:?}"),
+        }
+        let joined = json!({"ClientMessage": {"SystemMessage": {"ChatId": "0/0/abc", "UserAction": 0}},
+            "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 8}});
+        assert_eq!(from_push(&joined, None), None);
     }
 
     #[test]

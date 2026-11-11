@@ -94,6 +94,8 @@ pub struct Ctx {
     pub now: RwSignal<f64>,
     /// The call window that is open now, shown at the bottom of the sidebar like a Slack huddle.
     pub call: RwSignal<Option<bridge::CallInfo>>,
+    /// Calls going on in chats (from their call notes), with the meeting links.
+    pub active_calls: Memo<std::collections::BTreeMap<ChatId, String>>,
 }
 
 /// A sidebar chat held with the mouse button.
@@ -294,8 +296,9 @@ fn empty_snapshot() -> Snapshot {
 #[component]
 pub fn App() -> impl IntoView {
     let live = bridge::available();
+    let snap = RwSignal::new(empty_snapshot());
     let c = Ctx {
-        snap: RwSignal::new(empty_snapshot()),
+        snap,
         current: RwSignal::new(ChatId(String::new())),
         thread: RwSignal::new(None),
         collapsed: RwSignal::new(HashSet::new()),
@@ -356,6 +359,7 @@ pub fn App() -> impl IntoView {
         search: RwSignal::new(String::new()),
         now: RwSignal::new(js_sys::Date::now()),
         call: RwSignal::new(None),
+        active_calls: Memo::new(move |_| snap.with(Snapshot::active_calls)),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -1953,19 +1957,20 @@ fn chat_drop(c: Ctx) {
     if moved == current {
         return;
     }
-    // The switch to the custom order applies to every section: those never dragged keep the order
-    // they are shown in now (say, A–Z) instead of falling back to the Telemost one.
+    // The switch to the custom order applies to every section: the others keep the order they
+    // are shown in now (say, A–Z), not a custom order saved long ago nor the Telemost one.
     let switching = c.settings.with_untracked(|s| s.sidebar_sort != SidebarSort::Custom);
-    let kept: Vec<(String, Vec<ChatId>)> = if switching {
+    let shown: Vec<(String, Vec<ChatId>, bool)> = if switching {
         untrack(|| {
             c.snap.with(|s| {
                 s.sections
                     .iter()
-                    .filter(|sec| sec.id != d.section && c.chat_order.with(|o| !o.contains_key(&sec.id)))
-                    // Without a saved order the custom one is the Telemost order, `sec.chats`.
-                    .filter_map(|sec| {
-                        let shown = section_order(c, s, &sec.id, &sec.chats);
-                        (shown != sec.chats).then(|| (sec.id.clone(), shown))
+                    .filter(|sec| sec.id != d.section)
+                    .map(|sec| {
+                        let order = section_order(c, s, &sec.id, &sec.chats);
+                        // Without a saved order the custom one is the Telemost order, `sec.chats`.
+                        let telemost = order == sec.chats;
+                        (sec.id.clone(), order, telemost)
                     })
                     .collect()
             })
@@ -1975,7 +1980,13 @@ fn chat_drop(c: Ctx) {
     };
     c.chat_order.update(|o| {
         o.insert(d.section, moved);
-        o.extend(kept);
+        for (id, order, telemost) in shown {
+            if telemost {
+                o.remove(&id);
+            } else {
+                o.insert(id, order);
+            }
+        }
     });
     if switching {
         c.settings.update(|s| s.sidebar_sort = SidebarSort::Custom);
@@ -2125,6 +2136,9 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                 _ => None,
             });
             let badge = (ch.mentions > 0).then(|| view! { <span class="badge">{ch.mentions}</span> });
+            let live_call = c.active_calls.with(|a| a.contains_key(&ch.id)).then(|| {
+                view! { <span class="sb-call" title=tr().call_live_hint><Icon icon=I::Headphones size=13/></span> }
+            });
             let has_draft = !selected.get() && c.drafts.with(|d| d.get(&ch.id).is_some_and(|t| !t.trim().is_empty()));
             let pencil = (has_draft && ch.mentions == 0)
                 .then(|| view! { <span class="sb-pencil"><Icon icon=I::Compose size=13/></span> });
@@ -2134,6 +2148,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                     <span class="sb-name">{title}</span>
                     {you}
                     {face_status}
+                    {live_call}
                     {pencil}
                     {badge}
                 </button>
@@ -2184,12 +2199,25 @@ fn ChannelHeader() -> impl IntoView {
                             <span>{ch.member_count}</span>
                         </button>
                     })}
-                    <button class="huddle-btn" title=tr().call_hint
-                        class:active=move || c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_deref() == Some(c.current.get().0.as_str())))
-                        on:click=move |_| ops::start_call(c, c.current.get_untracked())>
-                        <Icon icon=I::Video size=16/>
-                        <span>{tr().call}</span>
-                    </button>
+                    {move || {
+                        // A call going on in the chat turns the button into "Join", as in Slack,
+                        // unless the user is already in it.
+                        let current = c.current.get();
+                        let joined = c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_deref() == Some(current.0.as_str())));
+                        let live = !joined && c.active_calls.with(|a| a.contains_key(&current));
+                        view! {
+                            <button class="huddle-btn" class:live=live class:active=joined
+                                title=if live { tr().call_live_hint } else { tr().call_hint }
+                                on:click=move |_| ops::start_call(c, c.current.get_untracked())>
+                                {if live {
+                                    view! { <Icon icon=I::Headphones size=16/> }.into_any()
+                                } else {
+                                    view! { <Icon icon=I::Video size=16/> }.into_any()
+                                }}
+                                <span>{if live { tr().call_join } else { tr().call }}</span>
+                            </button>
+                        }
+                    }}
                 </div>
             </div>
             <nav class="ch-tabs">
@@ -2469,6 +2497,9 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
             out.push(view! { <div class="day-group"><DayDivider ts=ts/>{items}</div> }.into_any());
         }
     };
+    // Only the latest call note can offer "Join"; an end note shows how long its call lasted.
+    let last_call = list.iter().rev().find(|m| m.call.is_some()).map(|m| m.ts);
+    let mut started: Option<(String, Timestamp)> = None;
     for m in list {
         let new_day = prev.as_ref().is_none_or(|p| time::day_key(p.ts) != time::day_key(m.ts));
         if new_day && !in_thread {
@@ -2476,7 +2507,18 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
             day_ts = Some(m.ts);
         }
         let grouped = !new_day && continues_group(prev.as_ref(), &m);
-        let row = view! { <MessageRow msg=m.clone() grouped=grouped in_thread=in_thread/> }.into_any();
+        let row = match &m.call {
+            Some(CallNote::Started { url }) => {
+                started = Some((url.clone(), m.ts));
+                let live = last_call == Some(m.ts);
+                view! { <CallRow msg=m.clone() live=live since=None/> }.into_any()
+            }
+            Some(CallNote::Ended { url }) => {
+                let since = started.take().filter(|(u, _)| u == url).map(|(_, ts)| ts);
+                view! { <CallRow msg=m.clone() live=false since=since/> }.into_any()
+            }
+            None => view! { <MessageRow msg=m.clone() grouped=grouped in_thread=in_thread/> }.into_any(),
+        };
         if in_thread {
             out.push(row)
         } else {
@@ -2486,6 +2528,49 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
     }
     flush(&mut out, &mut day, day_ts);
     out
+}
+
+/// A call note in the feed, like Slack's huddle message: who started the call and "Join" while it
+/// goes on, or that it ended and how long it lasted (`since` is when it started).
+#[component]
+fn CallRow(msg: Message, live: bool, since: Option<Timestamp>) -> impl IntoView {
+    let c = ctx();
+    let started = matches!(msg.call, Some(CallNote::Started { .. }));
+    let author = c.snap.with_untracked(|s| s.user(&msg.author).cloned());
+    let who = started.then(|| {
+        let name = author
+            .as_ref()
+            .map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
+        let id = msg.author.clone();
+        view! { <button class="msg-author" on:click=move |_| ops::open_profile(c, id.clone())>{name}</button> }
+    });
+    let lasted = since.map(|from| tr().call_lasted(msg.ts.saturating_sub(from) / 60_000_000));
+    let chat = msg.chat_id.clone();
+    // The button stays while the call goes on: a later end note removes it.
+    let join = live.then(|| {
+        view! {
+            {move || c.active_calls.with(|a| a.contains_key(&chat)).then(|| {
+                let chat = chat.clone();
+                view! {
+                    <button class="btn small call-join" on:click=move |_| ops::start_call(c, chat.clone())>
+                        <Icon icon=I::Headphones size=14/><span>{tr().call_join}</span>
+                    </button>
+                }
+            })}
+        }
+    });
+    view! {
+        <div class="msg call-note" class:ended=!started data-ts=msg.ts.to_string()>
+            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=I::Headphones size=16/></span></span>
+            <div class="call-note-body">
+                <span class="call-note-title">{if started { tr().call_started } else { tr().call_ended }}</span>
+                {who.map(|w| view! { <span class="call-note-sep">"·"</span>{w} })}
+                <span class="msg-time">{time::hm(msg.ts)}</span>
+                {lasted.map(|l| view! { <span class="call-note-sep">"·"</span><span class="call-note-meta">{l}</span> })}
+            </div>
+            {join}
+        </div>
+    }
 }
 
 #[component]
@@ -3110,8 +3195,7 @@ fn mention_suggestions(s: &Snapshot, chat: &ChatId, query: &str, limit: usize) -
         .collect();
     people.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.display_name.cmp(&b.1.display_name)));
     let mut channels: Vec<(u8, String)> = s
-        .mention_names()
-        .channels
+        .mention_channels()
         .into_iter()
         .filter_map(|n| mention_rank(&n, &q).map(|r| (r, n)))
         .collect();
@@ -3147,6 +3231,25 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     let suggestions: RwSignal<Vec<Suggestion>> = RwSignal::new(vec![]);
     let suggest_sel = RwSignal::new(0usize);
+
+    // The field grows with the text up to its `max-height`, as in Slack: on every change of the
+    // text (typing, a restored draft, sending, formatting) and of the width, which rewraps the
+    // lines. WebKitGTK has no `field-sizing: content`.
+    let fit = move || {
+        request_animation_frame(move || {
+            if let Some(el) = area.get_untracked() {
+                autosize(&el);
+            }
+        })
+    };
+    Effect::new(move |_| {
+        draft.track();
+        c.sidebar_w.track();
+        c.thread_w.track();
+        fit();
+    });
+    let resize = window_event_listener(ev::resize, move |_| fit());
+    on_cleanup(move || resize.remove());
 
     // Chat draft: fill it in on opening, save it while typing (main composer only).
     Effect::new(move |_| {
@@ -3291,7 +3394,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 let last = c.snap.with_untracked(|s| {
                     s.messages
                         .iter()
-                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp)
+                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && m.call.is_none())
                         .max_by_key(|m| m.ts)
                         .cloned()
                 });
@@ -4238,6 +4341,9 @@ fn DmList() -> impl IntoView {
                 let selected = c.current.with(|cur| cur == &id);
                 let me = c.snap.with(|s| s.me.clone());
                 let preview = last.as_ref().map(|m| {
+                    if let Some(note) = &m.call {
+                        return format!("📞 {}", if matches!(note, CallNote::Started { .. }) { tr().call_started } else { tr().call_ended });
+                    }
                     let text = mostik_core::markup::plain(&m.text);
                     let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", mostik_core::markup::plain(&m.forwarded[0].text)) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
                     if m.author == me && ch.kind != ChatKind::Notes { format!("{}: {text}", tr().you_label) } else { text }
@@ -4327,14 +4433,20 @@ fn ActivityList() -> impl IntoView {
         c.snap.with(|s| {
             let me = s.me.clone();
             let my_name = s.user(&me).map(|u| u.display_name.clone()).unwrap_or_default();
-            let who = s.mention_names();
+            let names = s.mention_names();
+            let people: Vec<&str> = names.people.iter().map(String::as_str).collect();
+            let channels: Vec<&str> = names.channels.iter().map(String::as_str).collect();
+            let who = Mentionable {
+                people: &people,
+                channels: &channels,
+            };
             let mut seen = HashSet::new();
             let mut out: Vec<(Message, ActivityKind)> = vec![];
             for m in s.messages.iter().chain(extra.iter()) {
                 if !seen.insert((m.chat_id.clone(), m.ts)) {
                     continue;
                 }
-                if m.author != me && who.with(|w| mostik_core::markup::mentions_me(&m.text, w, &my_name)) {
+                if m.author != me && mostik_core::markup::mentions_me(&m.text, &who, &my_name) {
                     out.push((m.clone(), ActivityKind::Mention));
                 } else if let Some(parent) = m.thread_parent
                     && m.author != me
@@ -4458,7 +4570,7 @@ fn DraftsView() -> impl IntoView {
             let mut list: Vec<(Message, String)> = s
                 .messages
                 .iter()
-                .filter(|m| m.author == s.me)
+                .filter(|m| m.author == s.me && m.call.is_none())
                 .map(|m| {
                     (
                         m.clone(),

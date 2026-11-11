@@ -460,6 +460,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 /* In this chat's call: green, like the active huddle toggle in Slack. */
 .huddle-btn.active { border-color: var(--online); background: var(--online); color: #fff; }
 .huddle-btn.active:hover { background: #239a69; }
+/* A call is going on in the chat: "Join" in green outline. */
+.huddle-btn.live { border-color: var(--online); color: var(--online); }
 
 .ch-tabs { height: 37px; display: flex; align-items: stretch; gap: 4px; padding: 0 12px; }
 
@@ -544,6 +546,29 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 13px;
   color: var(--online);
 }
+
+/* "A call started / ended" line in the feed, like Slack's huddle message. */
+.msg.call-note { display: flex; align-items: center; gap: 8px; }
+.call-note-icon {
+  width: 40px;
+  height: 32px;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.call-note-badge {
+  display: grid;
+  place-items: center;
+  padding: 7px;
+  border-radius: 8px;
+  background: var(--online);
+  color: #fff;
+}
+.call-note.ended .call-note-badge { background: var(--bg-hover); color: var(--text-muted); }
+.call-note-body { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.call-note-title { color: var(--text-strong); font-weight: 700; }
+.call-note-sep, .call-note-meta { color: var(--text-muted); font-size: 13px; }
+.call-join { flex: none; display: flex; align-items: center; gap: 6px; border-color: var(--online); color: var(--online); }
 
 .msg-row { display: flex; gap: 8px; }
 .msg-gutter { width: 40px; flex: none; padding-top: 4px; }
@@ -720,7 +745,6 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: none;
   color: var(--text);
   font: 15px/1.46668 var(--font);
-  field-sizing: content;
 }
 .composer textarea::placeholder { color: var(--text-muted); }
 
@@ -1347,6 +1371,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 .call-btn.leave { flex: none; background: #e01e5a; }
 .call-btn.leave:hover { background: #c41a50; }
 .sb-pencil { margin-left: auto; opacity: 0.8; display: grid; place-items: center; }
+/* A call is going on in the chat: green headphones, like Slack's huddle mark. */
+.sb-call { margin-left: auto; display: grid; place-items: center; color: var(--online); }
+.sb-call ~ .sb-pencil, .sb-call ~ .badge { margin-left: 6px; }
 .sb-draft-count { margin-left: auto; display: flex; align-items: center; gap: 4px; font-size: 12px; opacity: 0.8; }
 .dm-list { flex: 1; overflow-y: auto; padding: 4px 0 12px; }
 .dm-list-title { padding: 4px 16px 8px; font-size: 13px; font-weight: 700; opacity: 0.8; }
@@ -1701,9 +1728,14 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 :root[data-mode="light"] .emoji-suggest { background: #fff; }
 .emoji-suggest button { width: 100%; display: flex; align-items: center; gap: 10px; padding: 4px 16px; text-align: left; }
-.emoji-suggest button .glyph { font-size: 18px; width: 22px; }
+.emoji-suggest button .glyph {
+  width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
 .emoji-suggest button.active, .emoji-suggest button:hover { background: #1264a3; color: #fff; }
-.emoji-suggest button .glyph { display: flex; align-items: center; justify-content: center; }
 .emoji-suggest button .name { font-weight: 700; white-space: nowrap; }
 .emoji-suggest button .hint { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .emoji-suggest button.active .hint, .emoji-suggest button:hover .hint { color: rgba(255, 255, 255, 0.8); }

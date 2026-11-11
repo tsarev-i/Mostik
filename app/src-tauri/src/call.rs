@@ -78,11 +78,16 @@ pub fn is_meeting_url(url: &str) -> bool {
     })
 }
 
-/// Cookie domain as it reaches the call window: always a domain cookie (`.yandex.ru`), so that
+/// Cookie domain as it reaches the call window: a domain cookie (`.yandex.ru`), so that
 /// `Session_id` of `yandex.ru` also goes to `telemost.360.yandex.ru`. The jar keeps the domain
 /// without the dot, and the HTTP client matches subdomains too.
 fn cookie_domain(domain: &str) -> String {
     format!(".{}", domain.trim_start_matches('.'))
+}
+
+/// A `__Host-` cookie must stay on its own host: browsers refuse it with a `Domain`.
+fn host_only(name: &str) -> bool {
+    name.starts_with("__Host-")
 }
 
 /// How long the meeting page must be open before leaving it counts as the end of the call.
@@ -98,13 +103,15 @@ struct EndWatch {
 }
 
 impl EndWatch {
-    /// Whether the window going to `url` at `now` ends the call.
+    /// Whether the window going to `url` at `now` ends the call. `same_document` marks the page
+    /// changing its own address (the single-page app's routing) rather than loading a new one.
     ///
-    /// The page script's [`ENDED_URL`] always does. Otherwise, once the meeting page has been
-    /// open for [`ARM_AFTER`], leaving it for any other web page does: after "Leave" Telemost
-    /// shows its chats or home page there. A Yandex ID sign-in page does not, since the user may
-    /// sign in right in the window.
-    fn ends(&mut self, url: &str, now: Instant) -> bool {
+    /// The page script's [`ENDED_URL`] always does. Leaving the meeting page for another Yandex
+    /// page does too: after "Leave" Telemost shows its chats or home page there. The page's own
+    /// routing counts at once; a page load only once the meeting page has been open for
+    /// [`ARM_AFTER`], since loads right after it are redirects. Sign-in pages never end the
+    /// call, nor do pages outside Yandex (a corporate sign-in): the user may sign in right there.
+    fn ends(&mut self, url: &str, now: Instant, same_document: bool) -> bool {
         if url == ENDED_URL {
             return true;
         }
@@ -112,15 +119,29 @@ impl EndWatch {
             self.meeting_since.get_or_insert(now);
             return false;
         }
-        let armed = self.meeting_since.is_some_and(|t| now.duration_since(t) >= ARM_AFTER);
-        armed && Url::parse(url).is_ok_and(|u| u.scheme() == "https" && !is_sign_in(&u))
+        let Some(since) = self.meeting_since else { return false };
+        let armed = same_document || now.duration_since(since) >= ARM_AFTER;
+        armed && Url::parse(url).is_ok_and(|u| u.scheme() == "https" && is_yandex(&u) && !is_sign_in(&u))
     }
 }
 
-/// Yandex ID pages: `passport.yandex.ru` and its regional twins, corporate SSO.
+fn is_yandex(u: &Url) -> bool {
+    u.host_str().is_some_and(|h| {
+        ["yandex.ru", "yandex.com", "yandex.net"]
+            .iter()
+            .any(|d| h == *d || h.ends_with(&format!(".{d}")))
+    })
+}
+
+/// Yandex ID and other sign-in pages: `passport.yandex.ru` and its regional twins, `id.`,
+/// `oauth.`, `sso.` and `auth.` hosts.
 fn is_sign_in(u: &Url) -> bool {
-    u.host_str()
-        .is_some_and(|h| h.starts_with("passport.") || h.contains(".passport.") || h.starts_with("sso."))
+    u.host_str().is_some_and(|h| {
+        h.contains(".passport.")
+            || ["passport.", "id.", "oauth.", "sso.", "auth."]
+                .iter()
+                .any(|p| h.starts_with(p))
+    })
 }
 
 /// Opens the meeting in the call window. If that call is already open, its window comes to the
@@ -135,29 +156,29 @@ pub async fn open(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar) -
     open_locked(app, url, info, jar).await
 }
 
-/// Opens the call of a chat; `meeting` asks Telemost for its link (`create_meeting`, which also
-/// announces the call in the chat). An open call of this chat only comes to the front without
-/// asking again, and so does a second click while the window is still opening: the check and
-/// the request run under the same lock as the opening. A call opened from a message link has
-/// no chat, so its link decides.
-pub async fn open_chat_call<F, Fut>(app: &AppHandle, info: CallInfo, jar: &CookieJar, meeting: F) -> Result<(), String>
+/// Opens the call of a chat. `prepare` asks Telemost for its link (`create_meeting`, which also
+/// announces the call in the chat) and gives the session cookies; it runs only when no call is
+/// open. An open call of this chat only comes to the front, and so does a second click while the
+/// window is still opening: the check and the request run under the same lock as the opening.
+/// Any other open call, including one from a message link, is refused before `prepare`, so
+/// no chat hears of a call that does not open.
+pub async fn open_chat_call<F, Fut>(app: &AppHandle, info: CallInfo, prepare: F) -> Result<(), String>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<String, String>>,
+    Fut: Future<Output = Result<(String, CookieJar), String>>,
 {
     let state = app.state::<CallState>();
     let _opening = state.opening.lock().await;
     if let Some((current, handle)) = current(app) {
         imp::focus(app, &handle).await;
-        return match current.info.chat_id {
-            Some(open) if Some(&open) == info.chat_id.as_ref() => Ok(()),
-            Some(_) => Err(BUSY.into()),
-            None if meeting().await? == current.url => Ok(()),
-            None => Err(BUSY.into()),
+        return if current.info.chat_id.is_some() && current.info.chat_id == info.chat_id {
+            Ok(())
+        } else {
+            Err(BUSY.into())
         };
     }
-    let url = meeting().await?;
-    open_locked(app, &url, info, jar).await
+    let (url, jar) = prepare().await?;
+    open_locked(app, &url, info, &jar).await
 }
 
 /// The opening itself; the caller holds `CallState::opening` and has seen no open call.
@@ -228,24 +249,20 @@ struct Current {
     url: String,
 }
 
-/// The open call and its window handle. A call whose window is gone is forgotten here.
+/// The open call and its window handle; `None` once its window is gone. Forgetting the call is
+/// up to `ended`, which runs when the window goes on both platforms, so that the status check
+/// after the call is scheduled once.
 fn current(app: &AppHandle) -> Option<(Current, imp::Handle)> {
     let state = app.state::<CallState>();
-    let mut active = state.active.lock().ok()?;
+    let active = state.active.lock().ok()?;
     let a = active.as_ref()?;
-    if imp::alive(app, &a.handle) {
+    imp::alive(app, &a.handle).then(|| {
         let current = Current {
             info: a.info.clone(),
             url: a.url.clone(),
         };
-        return Some((current, a.handle.clone()));
-    }
-    *active = None;
-    drop(active);
-    let _ = app.emit(CALL_EVENT, None::<CallInfo>);
-    // `ended` will find nothing to forget, so the leftover status is checked from here.
-    crate::backend::clear_meeting_status_later(app.clone());
-    None
+        (current, a.handle.clone())
+    })
 }
 
 /// The window of call `generation` has closed: forget the call, unless a newer one replaced it.
@@ -570,7 +587,8 @@ mod imp {
             let Some(url) = main_frame_url(&e, &target) else {
                 continue;
             };
-            if watch.ends(&url, std::time::Instant::now()) {
+            let same_document = e.method == "Page.navigatedWithinDocument";
+            if watch.ends(&url, std::time::Instant::now(), same_document) {
                 eprintln!("call: left the meeting, closing the window");
                 let _ = cdp.send("Browser.close", json!({}), None).await;
                 return;
@@ -649,10 +667,7 @@ mod imp {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         // From inside an AppImage the image's libraries would break the system browser.
-        if let Some(appdir) = crate::appimage::appdir() {
-            cmd.env_clear()
-                .envs(crate::appimage::clean_env(std::env::vars_os(), &appdir));
-        }
+        crate::appimage::outside(&mut cmd);
         // SAFETY: only async-signal-safe calls (fcntl, dup2) between fork and exec.
         unsafe {
             cmd.pre_exec(move || {
@@ -727,14 +742,19 @@ mod imp {
         jar.cookies
             .iter()
             .map(|c| {
-                json!({
+                let mut v = json!({
                     "name": c.name,
                     "value": c.value,
-                    "domain": super::cookie_domain(&c.domain),
                     "path": "/",
                     "secure": true,
                     "sameSite": "None",
-                })
+                });
+                if super::host_only(&c.name) {
+                    v["url"] = json!(format!("https://{}/", c.domain.trim_start_matches('.')));
+                } else {
+                    v["domain"] = json!(super::cookie_domain(&c.domain));
+                }
+                v
             })
             .collect()
     }
@@ -800,6 +820,21 @@ b{{color:#f8f8f8;font-size:17px}}
                 vec!["https://telemost.360.yandex.ru", "https://telemost.yandex.ru"]
             );
             assert_eq!(origins("https://example.org/j/1")[0], "https://example.org");
+        }
+
+        #[test]
+        fn host_prefixed_cookies_stay_on_their_host() {
+            use mostik_yandex::session::StoredCookie;
+            let jar = CookieJar {
+                cookies: vec![StoredCookie {
+                    name: "__Host-x".into(),
+                    value: "1".into(),
+                    domain: "telemost.360.yandex.ru".into(),
+                }],
+            };
+            let c = cookies(&jar);
+            assert_eq!(c[0]["url"], "https://telemost.360.yandex.ru/");
+            assert!(c[0].get("domain").is_none());
         }
 
         #[test]
@@ -1034,7 +1069,7 @@ mod imp {
             .on_navigation(move |url| {
                 let ends = watch
                     .lock()
-                    .is_ok_and(|mut w| w.ends(url.as_str(), std::time::Instant::now()));
+                    .is_ok_and(|mut w| w.ends(url.as_str(), std::time::Instant::now(), false));
                 if !ends {
                     return true;
                 }
@@ -1076,7 +1111,14 @@ mod imp {
         let cookies: Vec<(String, String, String)> = jar
             .cookies
             .iter()
-            .map(|c| (c.name.clone(), c.value.clone(), super::cookie_domain(&c.domain)))
+            .map(|c| {
+                let domain = if super::host_only(&c.name) {
+                    c.domain.trim_start_matches('.').to_owned()
+                } else {
+                    super::cookie_domain(&c.domain)
+                };
+                (c.name.clone(), c.value.clone(), domain)
+            })
             .collect();
         let (tx, rx) = tokio::sync::oneshot::channel();
         window
@@ -1185,29 +1227,32 @@ mod tests {
     #[test]
     fn what_ends_the_call() {
         let t0 = Instant::now();
+        let soon = t0 + Duration::from_secs(1);
         let later = t0 + ARM_AFTER;
         let meeting = "https://telemost.360.yandex.ru/private-join/123?theme=dark";
+        let in_meeting = || {
+            let mut w = EndWatch::default();
+            assert!(!w.ends(meeting, t0, false));
+            w
+        };
         // The page script's signal, at any time.
-        assert!(EndWatch::default().ends(ENDED_URL, t0));
-        // Redirects right after the meeting page loads do not end it.
-        let mut w = EndWatch::default();
-        assert!(!w.ends(meeting, t0));
-        assert!(!w.ends("https://telemost.360.yandex.ru/?retpath=x", t0 + Duration::from_secs(1)));
-        // Later, leaving for Telemost's or another Yandex page does.
-        let mut w = EndWatch::default();
-        assert!(!w.ends(meeting, t0));
-        assert!(w.ends("https://telemost.yandex.ru/chats", later));
-        let mut w = EndWatch::default();
-        assert!(!w.ends(meeting, t0));
-        assert!(w.ends("https://360.yandex.ru/", later));
-        // A sign-in is not the end, nor is staying in the meeting.
-        let mut w = EndWatch::default();
-        assert!(!w.ends(meeting, t0));
-        assert!(!w.ends("https://passport.yandex.ru/auth?retpath=x", later));
-        assert!(!w.ends("https://telemost.360.yandex.ru/j/123", later));
+        assert!(EndWatch::default().ends(ENDED_URL, t0, false));
+        // A page load right after the meeting page is a redirect, not "Leave".
+        assert!(!in_meeting().ends("https://telemost.360.yandex.ru/?retpath=x", soon, false));
+        // The page's own routing away from the meeting is "Leave", however soon.
+        assert!(in_meeting().ends("https://telemost.yandex.ru/chats", soon, true));
+        // Later, loading Telemost's or another Yandex page ends it too.
+        assert!(in_meeting().ends("https://telemost.yandex.ru/chats", later, false));
+        assert!(in_meeting().ends("https://360.yandex.ru/", later, false));
+        // Sign-in pages and pages outside Yandex do not, nor does staying in the meeting.
+        assert!(!in_meeting().ends("https://passport.yandex.ru/auth?retpath=x", later, false));
+        assert!(!in_meeting().ends("https://oauth.yandex.ru/authorize?x", later, true));
+        assert!(!in_meeting().ends("https://id.yandex.ru/", later, false));
+        assert!(!in_meeting().ends("https://login.example-corp.com/saml", later, false));
+        assert!(!in_meeting().ends("https://telemost.360.yandex.ru/j/123", later, true));
         // Before the meeting page, nothing but the signal counts.
-        assert!(!EndWatch::default().ends("https://telemost.360.yandex.ru/", later));
-        assert!(!EndWatch::default().ends("about:blank", later));
+        assert!(!EndWatch::default().ends("https://telemost.360.yandex.ru/", later, true));
+        assert!(!EndWatch::default().ends("about:blank", later, false));
     }
 
     #[test]

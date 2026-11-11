@@ -124,6 +124,10 @@ pub struct Tr {
     pub call_leave: &'static str,
     pub call_go_to_chat: &'static str,
     pub call_busy: &'static str,
+    pub call_started: &'static str,
+    pub call_ended: &'static str,
+    pub call_join: &'static str,
+    pub call_live_hint: &'static str,
     pub in_meeting: &'static str,
     pub no_history: &'static str,
     pub recent_chats: &'static str,
@@ -442,6 +446,10 @@ pub static RU: Tr = Tr {
     call_leave: "Выйти",
     call_go_to_chat: "Перейти в чат созвона",
     call_busy: "Сначала выйдите из текущего созвона",
+    call_started: "Созвон начался",
+    call_ended: "Созвон завершён",
+    call_join: "Присоединиться",
+    call_live_hint: "Сейчас идёт созвон",
     in_meeting: "На встрече",
     no_history: "Здесь появятся недавно открытые чаты",
     recent_chats: "Недавние",
@@ -766,6 +774,10 @@ pub static EN: Tr = Tr {
     call_leave: "Leave",
     call_go_to_chat: "Go to the call’s chat",
     call_busy: "Leave the current call first",
+    call_started: "A call started",
+    call_ended: "The call ended",
+    call_join: "Join",
+    call_live_hint: "A call is going on",
     in_meeting: "In a meeting",
     no_history: "Recently viewed conversations will show up here",
     recent_chats: "Recent",
@@ -1130,6 +1142,17 @@ impl Tr {
         match self.lang {
             Lang::Ru => format!("Сообщение: {name}"),
             Lang::En => format!("Message {name}"),
+        }
+    }
+
+    /// How long a call lasted, from whole minutes.
+    pub fn call_lasted(&self, minutes: u64) -> String {
+        let (h, m) = (minutes / 60, minutes % 60);
+        match (self.lang, h) {
+            (Lang::Ru, 0) => format!("длился {m} мин"),
+            (Lang::Ru, _) => format!("длился {h} ч {m} мин"),
+            (Lang::En, 0) => format!("lasted {m} min"),
+            (Lang::En, _) => format!("lasted {h} h {m} min"),
         }
     }
 
