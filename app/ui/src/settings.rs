@@ -73,6 +73,8 @@ pub struct Settings {
     pub sidebar_sort: SidebarSort,
     /// Hide muted conversations from the sidebar (except mentions).
     pub hide_muted: bool,
+    /// Check GitHub releases for a new version in the background and show "Update" in the top bar.
+    pub auto_update: bool,
 }
 
 impl Default for Settings {
@@ -92,6 +94,7 @@ impl Default for Settings {
             sidebar_filter: SidebarFilter::Active,
             sidebar_sort: SidebarSort::Recency,
             hide_muted: false,
+            auto_update: true,
         }
     }
 }

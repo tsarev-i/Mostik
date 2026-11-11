@@ -1,6 +1,10 @@
 # dev and pull requests: tests on Linux, then bundles in parallel: AppImage for Linux, NSIS setup for Windows.
 # main: the same, then a GitHub release tagged vX.Y.Z with the bundles attached.
 #
+# Auto-update: with the TAURI_SIGNING_PRIVATE_KEY secret (and TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# if the key has one) the bundles are signed, and the release gets latest.json, which installed
+# copies check through the updater endpoint in tauri.conf.json. A release requires the key.
+#
 # Release version: X.Y comes from `[workspace.package] version` in Cargo.toml, Z is one more
 # than the latest vX.Y.* tag (or the patch from Cargo.toml if that is higher). To start a new
 # minor or major line, bump the version in Cargo.toml.
@@ -151,14 +155,29 @@ jobs:
         run: bash scripts/ui.sh build --release
 
       # The UI is already built: on Windows the hook's `bash` could resolve to WSL instead of Git Bash.
+      # With the signing key the bundles get .sig files for the updater; pull requests from forks
+      # have no secrets and build unsigned bundles.
       - name: Build bundles
-        run: cargo tauri build --ci --config '{"build":{"beforeBuildCommand":null}}'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RELEASE: ${{ needs.version.outputs.release }}
+        run: |
+          signed=true
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            if [ "$RELEASE" = true ]; then
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set: a release without signed bundles breaks auto-update"
+              exit 1
+            fi
+            signed=false
+          fi
+          cargo tauri build --ci --config "{\"build\":{\"beforeBuildCommand\":null},\"bundle\":{\"createUpdaterArtifacts\":$signed}}"
 
       - name: Collect bundles
         run: |
           shopt -s nullglob
           mkdir -p dist
-          cp target/release/bundle/*/*.{AppImage,exe} dist/
+          cp target/release/bundle/*/*.{AppImage,exe}{,.sig} dist/
           ls -l dist
 
       - uses: actions/upload-artifact@v7
@@ -182,11 +201,32 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The updater manifest: installed copies fetch it from the latest release and verify the
+      # downloaded bundle against its signature.
+      - name: Write latest.json
+        env:
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          ls -l dist
+          platform() {
+            local file
+            file=$(cd dist && ls $2)
+            jq -n --arg key "$1" --arg url "https://github.com/$GH_REPO/releases/download/v$VERSION/$file" \
+              --arg sig "$(cat "dist/$file.sig")" '{($key): {signature: $sig, url: $url}}'
+          }
+          {
+            platform linux-x86_64 '*.AppImage'
+            platform windows-x86_64 '*-setup.exe'
+          } | jq -s --arg version "$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $version, pub_date: $date, platforms: add}' > latest.json
+          cat latest.json
+
       - name: Publish v${{ needs.version.outputs.version }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          ls -l dist
-          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Mostik v$VERSION" --generate-notes
+          gh release create "v$VERSION" dist/*.AppImage dist/*.exe latest.json \
+            --target "$GITHUB_SHA" --title "Mostik v$VERSION" --generate-notes

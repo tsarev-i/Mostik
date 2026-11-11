@@ -46,6 +46,7 @@ pub enum I {
     Gear,
     Headphones,
     PhoneOff,
+    Download,
 }
 
 fn paths(i: I) -> &'static str {
@@ -131,6 +132,9 @@ fn paths(i: I) -> &'static str {
         }
         I::PhoneOff => {
             r#"<path d="M10.1 13.9a14 14 0 0 0 3.73 2.67 1 1 0 0 0 1.21-.3l.36-.47A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 7.27 16.73"/><path d="M22 2 2 22"/><path d="M4.76 13.58A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.47.35a1 1 0 0 0-.29 1.23 14 14 0 0 0 .24.47"/>"#
+        }
+        I::Download => {
+            r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>"#
         }
     }
 }

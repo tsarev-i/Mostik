@@ -87,7 +87,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 
 .topbar-nav { display: flex; justify-content: flex-end; gap: 4px; }
-.topbar-right { display: flex; justify-content: flex-end; }
+.topbar-right { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
 
 .tb-btn {
   width: 28px;
@@ -98,6 +98,31 @@ button:disabled { opacity: 0.4; cursor: default; }
   color: rgba(255, 255, 255, 0.8);
 }
 .tb-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+
+/* "Update" pill: a new version is out. Light on every frame theme. */
+.update-btn {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px 0 10px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--frame-b);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.update-btn:hover:not(:disabled) { background: #fff; }
+.update-btn:disabled { opacity: 0.85; }
+.update-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
 
 .search {
   height: 28px;
@@ -256,6 +281,23 @@ button:disabled { opacity: 0.4; cursor: default; }
   text-align: left;
 }
 .sb-section-title:hover { background: var(--sidebar-hover); }
+
+.sb-section-head { position: relative; }
+.sb-section-add {
+  position: absolute;
+  top: 2px;
+  right: 12px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: rgba(255, 255, 255, 0.75);
+  opacity: 0;
+}
+.sb-section-head:hover .sb-section-add,
+.sb-section-add:focus-visible { opacity: 1; }
+.sb-section-add:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
 
 .caret { display: grid; place-items: center; width: 20px; transition: transform 0.12s; }
 .caret.collapsed { transform: rotate(-90deg); }
@@ -1414,6 +1456,8 @@ button:disabled { opacity: 0.4; cursor: default; }
 .detail-card { padding: 4px 16px 16px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; }
 .danger-text { color: #e8678a; margin-top: 12px; }
 .pref-hint.flush { margin-left: 0; }
+.pref-actions { display: flex; gap: 8px; margin-top: 10px; }
+.prefs-section p.pref-error { color: #e01e5a; }
 .add-people-row { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
 .member-list { margin-top: 12px; }
 .member-row { display: flex; align-items: center; gap: 12px; padding: 8px 4px; border-radius: 6px; }

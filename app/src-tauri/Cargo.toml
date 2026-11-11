@@ -38,10 +38,14 @@ serde_json.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
+# No TLS feature of its own: its `rustls-tls` adds the ring provider next to reqwest's aws-lc-rs,
+# and rustls then panics without a process default. reqwest is shared with mostik-yandex, so the
+# updater uses the same rustls setup.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["system-proxy"] }
 tokio = { version = "1", features = ["fs", "macros", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# fd setup for the DevTools pipe of the call browser.
+# fd setup for the DevTools pipe of the call browser; close-on-exec flags before the restart after an update.
 libc = "0.2"
 # Same version as wry uses: needed to customise the WebKitGTK context menu.
 webkit2gtk = "=2.0.2"
