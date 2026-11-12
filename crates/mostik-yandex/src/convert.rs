@@ -217,14 +217,9 @@ fn user_from(v: &Value) -> Option<User> {
     let guid = s(v, &["Guid"])?;
     let name = s(v, &["DisplayName"]).or_else(|| s(v, &["PublicName"])).unwrap_or(guid);
     Some(User {
-        id: UserId(guid.to_owned()),
-        display_name: name.to_owned(),
-        title: None,
-        presence: Presence::Offline,
-        status: None,
-        availability: Default::default(),
         is_robot: v.get("IsRobot").and_then(Value::as_bool).unwrap_or(false),
         avatar: s(v, &["AvatarId"]).filter(|a| !a.is_empty()).map(str::to_owned),
+        ..User::named(UserId(guid.to_owned()), name)
     })
 }
 
@@ -573,16 +568,13 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
         let unread = n(chat, &["LastSeqNo"])
             .unwrap_or(0)
             .saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0));
+        let kind = chat_kind(id, me, info.get("IsPublic").and_then(Value::as_bool).unwrap_or(false));
         out.chats.push(Chat {
-            id: chat_id,
-            kind: chat_kind(id, me, info.get("IsPublic").and_then(Value::as_bool).unwrap_or(false)),
             name: s(info, &["Name"]).unwrap_or_default().to_owned(),
             description: s(info, &["Description"]).filter(|d| !d.is_empty()).map(str::to_owned),
             member_count: n(info, &["MemberCount"]).unwrap_or(0) as u32,
             unread: unread.min(999) as u32,
-            mentions: 0,
             muted: chat.get("Muted").and_then(Value::as_bool).unwrap_or(false),
-            mute_mentions: false,
             last_ts,
             peer_seen_ts: n(chat, &["LastSeenTsMcs"]).unwrap_or(0),
             pinned: n(chat, &["PinnedMessageInfo", "PinnedMessageTs"]).filter(|ts| *ts > 0),
@@ -593,6 +585,7 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
                 .flatten()
                 .filter_map(uint)
                 .collect(),
+            ..Chat::new(chat_id, kind)
         });
     }
     out.users = users.into_values().collect();
@@ -1008,19 +1001,11 @@ pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
             .collect(),
     };
     Some(Chat {
-        id: ChatId(id.to_owned()),
-        kind,
         name: s(info, &["name"]).unwrap_or_default().to_owned(),
         description: s(info, &["description"]).filter(|d| !d.is_empty()).map(str::to_owned),
         member_count: n(info, &["members_count"]).unwrap_or(0) as u32,
-        unread: 0,
-        mentions: 0,
-        muted: false,
-        mute_mentions: false,
-        last_ts: 0,
-        peer_seen_ts: 0,
-        pinned: None,
         organizations,
+        ..Chat::new(ChatId(id.to_owned()), kind)
     })
 }
 
@@ -1048,20 +1033,8 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
         if let ChatKind::Direct { peer } = &ch.kind
             && !users.iter().any(|u| &u.id == peer)
         {
-            users.push(User {
-                id: peer.clone(),
-                display_name: if ch.name.is_empty() {
-                    UNKNOWN_USER.into()
-                } else {
-                    ch.name.clone()
-                },
-                title: None,
-                presence: Presence::Offline,
-                status: None,
-                availability: Default::default(),
-                is_robot: false,
-                avatar: None,
-            });
+            let name = if ch.name.is_empty() { UNKNOWN_USER } else { &ch.name };
+            users.push(User::named(peer.clone(), name));
         }
     }
     let section = |id: &str, title: &str, chats| Section {
@@ -1256,19 +1229,8 @@ pub fn notes_chat_id(me: &UserId) -> ChatId {
 /// "Notes" chat for the snapshot when the history lacks it (just created, no messages yet).
 pub fn notes_chat(me: &UserId) -> Chat {
     Chat {
-        id: notes_chat_id(me),
-        kind: ChatKind::Notes,
-        name: String::new(),
-        description: None,
         member_count: 1,
-        unread: 0,
-        mentions: 0,
-        muted: false,
-        mute_mentions: false,
-        last_ts: 0,
-        peer_seen_ts: 0,
-        pinned: None,
-        organizations: vec![],
+        ..Chat::new(notes_chat_id(me), ChatKind::Notes)
     }
 }
 
@@ -2025,14 +1987,8 @@ mod tests {
     fn notes_chat_goes_first_in_dms() {
         let me_id = UserId("me".into());
         let me = User {
-            id: me_id.clone(),
-            display_name: "Me".into(),
-            title: None,
             presence: Presence::Online,
-            status: None,
-            availability: Default::default(),
-            is_robot: false,
-            avatar: None,
+            ..User::named(me_id.clone(), "Me")
         };
         let history = json!({"Chats": [
             {"ChatId": "me_u1", "LastTsMcs": 10},
@@ -2175,14 +2131,8 @@ mod tests {
     #[test]
     fn buckets_pin_and_mute() {
         let me = User {
-            id: UserId("me".into()),
-            display_name: "Me".into(),
-            title: None,
             presence: Presence::Online,
-            status: None,
-            availability: Default::default(),
-            is_robot: false,
-            avatar: None,
+            ..User::named(UserId("me".into()), "Me")
         };
         let history = json!({"Chats": [{"ChatId": "0/0/a", "ChatInfo": {"Name": "a"}}, {"ChatId": "0/0/b", "ChatInfo": {"Name": "b"}}]});
         let mut snap = snapshot(me, "org".into(), from_history(&history, None));
@@ -2295,16 +2245,7 @@ mod tests {
                     mine: true,
                     users: vec![me.clone()],
                 }],
-                users: vec![User {
-                    id: me.clone(),
-                    display_name: "me".into(),
-                    title: None,
-                    presence: Presence::Offline,
-                    status: None,
-                    availability: Default::default(),
-                    is_robot: false,
-                    avatar: None,
-                }],
+                users: vec![User::named(me.clone(), "me")],
             })
         );
         let unreact =

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use mostik_core::{
-    CallNote, ChatFolder, ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId,
+    CallNote, Chat, ChatFolder, ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId,
 };
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
@@ -1506,16 +1506,7 @@ fn unnamed_mentions(messages: &[Message], known: &[User]) -> Vec<User> {
 
 /// A person known only by id, until the directory names them.
 fn stand_in(id: UserId) -> User {
-    User {
-        id,
-        display_name: String::new(),
-        title: None,
-        presence: mostik_core::Presence::Offline,
-        status: None,
-        availability: Default::default(),
-        is_robot: false,
-        avatar: None,
-    }
+    User::named(id, "")
 }
 
 /// Names of the people a new message mentions: the ones Telemost sent with it are recorded,
@@ -1553,7 +1544,7 @@ fn learn_mentions(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, m: &Message, 
     });
 }
 
-async fn fetch_chat(live: &Live, chat_id: &str) -> Option<(mostik_core::Chat, Vec<User>)> {
+async fn fetch_chat(live: &Live, chat_id: &str) -> Option<(Chat, Vec<User>)> {
     let info = chat_info_raw(live, chat_id)
         .await
         .map_err(|e| eprintln!("new chat {chat_id}: {e}"))
@@ -1731,7 +1722,7 @@ pub async fn user_profile(state: tauri::State<'_, AppState>, guid: String) -> Re
 
 /// Direct chat with a person: existing or new (`create_private_chat` is idempotent).
 #[tauri::command]
-pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<mostik_core::Chat, String> {
+pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<Chat, String> {
     let live = live(&state).await?;
     let mut web = live.web.clone_light();
     let v = web
@@ -1742,20 +1733,9 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<
         .pointer("/data/chat/chat_id")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("Telemost did not open the chat: {:?}", v.pointer("/data/code")))?;
-    let chat = mostik_core::Chat {
-        id: ChatId(id.to_owned()),
-        kind: convert::chat_kind(id, Some(&live.me), false),
-        name: String::new(),
-        description: None,
+    let chat = Chat {
         member_count: 2,
-        unread: 0,
-        mentions: 0,
-        muted: false,
-        mute_mentions: false,
-        last_ts: 0,
-        peer_seen_ts: 0,
-        pinned: None,
-        organizations: vec![],
+        ..Chat::new(ChatId(id.to_owned()), convert::chat_kind(id, Some(&live.me), false))
     };
     note_chat(&live, &chat);
     Ok(chat)
@@ -1886,7 +1866,7 @@ pub async fn create_channel(
     description: String,
     members: Vec<String>,
     public: bool,
-) -> Result<mostik_core::Chat, String> {
+) -> Result<Chat, String> {
     let live = live(&state).await?;
     let mut web = live.web.clone_light();
     let mut all = vec![live.me.0.clone()];
@@ -1935,23 +1915,15 @@ pub async fn create_channel(
     if public && !server_public {
         eprintln!("channel created, but Telemost did not make it public");
     }
-    let chat = mostik_core::Chat {
-        id: ChatId(id),
-        kind: ChatKind::Group { public: server_public },
+    let chat = Chat {
         name: server_name,
         description: (!server_desc.trim().is_empty()).then_some(server_desc),
         member_count: info
             .get("members_count")
             .and_then(Value::as_u64)
             .map_or(all.len() as u32, |n| n as u32),
-        unread: 0,
-        mentions: 0,
-        muted: false,
-        mute_mentions: false,
         last_ts: js_now_mcs(),
-        peer_seen_ts: 0,
-        pinned: None,
-        organizations: vec![],
+        ..Chat::new(ChatId(id), ChatKind::Group { public: server_public })
     };
     note_chat(&live, &chat);
     Ok(chat)
@@ -2058,7 +2030,7 @@ pub async fn leave_chat(state: tauri::State<'_, AppState>, chat_id: String) -> R
 
 /// A chat joined or created after the start: its title for notifications, and its name for
 /// `@channel` mentions if it is public.
-fn note_chat(live: &Live, chat: &mostik_core::Chat) {
+fn note_chat(live: &Live, chat: &Chat) {
     let Ok(mut sh) = live.shared.lock() else { return };
     sh.titles
         .insert(chat.id.0.clone(), mostik_core::group_label(&chat.name));
@@ -2315,15 +2287,13 @@ pub fn current_call(app: AppHandle) -> Option<call::CallInfo> {
 }
 
 /// Group from an HTTP RPC response (`get_recommended_chats`, `activate_chat`).
-fn rpc_chat(v: &Value, me: &UserId) -> Option<mostik_core::Chat> {
+fn rpc_chat(v: &Value, me: &UserId) -> Option<Chat> {
     let id = v.get("chat_id")?.as_str()?;
     let public = v.get("public").and_then(Value::as_bool).unwrap_or(false)
         || v.get("invite_hash")
             .and_then(Value::as_str)
             .is_some_and(|h| !h.is_empty());
-    Some(mostik_core::Chat {
-        id: ChatId(id.to_owned()),
-        kind: convert::chat_kind(id, Some(me), public),
+    Some(Chat {
         name: v.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
         description: v
             .get("description")
@@ -2331,13 +2301,6 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<mostik_core::Chat> {
             .filter(|d| !d.is_empty())
             .map(str::to_owned),
         member_count: v.get("members_count").and_then(Value::as_u64).unwrap_or(0) as u32,
-        unread: 0,
-        mentions: 0,
-        muted: false,
-        mute_mentions: false,
-        last_ts: 0,
-        peer_seen_ts: 0,
-        pinned: None,
         organizations: v
             .get("organization_ids")
             .and_then(Value::as_array)
@@ -2345,12 +2308,13 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<mostik_core::Chat> {
             .flatten()
             .filter_map(convert::uint)
             .collect(),
+        ..Chat::new(ChatId(id.to_owned()), convert::chat_kind(id, Some(me), public))
     })
 }
 
 /// "Browse channels": public groups recommended by Telemost.
 #[tauri::command]
-pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<mostik_core::Chat>, String> {
+pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<Chat>, String> {
     let live = live(&state).await?;
     let mut web = live.web.clone_light();
     let v = web
@@ -2369,7 +2333,7 @@ pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<
 
 /// Joins a public group (`activate_chat`, as in the web client).
 #[tauri::command]
-pub async fn join_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Result<mostik_core::Chat, String> {
+pub async fn join_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Result<Chat, String> {
     let live = live(&state).await?;
     let mut web = live.web.clone_light();
     let v = web
@@ -3073,18 +3037,13 @@ async fn connect_inner(
     // matches nobody.
     let me_id = known_me.clone().unwrap_or_else(|| UserId("me".into()));
     let me = User {
-        id: me_id.clone(),
-        display_name: me_name.unwrap_or_else(|| "You".into()),
-        title: None,
         presence: Presence::Online,
-        status: None,
-        availability: Default::default(),
-        is_robot: false,
         avatar: who
             .pointer("/UserInfo/AvatarId")
             .and_then(Value::as_str)
             .filter(|a| !a.is_empty())
             .map(str::to_owned),
+        ..User::named(me_id.clone(), me_name.unwrap_or_else(|| "You".into()))
     };
     let mut snapshot = convert::snapshot(me, organization, data);
     snapshot.organization_avatar = who

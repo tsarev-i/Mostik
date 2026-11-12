@@ -123,6 +123,21 @@ pub struct User {
 pub const UNKNOWN_USER: &str = "Unknown user";
 
 impl User {
+    /// A person known only by id and name: offline, with no title, status or photo. What else is
+    /// known goes in with struct update syntax.
+    pub fn named(id: UserId, display_name: impl Into<String>) -> Self {
+        Self {
+            id,
+            display_name: display_name.into(),
+            title: None,
+            presence: Presence::Offline,
+            status: None,
+            availability: Availability::default(),
+            is_robot: false,
+            avatar: None,
+        }
+    }
+
     /// Whether the name is a real one and not a stand-in: empty, the GUID or [`UNKNOWN_USER`].
     /// A stand-in gives way to the first real name that comes.
     pub fn has_name(&self) -> bool {
@@ -666,6 +681,26 @@ impl NotifyLevel {
 }
 
 impl Chat {
+    /// A chat with no name, members, messages or settings yet. What is known goes in with struct
+    /// update syntax.
+    pub fn new(id: ChatId, kind: ChatKind) -> Self {
+        Self {
+            id,
+            kind,
+            name: String::new(),
+            description: None,
+            member_count: 0,
+            unread: 0,
+            mentions: 0,
+            muted: false,
+            mute_mentions: false,
+            last_ts: 0,
+            pinned: None,
+            organizations: vec![],
+            peer_seen_ts: 0,
+        }
+    }
+
     pub fn notify_level(&self) -> NotifyLevel {
         NotifyLevel::from_flags(self.muted, self.mute_mentions)
     }

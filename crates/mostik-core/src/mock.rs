@@ -16,32 +16,20 @@ fn cid(s: &str) -> ChatId {
 
 fn user(id: &str, name: &str, title: &str, presence: Presence) -> User {
     User {
-        id: uid(id),
-        display_name: name.to_owned(),
         title: Some(title.to_owned()),
         presence,
-        status: None,
-        availability: Default::default(),
-        is_robot: false,
-        avatar: None,
+        ..User::named(uid(id), name)
     }
 }
 
 fn chat(id: &str, kind: ChatKind, name: &str, members: u32, unread: u32, mentions: u32, last_ts: Timestamp) -> Chat {
     Chat {
-        id: cid(id),
-        kind,
         name: name.to_owned(),
-        description: None,
         member_count: members,
         unread,
         mentions,
-        muted: false,
-        mute_mentions: false,
         last_ts,
-        peer_seen_ts: 0,
-        pinned: None,
-        organizations: vec![],
+        ..Chat::new(cid(id), kind)
     }
 }
 
@@ -133,14 +121,9 @@ pub fn demo(now: Timestamp) -> Snapshot {
     let vera = user("vera", "Vera Lebedeva", "QA engineer", Presence::Online);
     let gleb = user("gleb", "Gleb Orlov", "Product manager", Presence::Offline);
     let bot = User {
-        id: uid("ci-bot"),
-        display_name: "Build bot".into(),
-        title: None,
         presence: Presence::Online,
-        status: None,
-        availability: Default::default(),
         is_robot: true,
-        avatar: None,
+        ..User::named(uid("ci-bot"), "Build bot")
     };
 
     let mut general = chat("general", ChatKind::Group { public: true }, "general", 48, 0, 0, today);

@@ -19,7 +19,7 @@ use std::time::Duration;
 use mostik_core::custom_emoji::{
     self as ce, EmojiSet, MAX_UPLOAD, SERVICE_CHAT_NAME, SERVICE_DESCRIPTION, SERVICE_MARKER, UPLOAD_SIDE,
 };
-use mostik_core::{ChatId, NotifyLevel, Snapshot, Timestamp, UserId};
+use mostik_core::{Chat, ChatId, NotifyLevel, Snapshot, Timestamp, UserId};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::web::WebClient;
@@ -210,7 +210,7 @@ fn emit(app: &AppHandle) {
 }
 
 /// Whether a chat is a service chat: its name and the marker in its description.
-pub fn is_service_chat(chat: &mostik_core::Chat) -> bool {
+pub fn is_service_chat(chat: &Chat) -> bool {
     chat.name == SERVICE_CHAT_NAME && chat.description.as_deref().is_some_and(|d| d.contains(SERVICE_MARKER))
 }
 
@@ -377,7 +377,7 @@ pub(super) fn swallows(app: &AppHandle, shared: &StdMutex<Shared>, ev: &LiveEven
 
 /// A chat the list did not have turned out to be a service chat (the user joined it elsewhere):
 /// it is hidden from now on and read.
-pub(super) fn adopt(app: &AppHandle, shared: &StdMutex<Shared>, chat: &mostik_core::Chat) {
+pub(super) fn adopt(app: &AppHandle, shared: &StdMutex<Shared>, chat: &Chat) {
     if let Ok(mut sh) = shared.lock() {
         sh.service.insert(chat.id.0.clone());
     }

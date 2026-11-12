@@ -189,19 +189,9 @@ mod tests {
 
     fn chat(kind: ChatKind, members: u32, peer_seen_ts: Timestamp) -> Chat {
         Chat {
-            id: ChatId("c".into()),
-            kind,
-            name: String::new(),
-            description: None,
             member_count: members,
-            unread: 0,
-            mentions: 0,
-            muted: false,
-            mute_mentions: false,
-            last_ts: 0,
-            pinned: None,
-            organizations: vec![],
             peer_seen_ts,
+            ..Chat::new(ChatId("c".into()), kind)
         }
     }
 
