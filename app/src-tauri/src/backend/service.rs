@@ -128,6 +128,33 @@ fn with_disk<R>(app: &AppHandle, f: impl FnOnce(&mut Disk) -> R) -> R {
     f(disk)
 }
 
+/// Takes the lock of the service chat work for connection `live`: `None` once that connection is
+/// no longer the app's (a sign-out came first), so nothing of a signed-out account is written
+/// to disk again.
+async fn hold<'a>(state: &'a AppState, live: &Arc<Live>) -> Option<tokio::sync::MutexGuard<'a, ()>> {
+    let busy = state.service.busy.lock().await;
+    let current = super::live(state).await.is_ok_and(|l| Arc::ptr_eq(&l, live));
+    current.then_some(busy)
+}
+
+/// Forgets the custom emoji of a signed-out account: the disk cache and what is known of it in
+/// memory. Work on the service chat in progress finishes first.
+pub async fn forget_account(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let _busy = state.service.busy.lock().await;
+    *state.service.disk.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    state
+        .service
+        .scheduled
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    state.service.marked.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    if let Some(dir) = dir(app) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 fn save(app: &AppHandle) {
     let Some(dir) = dir(app) else { return };
     let json = with_disk(app, |d| serde_json::to_vec(d).ok());
@@ -352,7 +379,7 @@ fn schedule(app: &AppHandle, chat: String) {
             s.remove(&chat);
         }
         let Ok(live) = live(&state).await else { return };
-        let _busy = state.service.busy.lock().await;
+        let Some(_busy) = hold(&state, &live).await else { return };
         let orgs = organizations_of(&app, &chat);
         if let Err(e) = refresh(&app, &live, &chat, orgs).await {
             eprintln!("service chat {}: {e}", id_pattern(&chat));
@@ -376,7 +403,7 @@ fn organizations_of(app: &AppHandle, chat: &str) -> Vec<u64> {
 pub fn start(app: AppHandle, live: Arc<Live>) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let _busy = state.service.busy.lock().await;
+        let Some(_busy) = hold(&state, &live).await else { return };
         let chats = live
             .shared
             .lock()
@@ -1083,7 +1110,7 @@ pub async fn add_custom_emoji(
             .to_owned()
         })?;
     let live = live(&state).await?;
-    let _busy = state.service.busy.lock().await;
+    let _busy = hold(&state, &live).await.ok_or("signed out")?;
     let (chat, orgs) = chat_for(&app, &live, emoji.org).await?;
     let taken = sets(&app)
         .iter()
@@ -1126,7 +1153,7 @@ pub async fn rename_custom_emoji(
         return Err(e);
     }
     let live = live(&state).await?;
-    let _busy = state.service.busy.lock().await;
+    let _busy = hold(&state, &live).await.ok_or("signed out")?;
     let taken = sets(&app)
         .iter()
         .any(|s| s.chat_id.0 == chat_id && s.emoji.iter().any(|e| e.name == name && e.ts != ts));
@@ -1150,7 +1177,7 @@ pub async fn delete_custom_emoji(
     ts: Timestamp,
 ) -> Result<Vec<EmojiSet>, String> {
     let live = live(&state).await?;
-    let _busy = state.service.busy.lock().await;
+    let _busy = hold(&state, &live).await.ok_or("signed out")?;
     push(&live, wire::delete(&chat_id, ts)).await?;
     let orgs = organizations_of(&app, &chat_id);
     refresh(&app, &live, &chat_id, orgs).await?;

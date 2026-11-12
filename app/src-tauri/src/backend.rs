@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ use mostik_core::{
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
+use mostik_yandex::passport;
 use mostik_yandex::session::CookieJar;
 use mostik_yandex::web::{WebClient, WebError};
 use mostik_yandex::wire::{self, HistoryRequest, PushRequest, request_id};
@@ -245,10 +246,70 @@ pub struct AppState {
     /// Contents of the files pasted or dropped into the message field, by their [`KEPT`] path.
     kept_files: StdMutex<BTreeMap<String, Vec<u8>>>,
     live: Mutex<Option<Arc<Live>>>,
+    session: Session,
     reconnecting: AtomicBool,
     heartbeat_running: AtomicBool,
     diag_events: Arc<AtomicUsize>,
     pub service: service::State,
+}
+
+/// Which sign-in the backend works for. Signing in and out starts a new generation, and work
+/// begun for an older one (a reconnect, a cookie refresh, a push of its connection) is dropped
+/// instead of signing the user back in or writing the old cookies back.
+#[derive(Default)]
+struct Session {
+    generation: AtomicU64,
+    /// Held while the password store is written or cleared, so that a save checked against the
+    /// generation cannot land after the sign-out has deleted the session.
+    store: StdMutex<()>,
+}
+
+impl Session {
+    fn current(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.current() == generation
+    }
+
+    fn lock_store(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.store.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Starts a new generation (a sign-in or a sign-out) and returns it.
+    fn renew(&self) -> u64 {
+        let _store = self.lock_store();
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Saves the cookies of session `generation`, unless it has ended.
+    fn save(&self, generation: u64, jar: &CookieJar) -> Result<(), String> {
+        let _store = self.lock_store();
+        if !self.is_current(generation) {
+            return Err("the session has ended".into());
+        }
+        store::save(jar)
+    }
+
+    /// Deletes the saved session, unless a newer one than `generation` has replaced it.
+    fn delete(&self, generation: u64) -> Result<(), String> {
+        let _store = self.lock_store();
+        if !self.is_current(generation) {
+            return Ok(());
+        }
+        store::delete()
+    }
+}
+
+/// Makes `live` the connection, unless session `generation` has ended meanwhile.
+async fn install(state: &AppState, generation: u64, live: Arc<Live>) -> bool {
+    let mut slot = state.live.lock().await;
+    if !state.session.is_current(generation) {
+        return false;
+    }
+    *slot = Some(live);
+    true
 }
 
 async fn live(state: &AppState) -> Result<Arc<Live>, String> {
@@ -263,9 +324,10 @@ async fn live(state: &AppState) -> Result<Arc<Live>, String> {
 
 #[tauri::command]
 pub async fn bootstrap(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Boot, String> {
+    let generation = state.session.current();
     match store::load() {
         None => Ok(Boot::NeedLogin { reason: None }),
-        Some(jar) => connect(&app, &state, jar, false).await,
+        Some(jar) => connect(&app, &state, jar, false, generation).await,
     }
 }
 
@@ -280,16 +342,76 @@ pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<
         )
         .to_owned()
     })?;
-    store::save(&jar)?;
-    connect(&app, &state, jar, true).await
+    let generation = state.session.renew();
+    state.session.save(generation, &jar)?;
+    connect(&app, &state, jar, true, generation).await
 }
 
+/// "Sign out": ends the Yandex ID session on the server, as the Telemost web client does, then
+/// forgets it here: the password store entry, the connection, the call and what the account
+/// left on disk. The app is signed out in any case; an error says what did not work out, and
+/// the UI shows it on the login screen.
 #[tauri::command]
 pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    store::delete();
-    call::close(&app);
-    *state.live.lock().await = None;
-    Ok(())
+    // From here on nothing of the old session is saved again or reconnected.
+    let generation = state.session.renew();
+    let live = state.live.lock().await.take();
+    // It waits for the call browser to go: not on an async worker.
+    let closing = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || call::shutdown(&closing)).await;
+    crate::ring::forget(&app);
+    let jar = live.as_ref().map(|l| l.web.jar().clone()).or_else(store::load);
+    drop(live);
+    let revoked = match jar {
+        Some(jar) => passport::logout(&jar, &identity::user_agent(WEBVIEW_UA))
+            .await
+            .map_err(|e| {
+                format!(
+                    "{}: {e}",
+                    text(
+                        &app,
+                        "Яндекс ID не завершил сессию, она может оставаться действующей",
+                        "Yandex ID did not end the session, it may still be valid"
+                    )
+                )
+            }),
+        None => Ok(()),
+    };
+    let deleted = state.session.delete(generation).map_err(|e| {
+        format!(
+            "{}: {e}",
+            text(
+                &app,
+                "Сессия осталась в хранилище паролей, при следующем запуске вход будет выполнен снова",
+                "The session stays in the password store and the next start signs in again"
+            )
+        )
+    });
+    forget_local_data(&app, &state).await;
+    // A session left in the password store comes back at the next start: that one matters most.
+    deleted.and(revoked)
+}
+
+/// Removes what the signed-out account left on this computer: the diagnostic probes (they name
+/// its cookies and chats), the custom emoji cache, the files allowed for sending, and the
+/// cookies and caches of the main window. The UI clears its own `localStorage` keys.
+async fn forget_local_data(app: &AppHandle, state: &AppState) {
+    if let Ok(dir) = app.path().app_data_dir()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with("probe") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    service::forget_account(app).await;
+    if let Ok(mut allowed) = state.allowed_files.lock() {
+        allowed.clear();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        crate::webview::forget_site_data(&main, crate::webview::SiteData::CookiesAndCaches);
+    }
 }
 
 /// A history page and the authors of its messages the app has not seen yet: the chat list at
@@ -889,15 +1011,23 @@ pub(crate) fn write_probe(app: &AppHandle, name: &str, probe: &Value) {
 }
 
 /// `signed_in`: the session has just come from the login window, so a rejection means the
-/// sign-in did not go through rather than an expired session.
-async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar, signed_in: bool) -> Result<Boot, String> {
+/// sign-in did not go through rather than an expired session. `generation`: see [`Session`].
+async fn connect(
+    app: &AppHandle,
+    state: &AppState,
+    jar: CookieJar,
+    signed_in: bool,
+    generation: u64,
+) -> Result<Boot, String> {
     let mut probe = json!({ "client": identity::ua_suffix() });
-    let result = connect_inner(app, state, jar, &mut probe).await;
+    let result = connect_inner(app, state, jar, generation, &mut probe).await;
     write_probe(app, "probe.json", &probe);
     match result {
         Ok((snapshot, live)) => {
             let live = Arc::new(live);
-            *state.live.lock().await = Some(live.clone());
+            if !install(state, generation, live.clone()).await {
+                return Ok(Boot::NeedLogin { reason: None });
+            }
             start_heartbeat(app);
             service::start(app.clone(), live.clone());
             Ok(Boot::Ready {
@@ -905,7 +1035,9 @@ async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar, signed_in: b
             })
         }
         Err(ConnectError::Unauthorized) => {
-            store::delete();
+            if let Err(e) = state.session.delete(generation) {
+                eprintln!("{e}");
+            }
             let reason = if signed_in {
                 text(
                     app,
@@ -1086,8 +1218,15 @@ fn log_push(incoming: &Incoming, me: Option<&UserId>) {
     });
 }
 
-/// Socket event: diagnostics, `Shared` update, UI event, notification.
-fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &AtomicUsize, incoming: Incoming) {
+/// Socket event of a connection of session `generation`: diagnostics, `Shared` update, UI event,
+/// notification.
+fn handle_incoming(
+    app: &AppHandle,
+    shared: &Arc<StdMutex<Shared>>,
+    diag: &AtomicUsize,
+    generation: u64,
+    incoming: Incoming,
+) {
     log_push(&incoming, shared.lock().ok().and_then(|sh| sh.me.clone()).as_ref());
     match incoming {
         Incoming::Push { event, body } => {
@@ -1167,7 +1306,7 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
         Incoming::Closed => {
             let _ = app.emit(EVENT, &LiveEvent::Connection { online: false });
             let app = app.clone();
-            tauri::async_runtime::spawn(async move { reconnect_loop(app).await });
+            tauri::async_runtime::spawn(async move { reconnect_loop(app, generation).await });
         }
     }
 }
@@ -2643,42 +2782,51 @@ pub fn set_preferences(
     }
 }
 
-/// Reconnects after the connection closed. One loop at a time: the closes that come while it
-/// runs are its own business.
-async fn reconnect_loop(app: AppHandle) {
+/// Reconnects session `generation` after its connection closed. One loop at a time: the closes
+/// that come while it runs are its own business.
+async fn reconnect_loop(app: AppHandle, mut generation: u64) {
     let state = app.state::<AppState>();
     loop {
         if state.reconnecting.swap(true, Ordering::SeqCst) {
             return;
         }
-        let reconnected = reconnect(&app, &state).await;
+        let reconnected = reconnect(&app, &state, generation).await;
         state.reconnecting.store(false, Ordering::SeqCst);
-        // A connection that closed after `reconnect` saw it open, while the flag still turned
-        // its own reconnection away, would otherwise stay dead.
+        // A connection that closed while the flag turned its own reconnection away would
+        // otherwise stay dead: the new one closing at once, or that of a sign-in that came
+        // while this loop still worked for the session before.
         let dead = state.live.lock().await.as_ref().is_some_and(|l| l.xiva.is_closed());
-        if !(reconnected && dead) {
+        let ended = !state.session.is_current(generation);
+        if !(dead && (reconnected || ended)) {
             return;
         }
-        eprintln!("reconnect: the new connection closed at once");
+        generation = state.session.current();
+        eprintln!("reconnect: the connection closed while reconnecting");
         let _ = app.emit(EVENT, &LiveEvent::Connection { online: false });
     }
 }
 
-/// Connects again and again, with growing pauses, until a connection is up (`true`) or there
-/// is no session to connect with (`false`).
-async fn reconnect(app: &AppHandle, state: &AppState) -> bool {
+/// Connects session `generation` again and again, with growing pauses, until a connection is
+/// up (`true`), there is no session to connect with or it has ended (`false`).
+async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
     let mut attempt = 0;
     loop {
         tokio::time::sleep(reconnect_pause(attempt, random())).await;
         attempt = attempt.saturating_add(1);
+        // Signed out meanwhile: nothing to restore.
+        if !state.session.is_current(generation) {
+            return false;
+        }
         let Some(jar) = store::load() else { return false };
         let mut probe = json!({});
-        match connect_inner(app, state, jar, &mut probe).await {
+        match connect_inner(app, state, jar, generation, &mut probe).await {
             // Its close went to a reconnection that this loop turned away: try again.
             Ok((_, live)) if live.xiva.is_closed() => eprintln!("reconnect: the new connection closed at once"),
             Ok((snapshot, live)) => {
                 let live = Arc::new(live);
-                *state.live.lock().await = Some(live.clone());
+                if !install(state, generation, live.clone()).await {
+                    return false;
+                }
                 // Changes to the service chat made while offline.
                 service::start(app.clone(), live);
                 let _ = app.emit(EVENT, &LiveEvent::Connection { online: true });
@@ -2686,7 +2834,12 @@ async fn reconnect(app: &AppHandle, state: &AppState) -> bool {
                 return true;
             }
             Err(ConnectError::Unauthorized) => {
-                store::delete();
+                if !state.session.is_current(generation) {
+                    return false;
+                }
+                if let Err(e) = state.session.delete(generation) {
+                    eprintln!("{e}");
+                }
                 call::close(app);
                 *state.live.lock().await = None;
                 let reason = text(
@@ -2752,6 +2905,7 @@ async fn connect_inner(
     app: &AppHandle,
     state: &AppState,
     jar: CookieJar,
+    generation: u64,
     probe: &mut Value,
 ) -> Result<(Snapshot, Live), ConnectError> {
     let ua = identity::user_agent(WEBVIEW_UA);
@@ -2773,13 +2927,16 @@ async fn connect_inner(
     let page = page?;
     // The page refreshed some cookies on its redirects: keep them for the next start.
     if web.jar() != &saved {
-        probe["page"]["jar_saved"] = json!(store::save(web.jar()).is_ok());
+        probe["page"]["jar_saved"] = json!(state.session.save(generation, web.jar()).is_ok());
     }
 
     let shared: Arc<StdMutex<Shared>> = Arc::default();
     let (handler_app, handler_shared, diag) = (app.clone(), shared.clone(), state.diag_events.clone());
     let xiva = XivaClient::connect(web.jar(), &ua, &page.puid, move |incoming| {
-        handle_incoming(&handler_app, &handler_shared, &diag, incoming)
+        // The connection of a session that has ended (signed out) has nothing more to say.
+        if handler_app.state::<AppState>().session.is_current(generation) {
+            handle_incoming(&handler_app, &handler_shared, &diag, generation, incoming)
+        }
     })
     .await
     .map_err(|e| {

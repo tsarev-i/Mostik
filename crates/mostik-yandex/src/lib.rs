@@ -8,6 +8,7 @@ pub mod diag;
 pub mod endpoints;
 pub mod identity;
 pub mod net;
+pub mod passport;
 pub mod rpc;
 pub mod session;
 pub mod web;

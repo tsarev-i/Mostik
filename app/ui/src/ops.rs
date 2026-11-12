@@ -1587,9 +1587,53 @@ pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
                 open_chat(c, id);
             }
         }
-        Ok(bridge::Boot::NeedLogin { reason }) => c.phase.set(Phase::Login { reason }),
+        Ok(bridge::Boot::NeedLogin { reason }) => c.phase.set(Phase::Login {
+            reason: reason.or_else(take_sign_out_note),
+        }),
         Err(e) => c.phase.set(Phase::Login { reason: Some(e) }),
     }
+}
+
+/// Keys of `localStorage` that outlive a sign-out: preferences of this computer rather than of
+/// the account. The rest of Mostik's keys (drafts, hidden chats, the chat order, the chosen
+/// organization, recent emoji…) belong to the account and go with it.
+const DEVICE_KEYS: [&str; 3] = ["mostik.settings", "mostik.sidebar_w", "mostik.thread_w"];
+
+/// What went wrong while signing out, kept in `sessionStorage` for the login screen after the
+/// reload.
+const SIGN_OUT_NOTE: &str = "mostik.sign_out_note";
+
+/// "Sign out": the backend ends the Yandex ID session and clears what it kept; then the
+/// account's keys leave `localStorage` and the page loads again, so nothing of the account stays
+/// in memory either. The login screen shows any problem on the way.
+pub fn sign_out(c: Ctx) {
+    c.phase.set(Phase::Loading(tr().signing_out));
+    spawn_local(async move {
+        let problem = bridge::logout().await.err();
+        if let Some(storage) = window().local_storage().ok().flatten() {
+            let keys: Vec<String> = (0..storage.length().unwrap_or(0))
+                .filter_map(|i| storage.key(i).ok().flatten())
+                .filter(|k| k.starts_with("mostik.") && !DEVICE_KEYS.contains(&k.as_str()))
+                .collect();
+            for key in keys {
+                let _ = storage.remove_item(&key);
+            }
+        }
+        if let (Some(problem), Some(session)) = (&problem, window().session_storage().ok().flatten()) {
+            let _ = session.set_item(SIGN_OUT_NOTE, problem);
+        }
+        if window().location().reload().is_err() {
+            c.phase.set(Phase::Login { reason: problem });
+        }
+    });
+}
+
+/// The problem the last sign-out left for the login screen, once.
+fn take_sign_out_note() -> Option<String> {
+    let session = window().session_storage().ok().flatten()?;
+    let note = session.get_item(SIGN_OUT_NOTE).ok().flatten()?;
+    let _ = session.remove_item(SIGN_OUT_NOTE);
+    Some(note)
 }
 
 /// Subscriptions to backend events.

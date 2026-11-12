@@ -1321,10 +1321,7 @@ fn workspace_menu_items(c: Ctx) -> impl IntoView {
             <div class="menu-sep"></div>
             <button on:click=move |_| {
                 close_menus(c);
-                spawn_local(async move {
-                    let reason = bridge::logout().await.err();
-                    c.phase.set(Phase::Login { reason });
-                });
+                ops::sign_out(c);
             }>{tr().sign_out_of(&name)}</button>
         })}
     }
@@ -6237,10 +6234,7 @@ fn MeMenu() -> impl IntoView {
                 <div class="me-sep"></div>
                 <button on:click=move |_| {
                     close();
-                    spawn_local(async move {
-                        let reason = bridge::logout().await.err();
-                        c.phase.set(Phase::Login { reason });
-                    });
+                    ops::sign_out(c);
                 }>{move || tr().sign_out_of(&org_name(c))}</button>
             })}
         </div>

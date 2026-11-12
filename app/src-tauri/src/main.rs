@@ -123,6 +123,7 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()?;
     webview::harden(&window);
+    webview::forget_site_data(&window, webview::SiteData::Cookies);
     Ok(())
 }
 
@@ -235,6 +236,12 @@ fn main() {
             update::set_auto_update,
             update::check_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to start Mostik");
+        .build(tauri::generate_context!())
+        .expect("failed to start Mostik")
+        .run(|app, event| {
+            // The call browser and its profile with the session cookies go with the app.
+            if let tauri::RunEvent::Exit = event {
+                call::shutdown(app);
+            }
+        });
 }

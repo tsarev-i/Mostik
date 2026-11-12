@@ -115,6 +115,11 @@ pub fn call_ended(app: &AppHandle, url: &str) {
     end_if(app, |r| r.url == url);
 }
 
+/// Signed out: whatever rings stops, with nothing sent to Telemost.
+pub fn forget(app: &AppHandle) {
+    end_if(app, |_| true);
+}
+
 fn end_if(app: &AppHandle, matches: impl Fn(&Ring) -> bool) -> Option<Ring> {
     let state = app.state::<RingState>();
     let ring = {
