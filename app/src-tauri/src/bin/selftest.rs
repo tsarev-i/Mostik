@@ -103,10 +103,7 @@ async fn run() -> Res<()> {
         return Ok(());
     }
     if std::env::args().any(|a| a == "--buckets") {
-        let v = web
-            .rpc("get_buckets", json!({ "version": 0 }))
-            .await
-            .map_err(|e| e.to_string())?;
+        let v = web.buckets().await.map_err(|e| e.to_string())?;
         println!("{v}");
         return Ok(());
     }
@@ -116,9 +113,7 @@ async fn run() -> Res<()> {
     let listen = std::env::args().any(|a| a == "--listen");
     let xiva = XivaClient::connect(web.jar(), &ua, &page.puid, move |inc| {
         if listen {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis());
+            let now = mostik_yandex::clock::now_ms();
             match &inc {
                 Incoming::Push { event, body } => println!("{}", json!({ "t": now, "event": event, "body": body })),
                 Incoming::Text(t) => println!("{}", json!({ "t": now, "text": t })),

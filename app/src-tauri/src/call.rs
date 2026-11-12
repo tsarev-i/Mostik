@@ -878,7 +878,10 @@ b{{color:#f8f8f8;font-size:17px}}
 <b>{connecting}</b>"##,
             title = html_escape(title),
         );
-        format!("data:text/html;charset=utf-8,{}", percent_encode(&html))
+        format!(
+            "data:text/html;charset=utf-8,{}",
+            mostik_yandex::web::encode_uri_component(&html)
+        )
     }
 
     fn html_escape(s: &str) -> String {
@@ -886,18 +889,6 @@ b{{color:#f8f8f8;font-size:17px}}
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
-    }
-
-    fn percent_encode(s: &str) -> String {
-        let mut out = String::with_capacity(s.len() * 3);
-        for b in s.bytes() {
-            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-                out.push(b as char);
-            } else {
-                out.push_str(&format!("%{b:02X}"));
-            }
-        }
-        out
     }
 
     #[cfg(test)]
@@ -985,12 +976,6 @@ b{{color:#f8f8f8;font-size:17px}}
                 Some("https://telemost.yandex.ru/j/1")
             );
             assert_eq!(main_frame_url(&ev("Page.loadEventFired", json!({})), "T"), None);
-        }
-
-        #[test]
-        fn loading_page_is_a_single_data_url() {
-            let s = percent_encode("<b>a b\n#&</b>");
-            assert_eq!(s, "%3Cb%3Ea%20b%0A%23%26%3C%2Fb%3E");
         }
 
         /// Drives a real browser in headless mode: the pipe, cookies and permissions work, and

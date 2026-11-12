@@ -14,12 +14,13 @@ use std::time::Duration;
 use mostik_core::{
     CallNote, Chat, ChatFolder, ChatId, ChatKind, Message, NotifyLevel, Presence, Snapshot, Timestamp, User, UserId,
 };
+use mostik_yandex::clock;
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
 use mostik_yandex::passport;
 use mostik_yandex::session::CookieJar;
-use mostik_yandex::web::{WebClient, WebError};
+use mostik_yandex::web::{WebClient, WebError, percent_decode};
 use mostik_yandex::wire::{self, HistoryRequest, PushRequest, request_id};
 use mostik_yandex::xiva_client::{Incoming, XivaClient, XivaError};
 use serde::{Deserialize, Serialize};
@@ -121,6 +122,33 @@ struct Shared {
     service_chats: Vec<service::ServiceChat>,
     /// The user's organizations.
     orgs: Vec<u64>,
+}
+
+impl Shared {
+    /// Records the names of `users`; a stand-in name is no name.
+    fn learn_names<'a>(&mut self, users: impl IntoIterator<Item = &'a User>) {
+        for u in users.into_iter().filter(|u| u.has_name()) {
+            self.names.insert(u.id.0.clone(), u.display_name.clone());
+        }
+    }
+
+    /// A chat the user is in from now on: `title` for its notifications, and its name for
+    /// `@channel` mentions if it is public.
+    fn note_chat(&mut self, chat: &Chat, title: String) {
+        self.titles.insert(chat.id.0.clone(), title);
+        let public = chat.kind == ChatKind::Group { public: true };
+        if public && !chat.name.is_empty() && !self.channels.contains(&chat.name) {
+            self.channels.push(chat.name.clone());
+        }
+    }
+
+    /// Forgets the title of a chat the user has left, and its name among the `@channel` mentions.
+    fn forget_title(&mut self, chat_id: &str) {
+        if let Some(name) = self.titles.remove(chat_id) {
+            // Titles keep a group's emoji as `⚠️ Test`, the channel list its raw name `⚠️|Test`.
+            self.channels.retain(|c| mostik_core::group_label(c) != name);
+        }
+    }
 }
 
 /// In-memory attachment cache: showing an image again does not hit the network.
@@ -320,14 +348,30 @@ impl Session {
     }
 }
 
-/// Makes `live` the connection, unless session `generation` has ended meanwhile.
-async fn install(state: &AppState, generation: u64, live: Arc<Live>) -> bool {
-    let mut slot = state.live.lock().await;
-    if !state.session.is_current(generation) {
-        return false;
+/// Makes `live` the connection and starts its work: the heartbeat (once per run) and the service
+/// chats, which also catches up on their changes made while offline. `false` when session
+/// `generation` has ended meanwhile.
+async fn install(app: &AppHandle, state: &AppState, generation: u64, live: Live) -> bool {
+    let live = Arc::new(live);
+    {
+        let mut slot = state.live.lock().await;
+        if !state.session.is_current(generation) {
+            return false;
+        }
+        *slot = Some(live.clone());
     }
-    *slot = Some(live);
+    start_heartbeat(app);
+    service::start(app.clone(), live);
     true
+}
+
+/// The login screen's reason when Telemost no longer accepts the saved session.
+fn session_expired(app: &AppHandle) -> &'static str {
+    text(
+        app,
+        "Сессия Яндекс ID недействительна, войдите снова.",
+        "Your Yandex ID session has expired. Please sign in again.",
+    )
 }
 
 async fn live(state: &AppState) -> Result<Arc<Live>, String> {
@@ -481,9 +525,7 @@ pub async fn history(
         // Someone already known by name needs no directory request; a stand-in name is not known.
         users.retain(|u| !sh.names.contains_key(&u.id.0));
         // Recorded right away, so the next page does not ask the directory for the same people.
-        for u in users.iter().filter(|u| u.has_name()) {
-            sh.names.insert(u.id.0.clone(), u.display_name.clone());
-        }
+        sh.learn_names(&users);
     }
     eprintln!(
         "history {}: {} of {limit} records, {} messages, {} new authors, {} ms",
@@ -499,9 +541,7 @@ pub async fn history(
         tauri::async_runtime::spawn(async move {
             fill_profiles(&live.web, &mut profiles).await;
             if let Ok(mut sh) = live.shared.lock() {
-                for u in profiles.iter().filter(|u| u.has_name()) {
-                    sh.names.insert(u.id.0.clone(), u.display_name.clone());
-                }
+                sh.learn_names(&profiles);
             }
             let _ = app.emit(EVENT, &LiveEvent::Users { users: profiles });
         });
@@ -645,14 +685,10 @@ pub async fn send_message(
         Some(r) => wire::reply(&target, &request_id(), &text, &target, r.ts, r.quote.as_deref()),
         None => wire::plain_text(&target, &request_id(), &text),
     };
-    let resp = push(&live, msg).await?;
-    let ts = resp
-        .pointer("/MessageInfo/TimestampMcs")
-        .and_then(convert::uint)
-        .ok_or("Telemost did not return the message time")?;
+    let sent = Sent::from_reply(&push(&live, msg).await?)?;
     Ok(Message {
         chat_id: ChatId(chat_id),
-        ts,
+        ts: sent.ts,
         author: live.me.clone(),
         text,
         thread_parent: thread,
@@ -660,7 +696,7 @@ pub async fn send_message(
         important: false,
         reactions: vec![],
         thread: None,
-        seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
+        seq_no: sent.seq_no,
         attachments: vec![],
         forwarded: vec![],
         call: None,
@@ -863,25 +899,6 @@ fn prefetch_previews(live: Arc<Live>, messages: &[Message]) {
     });
 }
 
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-        {
-            out.push(b);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// Downloads an attachment to "Downloads" and opens it. Returns the file path.
 #[tauri::command]
 pub async fn save_file(
@@ -1059,12 +1076,9 @@ async fn connect(
 ) -> Result<Boot, String> {
     match connect_probed(app, state, jar, generation).await {
         Ok((snapshot, live)) => {
-            let live = Arc::new(live);
-            if !install(state, generation, live.clone()).await {
+            if !install(app, state, generation, live).await {
                 return Ok(Boot::NeedLogin { reason: None });
             }
-            start_heartbeat(app);
-            service::start(app.clone(), live.clone());
             Ok(Boot::Ready {
                 snapshot: Box::new(snapshot),
             })
@@ -1080,11 +1094,7 @@ async fn connect(
                     "Telemost did not accept the Yandex ID sign-in. Please try again.",
                 )
             } else {
-                text(
-                    app,
-                    "Сессия Яндекс ID недействительна, войдите снова.",
-                    "Your Yandex ID session has expired. Please sign in again.",
-                )
+                session_expired(app)
             };
             Ok(Boot::NeedLogin {
                 reason: Some(reason.into()),
@@ -1222,7 +1232,7 @@ pub async fn mark_thread_read(
     seq_no: u64,
 ) -> Result<(), String> {
     let live = live(&state).await?;
-    let thread = convert::thread_chat_id(&chat_id, parent).ok_or("Threads are not supported in this chat")?;
+    let thread = target_chat(&chat_id, Some(parent))?;
     push(&live, wire::seen_marker(&thread, ts, seq_no)).await.map(|_| ())
 }
 
@@ -1367,9 +1377,7 @@ fn sync_shared(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, ev: &LiveEvent) 
         }
         LiveEvent::ChatRemoved { chat_id } => {
             let id = &chat_id.0;
-            if let Some(name) = sh.titles.remove(id) {
-                sh.channels.retain(|c| mostik_core::group_label(c) != name);
-            }
+            sh.forget_title(id);
             sh.last.remove(id);
             sh.muted.remove(id);
             sh.pending.remove(id);
@@ -1444,29 +1452,26 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
     let held = {
         let Ok(mut sh) = shared.lock() else { return };
         let held = sh.pending.remove(&chat_id).unwrap_or_default();
-        // Known from now on even if the fetch failed: its messages are not held again.
-        let title = match &fetched {
-            Some((chat, users)) => match &chat.kind {
-                ChatKind::Direct { peer } => users
-                    .iter()
-                    .find(|u| &u.id == peer)
-                    .map(|u| u.display_name.clone())
-                    .or_else(|| sh.names.get(&peer.0).cloned())
-                    .unwrap_or_default(),
-                _ => mostik_core::group_label(&chat.name),
-            },
-            None => String::new(),
-        };
-        sh.titles.insert(chat_id.clone(), title);
-        if let Some((chat, users)) = fetched {
-            for u in users.iter().filter(|u| u.has_name()) {
-                sh.names.insert(u.id.0.clone(), u.display_name.clone());
+        match fetched {
+            Some((chat, users)) => {
+                let title = match &chat.kind {
+                    ChatKind::Direct { peer } => users
+                        .iter()
+                        .find(|u| &u.id == peer)
+                        .map(|u| u.display_name.clone())
+                        .or_else(|| sh.names.get(&peer.0).cloned())
+                        .unwrap_or_default(),
+                    _ => mostik_core::group_label(&chat.name),
+                };
+                sh.note_chat(&chat, title);
+                sh.learn_names(&users);
+                let section = convert::section_of(&chat).to_owned();
+                let _ = app.emit(EVENT, &LiveEvent::ChatAdded { chat, section, users });
             }
-            if chat.kind == (ChatKind::Group { public: true }) && !sh.channels.contains(&chat.name) {
-                sh.channels.push(chat.name.clone());
+            // Known from now on even if the fetch failed: its messages are not held again.
+            None => {
+                sh.titles.insert(chat_id.clone(), String::new());
             }
-            let section = convert::section_of(&chat).to_owned();
-            let _ = app.emit(EVENT, &LiveEvent::ChatAdded { chat, section, users });
         }
         // Emitted under the lock: events that arrive meanwhile wait and come after these.
         for ev in &held {
@@ -1514,9 +1519,7 @@ fn stand_in(id: UserId) -> User {
 fn learn_mentions(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, m: &Message, mentioned: &[User]) {
     let unknown: Vec<User> = {
         let Ok(mut sh) = shared.lock() else { return };
-        for u in mentioned.iter().filter(|u| u.has_name()) {
-            sh.names.insert(u.id.0.clone(), u.display_name.clone());
-        }
+        sh.learn_names(mentioned);
         let mut unknown = unnamed_mentions(std::slice::from_ref(m), mentioned);
         unknown.retain(|u| !sh.names.contains_key(&u.id.0));
         unknown
@@ -1536,9 +1539,7 @@ fn learn_mentions(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, m: &Message, 
             return;
         }
         if let Ok(mut sh) = shared.lock() {
-            for u in &users {
-                sh.names.insert(u.id.0.clone(), u.display_name.clone());
-            }
+            sh.learn_names(&users);
         }
         let _ = app.emit(EVENT, &LiveEvent::Users { users });
     });
@@ -1592,7 +1593,7 @@ fn mentions_me(sh: &Shared, m: &Message) -> bool {
 
 /// Whether notifications are paused now.
 fn paused(sh: &Shared) -> bool {
-    sh.paused.is_some_and(|p| p.active_at(js_now_mcs()))
+    sh.paused.is_some_and(|p| p.active_at(clock::now_mcs()))
 }
 
 /// Whether a call ringing in `m`'s chat may ring: not in "Do not disturb", not in a chat that
@@ -1741,6 +1742,18 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<
     Ok(chat)
 }
 
+/// HTTP RPC call `method` that must succeed: a network error and a refusal are both errors.
+async fn rpc(live: &Live, method: &str, params: Value) -> Result<Value, String> {
+    let v = live
+        .web
+        .clone_light()
+        .rpc(method, params)
+        .await
+        .map_err(|e| e.to_string())?;
+    rpc_ok(&v)?;
+    Ok(v)
+}
+
 fn rpc_ok(v: &Value) -> Result<(), String> {
     if v.get("status").and_then(Value::as_str) == Some("ok") {
         Ok(())
@@ -1753,12 +1766,7 @@ fn rpc_ok(v: &Value) -> Result<(), String> {
 
 /// Group details from `get_chats_info` (`{chat_ids: [...]}`).
 async fn chat_info_raw(live: &Live, chat_id: &str) -> Result<Value, String> {
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc("get_chats_info", json!({ "chat_ids": [chat_id] }))
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    let v = rpc(live, "get_chats_info", json!({ "chat_ids": [chat_id] })).await?;
     v.pointer("/data/chats/0")
         .cloned()
         .ok_or_else(|| "Telemost did not return the chat details".to_owned())
@@ -1781,17 +1789,23 @@ pub struct ChatDetails {
     member_count: u64,
 }
 
+impl ChatDetails {
+    /// From a `get_chats_info` item.
+    fn from_info(info: &Value) -> Self {
+        let text = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
+        Self {
+            name: text("name"),
+            description: text("description"),
+            role: text("role"),
+            member_count: info.get("members_count").and_then(convert::uint).unwrap_or(0),
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn chat_details(state: tauri::State<'_, AppState>, chat_id: String) -> Result<ChatDetails, String> {
     let live = live(&state).await?;
-    let info = chat_info_raw(&live, &chat_id).await?;
-    let text = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-    Ok(ChatDetails {
-        name: text("name"),
-        description: text("description"),
-        role: text("role"),
-        member_count: info.get("members_count").and_then(convert::uint).unwrap_or(0),
-    })
+    Ok(ChatDetails::from_info(&chat_info_raw(&live, &chat_id).await?))
 }
 
 /// People search for invitations. Without `chat_id` the search is relative to the notes chat.
@@ -1868,17 +1882,14 @@ pub async fn create_channel(
     public: bool,
 ) -> Result<Chat, String> {
     let live = live(&state).await?;
-    let mut web = live.web.clone_light();
     let mut all = vec![live.me.0.clone()];
     all.extend(members.into_iter().filter(|m| m != &live.me.0));
-    let v = web
-        .rpc(
-            "create_chat",
-            json!({ "name": name, "members": all, "channel": false, "public": public }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    let v = rpc(
+        &live,
+        "create_chat",
+        json!({ "name": name, "members": all, "channel": false, "public": public }),
+    )
+    .await?;
     let id = v
         .pointer("/data/chat_id")
         .and_then(Value::as_str)
@@ -1893,11 +1904,12 @@ pub async fn create_channel(
     // Description and visibility go through `set_chat_info`, as in the web client (field `public`).
     if !description.trim().is_empty() || public {
         let version = v.pointer("/data/version").and_then(Value::as_u64).unwrap_or(0);
-        let r = web
-            .rpc("set_chat_info", json!({ "chat_id": id, "version": version, "name": name, "description": description, "public": public }))
-            .await
-            .map_err(|e| e.to_string())?;
-        rpc_ok(&r)?;
+        rpc(
+            &live,
+            "set_chat_info",
+            json!({ "chat_id": id, "version": version, "name": name, "description": description, "public": public }),
+        )
+        .await?;
     }
     // Name and description as the server saved them.
     let info = chat_info_raw(&live, &id).await.unwrap_or(Value::Null);
@@ -1922,18 +1934,11 @@ pub async fn create_channel(
             .get("members_count")
             .and_then(Value::as_u64)
             .map_or(all.len() as u32, |n| n as u32),
-        last_ts: js_now_mcs(),
+        last_ts: clock::now_mcs(),
         ..Chat::new(ChatId(id), ChatKind::Group { public: server_public })
     };
     note_chat(&live, &chat);
     Ok(chat)
-}
-
-fn js_now_mcs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .unwrap_or(0)
 }
 
 #[tauri::command]
@@ -1942,12 +1947,7 @@ pub async fn chat_members(
     chat_id: String,
 ) -> Result<Vec<mostik_core::ChatMember>, String> {
     let live = live(&state).await?;
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc("get_chat_members", json!({ "chat_id": chat_id, "limit": 200 }))
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    let v = rpc(&live, "get_chat_members", json!({ "chat_id": chat_id, "limit": 200 })).await?;
     Ok(convert::members(&v))
 }
 
@@ -1966,15 +1966,13 @@ pub async fn change_members(
     } else {
         json!({ "remove": guids })
     };
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc(
-            "change_chat_members",
-            json!({ "chat_id": chat_id, "version": version, "users": users, "role": "member" }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)
+    rpc(
+        &live,
+        "change_chat_members",
+        json!({ "chat_id": chat_id, "version": version, "users": users, "role": "member" }),
+    )
+    .await
+    .map(drop)
 }
 
 #[tauri::command]
@@ -1992,51 +1990,31 @@ pub async fn update_chat(
         .and_then(Value::as_u64)
         .ok_or("could not get the chat version")?;
     let public = current.get("public").and_then(Value::as_bool).unwrap_or(false);
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc("set_chat_info", json!({ "chat_id": chat_id, "version": version, "name": name, "description": description, "public": public }))
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    rpc(
+        &live,
+        "set_chat_info",
+        json!({ "chat_id": chat_id, "version": version, "name": name, "description": description, "public": public }),
+    )
+    .await?;
     // Return what the server actually saved: that is what the UI shows.
-    let info = chat_info_raw(&live, &chat_id).await?;
-    let text = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-    Ok(ChatDetails {
-        name: text("name"),
-        description: text("description"),
-        role: text("role"),
-        member_count: info.get("members_count").and_then(convert::uint).unwrap_or(0),
-    })
+    Ok(ChatDetails::from_info(&chat_info_raw(&live, &chat_id).await?))
 }
 
 #[tauri::command]
 pub async fn leave_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Result<(), String> {
     let live = live(&state).await?;
     let version = chat_version(&live, &chat_id).await?;
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc("leave", json!({ "chat_id": chat_id, "version": version }))
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
-    if let Ok(mut sh) = live.shared.lock()
-        && let Some(name) = sh.titles.remove(&chat_id)
-    {
-        // Titles keep a group's emoji as `⚠️ Test`, the channel list its raw name `⚠️|Test`.
-        sh.channels.retain(|c| mostik_core::group_label(c) != name);
+    rpc(&live, "leave", json!({ "chat_id": chat_id, "version": version })).await?;
+    if let Ok(mut sh) = live.shared.lock() {
+        sh.forget_title(&chat_id);
     }
     Ok(())
 }
 
-/// A chat joined or created after the start: its title for notifications, and its name for
-/// `@channel` mentions if it is public.
+/// A chat joined or created after the start (see [`Shared::note_chat`]).
 fn note_chat(live: &Live, chat: &Chat) {
-    let Ok(mut sh) = live.shared.lock() else { return };
-    sh.titles
-        .insert(chat.id.0.clone(), mostik_core::group_label(&chat.name));
-    let public = chat.kind == ChatKind::Group { public: true };
-    if public && !chat.name.is_empty() && !sh.channels.contains(&chat.name) {
-        sh.channels.push(chat.name.clone());
+    if let Ok(mut sh) = live.shared.lock() {
+        sh.note_chat(chat, mostik_core::group_label(&chat.name));
     }
 }
 
@@ -2045,22 +2023,18 @@ fn note_chat(live: &Live, chat: &Chat) {
 async fn update_bucket(live: &Live, name: &str, change: impl Fn(&mut Value)) -> Result<Value, String> {
     let mut web = live.web.clone_light();
     for _ in 0..3 {
-        let v = web
-            .rpc("get_buckets", json!({ "version": 0 }))
-            .await
-            .map_err(|e| e.to_string())?;
+        let v = web.buckets().await.map_err(|e| e.to_string())?;
         rpc_ok(&v)?;
-        let bucket = v
-            .pointer("/data/buckets")
-            .and_then(Value::as_array)
-            .and_then(|l| l.iter().find(|b| b["bucket_name"] == name).cloned())
-            .unwrap_or(Value::Null);
+        let bucket = convert::bucket(&v, name);
         let mut value = bucket
-            .get("bucket_value")
+            .and_then(|b| b.get("bucket_value"))
             .cloned()
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
-        let version = bucket.get("version").and_then(Value::as_u64).unwrap_or(0);
+        let version = bucket
+            .and_then(|b| b.get("version"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         change(&mut value);
         let r = web
             .rpc(
@@ -2086,12 +2060,7 @@ pub async fn set_notify_level(
     level: NotifyLevel,
 ) -> Result<(), String> {
     let live = live(&state).await?;
-    let id = chat_id.clone();
-    let (mute, mute_mentions) = level.flags();
-    update_bucket(&live, "chat_mutings", move |v| {
-        v[&id] = json!({ "mute": mute, "mute_mentions": mute_mentions })
-    })
-    .await?;
+    put_notify_level(&live, &chat_id, level).await?;
     if let Ok(mut sh) = live.shared.lock() {
         if level == NotifyLevel::All {
             sh.muted.remove(&chat_id);
@@ -2100,6 +2069,17 @@ pub async fn set_notify_level(
         }
     }
     Ok(())
+}
+
+/// Writes what chat `chat_id` notifies about into the `chat_mutings` bucket.
+async fn put_notify_level(live: &Live, chat_id: &str, level: NotifyLevel) -> Result<(), String> {
+    let id = chat_id.to_owned();
+    let (mute, mute_mentions) = level.flags();
+    update_bucket(live, "chat_mutings", move |v| {
+        v[&id] = json!({ "mute": mute, "mute_mentions": mute_mentions })
+    })
+    .await
+    .map(drop)
 }
 
 /// Writes the organization's chat folders (the sidebar sections) into Telemost.
@@ -2188,6 +2168,19 @@ pub struct Sent {
     seq_no: u64,
 }
 
+impl Sent {
+    /// From Telemost's answer to the push of a new message.
+    fn from_reply(resp: &Value) -> Result<Self, String> {
+        Ok(Self {
+            ts: resp
+                .pointer("/MessageInfo/TimestampMcs")
+                .and_then(convert::uint)
+                .ok_or("Telemost did not return the message time")?,
+            seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
+        })
+    }
+}
+
 /// Forwards message `ts` from `from_chat` (a thread reply from the thread chat) to `to_chat` with a comment.
 #[tauri::command]
 pub async fn forward_message(
@@ -2208,14 +2201,7 @@ pub async fn forward_message(
     if !text.trim().is_empty() {
         plain["Text"] = json!({ "MessageText": text.trim() });
     }
-    let resp = push(&live, json!({ "Plain": plain })).await?;
-    Ok(Sent {
-        ts: resp
-            .pointer("/MessageInfo/TimestampMcs")
-            .and_then(convert::uint)
-            .ok_or("Telemost did not return the message time")?,
-        seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
-    })
+    Sent::from_reply(&push(&live, json!({ "Plain": plain })).await?)
 }
 
 /// A call from a chat, like a Slack huddle: the meeting bound to the chat (`create_meeting`) opens
@@ -2249,15 +2235,12 @@ pub(crate) async fn open_call(
         if let Some(url) = url {
             return Ok((url, live.web.jar().clone()));
         }
-        let mut web = live.web.clone_light();
-        let v = web
-            .rpc(
-                "create_meeting",
-                json!({ "chat_id": chat_id, "supported_features": [] }),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        rpc_ok(&v)?;
+        let v = rpc(
+            &live,
+            "create_meeting",
+            json!({ "chat_id": chat_id, "supported_features": [] }),
+        )
+        .await?;
         let id = v
             .pointer("/data/meeting_id")
             .and_then(Value::as_str)
@@ -2316,12 +2299,7 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<Chat> {
 #[tauri::command]
 pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<Chat>, String> {
     let live = live(&state).await?;
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc("get_recommended_chats", json!({ "limit": 50 }))
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    let v = rpc(&live, "get_recommended_chats", json!({ "limit": 50 })).await?;
     Ok(v.pointer("/data/chats")
         .and_then(Value::as_array)
         .into_iter()
@@ -2335,12 +2313,7 @@ pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<
 #[tauri::command]
 pub async fn join_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Result<Chat, String> {
     let live = live(&state).await?;
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc("activate_chat", json!({ "chat_id": chat_id }))
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    let v = rpc(&live, "activate_chat", json!({ "chat_id": chat_id })).await?;
     let chat = v
         .pointer("/data/chat")
         .and_then(|c| rpc_chat(c, &live.me))
@@ -2353,13 +2326,29 @@ pub async fn join_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Re
 #[tauri::command]
 pub async fn pick_files(app: AppHandle) -> Result<Vec<PendingFile>, String> {
     use tauri_plugin_dialog::DialogExt;
+    pick(&app, app.dialog().file(), true).await
+}
+
+/// Shows the system file picker `dialog`, for several files at once if `many`, and allows sending
+/// the files picked (see [`allow_files`]); none if the user cancels.
+pub(crate) async fn pick(
+    app: &AppHandle,
+    dialog: tauri_plugin_dialog::FileDialogBuilder<tauri::Wry>,
+    many: bool,
+) -> Result<Vec<PendingFile>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_files(move |picked| {
-        let _ = tx.send(picked);
-    });
-    let picked = rx.await.map_err(|e| e.to_string())?.unwrap_or_default();
+    if many {
+        dialog.pick_files(move |picked| {
+            let _ = tx.send(picked.unwrap_or_default());
+        });
+    } else {
+        dialog.pick_file(move |picked| {
+            let _ = tx.send(picked.into_iter().collect());
+        });
+    }
+    let picked: Vec<tauri_plugin_dialog::FilePath> = rx.await.map_err(|e| e.to_string())?;
     let paths: Vec<std::path::PathBuf> = picked.into_iter().filter_map(|f| f.into_path().ok()).collect();
-    Ok(allow_files(&app, &paths))
+    Ok(allow_files(app, &paths))
 }
 
 /// Path prefix of the files kept by [`keep_file`]: they have no path on disk.
@@ -2463,7 +2452,7 @@ pub async fn send_files(
         );
     }
     if !images.is_empty() {
-        let msg = json!({ "Plain": { "ChatId": target, "PayloadId": gallery_id, "Gallery": { "Items": images, "Text": text } } });
+        let msg = wire::gallery(&target, &gallery_id, images, &text);
         sent.push(send_plain(&live, &chat_id, thread, msg, &text).await?);
     }
     for (payload, info) in files {
@@ -2511,18 +2500,13 @@ async fn upload_one(
         .then(|| imagesize::blob_size(&bytes).ok())
         .flatten();
     let payload = if dims.is_some() { gallery_id } else { request_id() };
-    let up = web
+    let id = web
         .upload_file(&target, &payload, &name, mime.essence_str(), bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let id = up
-        .get("file_id")
-        .and_then(Value::as_str)
-        .ok_or("Telemost did not return file_id")?
-        .to_owned();
-    let info = json!({ "Id2": id, "Name": name, "Size": size });
+    let info = wire::file_info(&id, &name, size);
     Ok(match dims {
-        Some(d) => Uploaded::Image(json!({ "Image": { "Width": d.width, "Height": d.height, "FileInfo": info } })),
+        Some(d) => Uploaded::Image(wire::gallery_image(d.width as u64, d.height as u64, info)),
         None => Uploaded::File(payload, info),
     })
 }
@@ -2535,12 +2519,9 @@ async fn send_plain(
     msg: Value,
     text: &str,
 ) -> Result<Message, String> {
-    let resp = push(live, msg.clone()).await?;
-    let ts = resp
-        .pointer("/MessageInfo/TimestampMcs")
-        .and_then(convert::uint)
-        .ok_or("Telemost did not return the message time")?;
-    let fake = json!({ "ClientMessage": msg, "ServerMessageInfo": { "Timestamp": ts, "From": { "Guid": live.me.0 } } });
+    let sent = Sent::from_reply(&push(live, msg.clone()).await?)?;
+    let fake = json!({ "ClientMessage": msg, "ServerMessageInfo": {
+        "Timestamp": sent.ts, "SeqNo": sent.seq_no, "From": { "Guid": live.me.0 } } });
     let mut m = match convert::from_push(&fake, Some(&live.me)) {
         Some(LiveEvent::Upsert { message, .. }) => *message,
         _ => return Err("could not parse the sent message".into()),
@@ -2831,12 +2812,9 @@ async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
             // Its close went to a reconnection that this loop turned away: try again.
             Ok((_, live)) if live.xiva.is_closed() => eprintln!("reconnect: the new connection closed at once"),
             Ok((snapshot, live)) => {
-                let live = Arc::new(live);
-                if !install(state, generation, live.clone()).await {
+                if !install(app, state, generation, live).await {
                     return false;
                 }
-                // Changes to the service chat made while offline.
-                service::start(app.clone(), live);
                 let _ = app.emit(EVENT, &LiveEvent::Connection { online: true });
                 let _ = app.emit(SNAPSHOT_EVENT, &snapshot);
                 return true;
@@ -2850,12 +2828,7 @@ async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
                 }
                 call::close(app);
                 *state.live.lock().await = None;
-                let reason = text(
-                    app,
-                    "Сессия Яндекс ID недействительна, войдите снова.",
-                    "Your Yandex ID session has expired. Please sign in again.",
-                );
-                let _ = app.emit(SIGNED_OUT_EVENT, reason);
+                let _ = app.emit(SIGNED_OUT_EVENT, session_expired(app));
                 return false;
             }
             Err(ConnectError::Other(e)) => eprintln!("reconnect failed: {e}"),
@@ -3074,7 +3047,7 @@ async fn connect_inner(
         .collect();
     let filled = fill_profiles(&web, &mut snapshot.users).await;
     probe["profiles_filled"] = json!(filled);
-    match web.rpc("get_buckets", json!({ "version": 0 })).await {
+    match web.buckets().await {
         Ok(b) => {
             convert::apply_buckets(&mut snapshot, &b);
             probe["buckets"] = json!(b.get("status"));
@@ -3105,9 +3078,7 @@ async fn connect_inner(
             };
             sh.titles.insert(ch.id.0.clone(), title);
         }
-        for u in snapshot.users.iter().filter(|u| u.has_name()) {
-            sh.names.insert(u.id.0.clone(), u.display_name.clone());
-        }
+        sh.learn_names(&snapshot.users);
         sh.channels = snapshot.mention_channels();
         sh.ready = true;
     }
@@ -3137,7 +3108,7 @@ async fn connect_inner(
 
 #[cfg(test)]
 mod tests {
-    use super::{percent_decode, reconnect_pause};
+    use super::reconnect_pause;
     use std::time::Duration;
 
     #[test]
@@ -3152,13 +3123,5 @@ mod tests {
         assert_eq!(ms(0, 1001), 2000);
         assert_eq!(ms(5, u64::MAX), 60000 + u128::from(u64::MAX % 30001));
         assert!(reconnect_pause(40, u64::MAX) <= Duration::from_secs(90));
-    }
-
-    #[test]
-    fn decodes_file_ids() {
-        assert_eq!(percent_decode("disk%2Fabc-1"), "disk/abc-1");
-        assert_eq!(percent_decode("%D1%84%D0%B0%D0%B9%D0%BB"), "файл");
-        assert_eq!(percent_decode("bad%2"), "bad%2");
-        assert_eq!(percent_decode("plain"), "plain");
     }
 }

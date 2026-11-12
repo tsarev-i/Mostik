@@ -3,6 +3,7 @@
 //! This is an **unofficial** implementation: the protocol is undocumented and was reconstructed
 //! from the public web client. Mostik is not affiliated with Yandex.
 
+pub mod clock;
 pub mod convert;
 pub mod diag;
 pub mod endpoints;

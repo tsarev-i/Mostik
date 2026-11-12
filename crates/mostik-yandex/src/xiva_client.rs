@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
+use crate::clock::now_ms;
 use crate::endpoints::{WEB_ORIGIN, xiva_ws_url};
 use crate::session::CookieJar;
 use crate::xiva::{self, Frame};
@@ -79,12 +80,6 @@ struct Liveness {
     last_frame: Arc<AtomicU64>,
     ping_interval_ms: Arc<AtomicU64>,
     kill: Arc<Notify>,
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
 }
 
 impl Liveness {

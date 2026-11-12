@@ -3,7 +3,7 @@
 //! WASAPI on Windows).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// The sound files, by the ids of [`mostik_core::NOTIFICATION_SOUNDS`]; `none` has none.
 const FILES: &[(&str, &[u8])] = &[
@@ -51,9 +51,7 @@ pub fn play(id: &str) {
     let Some(&(name, wav)) = FILES.iter().find(|(name, _)| *name == id) else {
         return;
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
+    let now = mostik_yandex::clock::now_ms();
     let last = LAST_PLAYED_MS.swap(now, Ordering::SeqCst);
     if now.saturating_sub(last) < MIN_GAP.as_millis() as u64 {
         return;

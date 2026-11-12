@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::StatusCode;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE, USER_AGENT};
 use serde_json::Value;
@@ -359,7 +360,8 @@ impl WebClient {
     }
 
     /// File upload: `POST media_upload/{chatId}/{messageId}/{filename}`, the body is the file bytes.
-    /// `message_id` is the UUID of the future message (also its `PayloadId`). Returns `data.data` of the response.
+    /// `message_id` is the UUID of the future message (also its `PayloadId`). Returns the `file_id`
+    /// of the uploaded file (`Id2` in [`crate::wire::file_info`]).
     pub async fn upload_file(
         &mut self,
         chat_id: &str,
@@ -367,31 +369,13 @@ impl WebClient {
         filename: &str,
         content_type: &str,
         bytes: Vec<u8>,
-    ) -> Result<Value, WebError> {
+    ) -> Result<String, WebError> {
         // Like `encodeURI` in the web client: the chat ID goes in with its slashes as is,
         // only the file name is encoded (and a `/` in it is escaped so it cannot break the path).
-        let enc = |s: &str| -> String {
-            s.bytes()
-                .map(|b| match b {
-                    b'A'..=b'Z'
-                    | b'a'..=b'z'
-                    | b'0'..=b'9'
-                    | b'-'
-                    | b'_'
-                    | b'.'
-                    | b'~'
-                    | b'('
-                    | b')'
-                    | b'!'
-                    | b'\'' => (b as char).to_string(),
-                    _ => format!("%{b:02X}"),
-                })
-                .collect()
-        };
         let url = format!(
             "https://{}/media_upload/{chat_id}/{message_id}/{}",
             FILES_HOST,
-            enc(filename)
+            encode_uri_component(filename)
         );
         let bytes = bytes::Bytes::from(bytes);
         let mut retried = false;
@@ -439,7 +423,18 @@ impl WebClient {
                 v.pointer("/data/code").and_then(Value::as_str).unwrap_or("")
             )));
         }
-        Ok(v.get("data").cloned().unwrap_or(v))
+        v.get("data")
+            .unwrap_or(&v)
+            .get("file_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| WebError::BadResponse("Telemost did not return file_id".into()))
+    }
+
+    /// All the synced settings (`get_buckets` from version 0); [`crate::convert::bucket`] finds
+    /// one of them.
+    pub async fn buckets(&mut self) -> Result<Value, WebError> {
+        self.rpc("get_buckets", serde_json::json!({ "version": 0 })).await
     }
 
     /// `POST /api/` call in the web client format. Returns the whole response JSON. A reading
@@ -516,6 +511,29 @@ impl WebClient {
             return parsed.map_err(|_| WebError::BadResponse(format!("{method}: HTTP {status}, not JSON")));
         }
     }
+}
+
+/// What a URI component keeps as it is: letters, digits and `-_.~()!'`, as `encodeURIComponent`
+/// does but for `*`.
+const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'!')
+    .remove(b'\'');
+
+/// `s` percent-encoded as one URI component: nothing in it can end or split the URL around it.
+pub fn encode_uri_component(s: &str) -> String {
+    utf8_percent_encode(s, URI_COMPONENT).to_string()
+}
+
+/// `s` with its `%XX` escapes decoded. A broken escape stays as it is, and bytes that are not
+/// UTF-8 become U+FFFD.
+pub fn percent_decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
 }
 
 /// Address of a file or preview of the Messenger storage: `file_shortterm/<Id2>[?size=…]`.
@@ -687,6 +705,27 @@ mod tests {
         assert_eq!(transfer_timeout(0), Duration::from_secs(60));
         assert_eq!(transfer_timeout(60 * SLOWEST_TRANSFER), Duration::from_secs(120));
         assert_eq!(transfer_timeout(u64::MAX), MAX_TRANSFER_TIME);
+    }
+
+    #[test]
+    fn percent_coding() {
+        assert_eq!(
+            encode_uri_component("Отчёт (1)!.pdf"),
+            "%D0%9E%D1%82%D1%87%D1%91%D1%82%20(1)!.pdf"
+        );
+        assert_eq!(encode_uri_component("a/b?c#d&e*f'~"), "a%2Fb%3Fc%23d%26e%2Af'~");
+        assert_eq!(
+            encode_uri_component("<b>a b\n#&</b>"),
+            "%3Cb%3Ea%20b%0A%23%26%3C%2Fb%3E"
+        );
+        assert_eq!(percent_decode("disk%2Fabc-1"), "disk/abc-1");
+        assert_eq!(percent_decode("%D1%84%D0%B0%D0%B9%D0%BB"), "файл");
+        assert_eq!(percent_decode("bad%2"), "bad%2");
+        assert_eq!(percent_decode("%zz%+5"), "%zz%+5");
+        assert_eq!(percent_decode("%FF"), "\u{FFFD}");
+        assert_eq!(percent_decode("plain"), "plain");
+        let name = "Отчёт за май (итог) #2 100%.docx";
+        assert_eq!(percent_decode(&encode_uri_component(name)), name);
     }
 
     #[test]

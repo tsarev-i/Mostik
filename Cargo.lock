@@ -3096,6 +3096,7 @@ dependencies = [
  "futures-util",
  "hyper-util",
  "mostik-core",
+ "percent-encoding",
  "reqwest",
  "rmpv",
  "rustls",

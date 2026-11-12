@@ -178,6 +178,22 @@ pub fn edit_whole(original: &Value, chat_id: &str, ts: u64, text: &str) -> Value
     json!({ "Plain": plain })
 }
 
+/// `FileInfo` of an uploaded file: `file_id` is what the upload returned.
+pub fn file_info(file_id: &str, name: &str, size: usize) -> Value {
+    json!({ "Id2": file_id, "Name": name, "Size": size })
+}
+
+/// Gallery item: an uploaded image of `width` × `height` pixels with its [`file_info`].
+pub fn gallery_image(width: u64, height: u64, info: Value) -> Value {
+    json!({ "Image": { "Width": width, "Height": height, "FileInfo": info } })
+}
+
+/// Images (from [`gallery_image`]) with a caption, as one message. `payload_id` is the one
+/// the images were uploaded with.
+pub fn gallery(chat_id: &str, payload_id: &str, items: Vec<Value>, text: &str) -> Value {
+    json!({ "Plain": { "ChatId": chat_id, "PayloadId": payload_id, "Gallery": { "Items": items, "Text": text } } })
+}
+
 /// Delete: `Plain` with only `ChatId` and `Timestamp`.
 pub fn delete(chat_id: &str, ts: u64) -> Value {
     json!({ "Plain": { "ChatId": chat_id, "Timestamp": ts } })
@@ -288,6 +304,12 @@ mod tests {
     fn whole_edit_keeps_the_gallery_and_the_files() {
         let items =
             json!([{"Image": {"FileInfo": {"Id2": "file/x", "Name": "a.png", "Size": 3}, "Width": 1, "Height": 1}}]);
+        let image = gallery_image(1, 1, file_info("file/x", "a.png", 3));
+        assert_eq!(json!([image]), items);
+        assert_eq!(
+            gallery("c", "p", vec![image], "old")["Plain"],
+            json!({"ChatId": "c", "PayloadId": "p", "Gallery": {"Items": items, "Text": "old"}})
+        );
         let gallery = json!({"ChatId": "c", "PayloadId": "p", "Gallery": {"Items": items, "Text": "old"},
             "MentionedUserIds": ["gone"]});
         let edit = edit_whole(&gallery, "c", 42, "new");

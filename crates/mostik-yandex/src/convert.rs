@@ -1323,30 +1323,30 @@ pub fn put_chat_folders(value: &mut Value, org: &str, folders: &[ChatFolder]) {
     entry["custom_folders"] = json!(list);
 }
 
+/// Synced setting `name` of a `get_buckets` answer: `{bucket_name, bucket_value, version}`.
+pub fn bucket<'a>(buckets: &'a Value, name: &str) -> Option<&'a Value> {
+    buckets
+        .pointer("/data/buckets")?
+        .as_array()?
+        .iter()
+        .find(|b| b["bucket_name"] == name)
+}
+
 /// Applies synced settings (`get_buckets`): chat folders, pinned chats go to the "Starred"
 /// section, muted chats set `Chat::muted`, a notification pause sets `Snapshot::paused`.
 pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
-    let list = buckets
-        .pointer("/data/buckets")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let bucket = |name: &str| {
-        list.iter()
-            .find(|b| b["bucket_name"] == name)
-            .map(|b| b["bucket_value"].clone())
-    };
-    snapshot.folders = bucket("folders").map(|v| chat_folders(&v)).unwrap_or_default();
-    snapshot.paused = bucket("status").and_then(|v| pause(&v));
-    if let Some(mutings) = bucket("chat_mutings") {
-        for (id, level) in chat_mutings(&mutings) {
+    let value = |name: &str| bucket(buckets, name).map(|b| &b["bucket_value"]);
+    snapshot.folders = value("folders").map(chat_folders).unwrap_or_default();
+    snapshot.paused = value("status").and_then(pause);
+    if let Some(mutings) = value("chat_mutings") {
+        for (id, level) in chat_mutings(mutings) {
             if let Some(ch) = snapshot.chats.iter_mut().find(|ch| ch.id == id) {
                 ch.set_notify_level(level);
             }
         }
     }
-    let pinned: Vec<ChatId> = bucket("pinned_chats")
-        .map(|v| pinned_chats(&v))
+    let pinned: Vec<ChatId> = value("pinned_chats")
+        .map(pinned_chats)
         .unwrap_or_default()
         .into_iter()
         .filter(|id| snapshot.chat(id).is_some())

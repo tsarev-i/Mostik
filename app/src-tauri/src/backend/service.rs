@@ -20,18 +20,19 @@ use mostik_core::custom_emoji::{
     self as ce, EmojiSet, MAX_UPLOAD, SERVICE_CHAT_NAME, SERVICE_DESCRIPTION, SERVICE_MARKER, UPLOAD_SIDE,
 };
 use mostik_core::{Chat, ChatId, NotifyLevel, Snapshot, Timestamp, UserId};
+use mostik_yandex::clock;
 use mostik_yandex::convert::{self, LiveEvent};
-use mostik_yandex::diag::{id_pattern, shape};
+use mostik_yandex::diag::id_pattern;
 use mostik_yandex::web::WebClient;
-use mostik_yandex::wire::{self, HistoryRequest, request_id};
+use mostik_yandex::wire::{self, request_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 use super::{
-    AppState, HISTORY_TIMEOUT_S, Live, PendingFile, Shared, allow_files, chat_info_raw, live, original_plain, push,
-    rpc_ok, text, update_bucket,
+    AppState, Live, PendingFile, Shared, chat_info_raw, history_page, live, original_plain, pick, push,
+    put_notify_level, rpc, rpc_ok, text,
 };
 
 /// The custom emoji sets changed: the payload is the new list.
@@ -119,12 +120,6 @@ const DOWNLOADS: usize = 4;
 /// The most bytes the emoji images take on disk. Past it a new image is not kept: it still shows,
 /// fetched when needed.
 const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
 
 fn dir(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_cache_dir().ok().map(|d| d.join("emoji"))
@@ -460,7 +455,7 @@ pub fn start(app: AppHandle, live: Arc<Live>) {
         }
         let orgs = live.shared.lock().map(|sh| sh.orgs.clone()).unwrap_or_default();
         let unknown = orgs.iter().any(|o| !has_aliased(&app, *o));
-        let due = with_disk(&app, |d| now_ms().saturating_sub(d.looked_ms) > LOOK_EVERY_MS);
+        let due = with_disk(&app, |d| clock::now_ms().saturating_sub(d.looked_ms) > LOOK_EVERY_MS);
         if unknown && due {
             for (id, orgs) in discover(&app, &live).await {
                 let _ = refresh(&app, &live, &id, orgs).await;
@@ -485,7 +480,7 @@ fn has_aliased(app: &AppHandle, org: u64) -> bool {
 /// user is not in yet. An organization whose alias is free gets it on the user's own service chat
 /// there, if the user may change that chat.
 async fn discover(app: &AppHandle, live: &Live) -> Vec<(String, Vec<u64>)> {
-    with_disk(app, |d| d.looked_ms = now_ms());
+    with_disk(app, |d| d.looked_ms = clock::now_ms());
     let orgs = live.shared.lock().map(|sh| sh.orgs.clone()).unwrap_or_default();
     let mut web = live.web.clone_light();
     let mut joined = vec![];
@@ -643,13 +638,7 @@ async fn set_alias(web: &mut WebClient, id: &str, version: u64, alias: &str) -> 
 
 /// Mutes a service chat in Telemost, so no client notifies about it.
 async fn mute(live: &Live, chat: &str) {
-    let id = chat.to_owned();
-    let (mute, mute_mentions) = NotifyLevel::Nothing.flags();
-    let r = update_bucket(live, "chat_mutings", move |v| {
-        v[&id] = json!({ "mute": mute, "mute_mentions": mute_mentions })
-    })
-    .await;
-    if let Err(e) = r {
+    if let Err(e) = put_notify_level(live, chat, NotifyLevel::Nothing).await {
         eprintln!("service chat mute: {e}");
     }
 }
@@ -694,32 +683,17 @@ fn forget(app: &AppHandle, chat: &str) {
 }
 
 /// Reads the whole service chat, rebuilds its set, keeps it on disk and marks the chat read.
-async fn refresh(app: &AppHandle, live: &Live, chat: &str, mut orgs: Vec<u64>) -> Result<(), String> {
+async fn refresh(app: &AppHandle, live: &Arc<Live>, chat: &str, mut orgs: Vec<u64>) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let mut messages = Vec::new();
     let mut before = None;
     let (mut last_ts, mut last_edit_ts, mut last_seq) = (0, 0, 0);
     for page in 0..MAX_PAGES {
-        let mut body = None;
-        for attempt in 0..2 {
-            match live
-                .xiva
-                .call("history", &HistoryRequest::page(chat, PAGE, before), HISTORY_TIMEOUT_S)
-                .await
-            {
-                Ok(v) if not_member(&v) => {
-                    forget(app, chat);
-                    return Err("the user is not in the chat any more".to_owned());
-                }
-                Ok(v) if v.get("Chats").is_some() => {
-                    body = Some(v);
-                    break;
-                }
-                Ok(v) => return Err(format!("no history: {}", shape(&v))),
-                Err(e) if attempt == 1 => return Err(e.to_string()),
-                Err(_) => {}
-            }
+        let (_, body) = history_page(&state, live.clone(), chat, PAGE, before).await?;
+        if not_member(&body) {
+            forget(app, chat);
+            return Err("the user is not in the chat any more".to_owned());
         }
-        let Some(body) = body else { break };
         let c = &body["Chats"][0];
         if page == 0 {
             last_ts = c.get("LastTsMcs").and_then(Value::as_u64).unwrap_or(0);
@@ -776,13 +750,9 @@ async fn refresh(app: &AppHandle, live: &Live, chat: &str, mut orgs: Vec<u64>) -
     Ok(())
 }
 
-/// File of an emoji image on disk.
+/// File of an emoji image on disk: the file ID made a plain file name, as an attachment's name is.
 fn file_path(app: &AppHandle, file_id: &str) -> Option<PathBuf> {
-    let safe: String = file_id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
-        .collect();
-    dir(app).map(|d| d.join("files").join(safe))
+    dir(app).map(|d| d.join("files").join(crate::downloads::safe_name(file_id)))
 }
 
 /// Downloads the images of the emoji that are not on disk yet, after deleting the ones of emoji
@@ -889,18 +859,11 @@ pub fn custom_emoji(app: AppHandle) -> Vec<EmojiSet> {
 #[tauri::command]
 pub async fn pick_emoji_image(app: AppHandle) -> Result<Option<PendingFile>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
+    let dialog = app
+        .dialog()
         .file()
-        .add_filter("Images", &["png", "gif", "jpg", "jpeg", "webp"])
-        .pick_file(move |picked| {
-            let _ = tx.send(picked);
-        });
-    let picked = rx.await.map_err(|e| e.to_string())?;
-    let Some(path) = picked.and_then(|f| f.into_path().ok()) else {
-        return Ok(None);
-    };
-    Ok(allow_files(&app, &[path]).into_iter().next())
+        .add_filter("Images", &["png", "gif", "jpg", "jpeg", "webp"]);
+    Ok(pick(&app, dialog, false).await?.into_iter().next())
 }
 
 /// An image ready to post: bytes, file extension and MIME type, size.
@@ -991,7 +954,7 @@ fn taken_error(app: &AppHandle) -> String {
 
 /// The service chat for organization `org` to post to: a known one, one found among the public
 /// chats, or a new one.
-async fn chat_for(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(String, Vec<u64>), String> {
+async fn chat_for(app: &AppHandle, live: &Arc<Live>, org: Option<u64>) -> Result<(String, Vec<u64>), String> {
     if let Some(s) = ce::set_for(&sets(app), &[], org) {
         return Ok((s.chat_id.0.clone(), s.organizations.clone()));
     }
@@ -1013,15 +976,12 @@ async fn chat_for(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(Str
 /// Creates the service chat: a public group of organization `org` with the marker in its
 /// description, muted. Telemost puts a new group in no organization until it is given one.
 async fn create(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(String, Vec<u64>), String> {
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc(
-            "create_chat",
-            json!({ "name": SERVICE_CHAT_NAME, "members": [live.me.0], "channel": false, "public": true }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    let v = rpc(
+        live,
+        "create_chat",
+        json!({ "name": SERVICE_CHAT_NAME, "members": [live.me.0], "channel": false, "public": true }),
+    )
+    .await?;
     let id = v
         .pointer("/data/chat_id")
         .and_then(Value::as_str)
@@ -1032,15 +992,14 @@ async fn create(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(Strin
         sh.service.insert(id.clone());
     }
     let version = v.pointer("/data/version").and_then(Value::as_u64).unwrap_or(0);
-    let r = web
-        .rpc(
-            "set_chat_info",
-            json!({ "chat_id": id, "version": version, "name": SERVICE_CHAT_NAME,
-                "description": SERVICE_DESCRIPTION, "public": true }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&r)?;
+    rpc(
+        live,
+        "set_chat_info",
+        json!({ "chat_id": id, "version": version, "name": SERVICE_CHAT_NAME,
+            "description": SERVICE_DESCRIPTION, "public": true }),
+    )
+    .await?;
+    let mut web = live.web.clone_light();
     if let Some(org) = org {
         let r = web
             .rpc(
@@ -1140,19 +1099,15 @@ pub async fn add_custom_emoji(
     let payload = request_id();
     let file_name = format!("{}.{}", emoji.name, prepared.ext);
     let size = prepared.bytes.len();
-    let mut web = live.web.clone_light();
-    let up = web
+    let file_id = live
+        .web
+        .clone_light()
         .upload_file(&chat, &payload, &file_name, prepared.mime, prepared.bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let file_id = up
-        .get("file_id")
-        .and_then(Value::as_str)
-        .ok_or("Telemost did not return file_id")?;
-    let item = json!({ "Image": { "Width": prepared.width, "Height": prepared.height,
-        "FileInfo": { "Id2": file_id, "Name": file_name, "Size": size } } });
-    let msg = json!({ "Plain": { "ChatId": chat, "PayloadId": payload,
-        "Gallery": { "Items": [item], "Text": ce::caption(&emoji.name) } } });
+    let info = wire::file_info(&file_id, &file_name, size);
+    let item = wire::gallery_image(prepared.width.into(), prepared.height.into(), info);
+    let msg = wire::gallery(&chat, &payload, vec![item], &ce::caption(&emoji.name));
     push(&live, msg).await?;
     refresh(&app, &live, &chat, orgs).await?;
     emit(&app);
