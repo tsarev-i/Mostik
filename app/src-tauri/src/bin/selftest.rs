@@ -96,6 +96,15 @@ async fn run() -> Res<()> {
     let ua = identity::user_agent(UA);
     let mut web = WebClient::new(jar, ua.clone()).map_err(|e| e.to_string())?;
     let page = web.load_page().await.map_err(|e| e.to_string())?;
+    if let Some(i) = std::env::args().position(|a| a == "--chat-info") {
+        let ids: Vec<String> = std::env::args().skip(i + 1).collect();
+        let v = web
+            .rpc("get_chats_info", json!({ "chat_ids": ids }))
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("{v}");
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--buckets") {
         let v = web
             .rpc("get_buckets", json!({ "version": 0 }))
@@ -115,6 +124,13 @@ async fn run() -> Res<()> {
                 .map_or(0, |d| d.as_millis());
             match &inc {
                 Incoming::Push { event, body } => println!("{}", json!({ "t": now, "event": event, "body": body })),
+                Incoming::Undecoded { event, version, body } => {
+                    let hex: String = body.iter().map(|b| format!("{b:02x}")).collect();
+                    println!(
+                        "{}",
+                        json!({ "t": now, "event": event, "version": version, "hex": hex })
+                    )
+                }
                 Incoming::Text(t) => println!("{}", json!({ "t": now, "text": t })),
                 Incoming::Closed => println!("{}", json!({ "t": now, "closed": true })),
             }

@@ -1,9 +1,9 @@
 //! The Mostik service chat of an organization and its custom emoji (see
 //! [`mostik_core::custom_emoji`]).
 //!
-//! The chat is found in the chat list (by name, confirmed by the marker in its description) or
-//! among public chats, which Mostik then joins; when there is none, the first emoji added creates
-//! it. It never reaches the UI: [`hide`] takes it out of the snapshot and [`swallows`] out of the
+//! The chat is found in the chat list (by name, confirmed by the marker in its description) or by
+//! its alias, [`ce::service_alias`] of the organization, which Mostik then joins: Telemost search
+//! finds only the chats the user is in. When there is none, the first emoji added creates it. It never reaches the UI: [`hide`] takes it out of the snapshot and [`swallows`] out of the
 //! live events. Mostik mutes it in Telemost and keeps it read, so the official client does not
 //! bother anyone with it either.
 //!
@@ -42,13 +42,18 @@ struct Cached {
     last_edit_ts: u64,
 }
 
+/// Fields missing on disk (written by an older version) take their defaults.
 #[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Disk {
     /// Whose sets these are: another account starts afresh.
     me: String,
     sets: Vec<Cached>,
-    /// When public chats were last searched for a service chat (ms since the epoch).
-    searched_ms: u64,
+    /// When the aliases were last looked up (ms since the epoch).
+    looked_ms: u64,
+    /// Service chats that hold the alias of their organization: of several service chats of one
+    /// organization every client uses that one.
+    aliased: BTreeSet<String>,
 }
 
 /// Service chat state that outlives a connection.
@@ -63,8 +68,8 @@ pub struct State {
     busy: Mutex<()>,
 }
 
-/// How often public chats are searched for a service chat of an organization that has none.
-const SEARCH_EVERY_MS: u64 = 24 * 3600 * 1000;
+/// How often the alias of an organization is looked up while its service chat is unknown.
+const LOOK_EVERY_MS: u64 = 3600 * 1000;
 /// History page for reading the service chat, and the most pages read.
 const PAGE: u32 = 50;
 const MAX_PAGES: usize = 100;
@@ -108,12 +113,17 @@ fn save(app: &AppHandle) {
 }
 
 /// The sets to use, one per organization: of several service chats of one organization (two
-/// people created one at the same time), every client takes the same one.
+/// people created one at the same time), every client takes the same one, the one with the alias.
 pub fn sets(app: &AppHandle) -> Vec<EmojiSet> {
-    let mut all: Vec<EmojiSet> = with_disk(app, |d| d.sets.iter().map(|c| c.set.clone()).collect());
-    all.sort_by(|a, b| a.chat_id.0.cmp(&b.chat_id.0));
+    let mut all: Vec<(bool, EmojiSet)> = with_disk(app, |d| {
+        d.sets
+            .iter()
+            .map(|c| (!d.aliased.contains(&c.set.chat_id.0), c.set.clone()))
+            .collect()
+    });
+    all.sort_by(|a, b| (a.0, &a.1.chat_id.0).cmp(&(b.0, &b.1.chat_id.0)));
     let mut out: Vec<EmojiSet> = Vec::new();
-    for set in all {
+    for (_, set) in all {
         let covered = out.iter().any(|o| {
             o.organizations.iter().any(|x| set.organizations.contains(x))
                 || (o.organizations.is_empty() && set.organizations.is_empty())
@@ -367,11 +377,9 @@ pub fn start(app: AppHandle, live: Arc<Live>) {
             }
         }
         let orgs = live.shared.lock().map(|sh| sh.orgs.clone()).unwrap_or_default();
-        let have = sets(&app);
-        let missing = (orgs.is_empty() && have.is_empty())
-            || orgs.iter().any(|o| !have.iter().any(|s| s.organizations.contains(o)));
-        let due = with_disk(&app, |d| now_ms().saturating_sub(d.searched_ms) > SEARCH_EVERY_MS);
-        if missing && due {
+        let unknown = orgs.iter().any(|o| !has_aliased(&app, *o));
+        let due = with_disk(&app, |d| now_ms().saturating_sub(d.looked_ms) > LOOK_EVERY_MS);
+        if unknown && due {
             for (id, orgs) in discover(&app, &live).await {
                 let _ = refresh(&app, &live, &id, orgs).await;
             }
@@ -382,63 +390,45 @@ pub fn start(app: AppHandle, live: Arc<Live>) {
     });
 }
 
-/// Looks for service chats among the public chats (search and recommendations) and joins the
-/// ones of organizations that have none yet.
+/// Whether the user is in the service chat that holds the alias of organization `org`.
+fn has_aliased(app: &AppHandle, org: u64) -> bool {
+    with_disk(app, |d| {
+        d.sets
+            .iter()
+            .any(|c| c.set.organizations.contains(&org) && d.aliased.contains(&c.set.chat_id.0))
+    })
+}
+
+/// Looks up the service chats of the user's organizations by their aliases and joins the ones the
+/// user is not in yet. An organization whose alias is free gets it on the user's own service chat
+/// there, if the user may change that chat.
 async fn discover(app: &AppHandle, live: &Live) -> Vec<(String, Vec<u64>)> {
-    with_disk(app, |d| d.searched_ms = now_ms());
-    save(app);
+    with_disk(app, |d| d.looked_ms = now_ms());
+    let orgs = live.shared.lock().map(|sh| sh.orgs.clone()).unwrap_or_default();
     let mut web = live.web.clone_light();
-    let mut ids = BTreeSet::new();
-    let named =
-        |c: &Value, key: &str| c.get("name").and_then(Value::as_str) == Some(SERVICE_CHAT_NAME) && c.get(key).is_some();
-    match web
-        .rpc(
-            "search",
-            json!({ "query": SERVICE_CHAT_NAME, "limit": 20, "entities": ["users_and_chats"] }),
-        )
-        .await
-    {
-        Ok(v) => ids.extend(
-            v.pointer("/data/users_and_chats/items")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(|i| &i["data"])
-                .filter(|c| named(c, "chat_id"))
-                .filter_map(|c| c["chat_id"].as_str().map(str::to_owned)),
-        ),
-        Err(e) => eprintln!("service chat search: {e}"),
-    }
-    if let Ok(v) = web.rpc("get_recommended_chats", json!({ "limit": 50 })).await {
-        ids.extend(
-            v.pointer("/data/chats")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|c| named(c, "chat_id"))
-                .filter_map(|c| c["chat_id"].as_str().map(str::to_owned)),
-        );
-    }
-    let known: BTreeSet<String> = live
-        .shared
-        .lock()
-        .map(|sh| sh.service.iter().cloned().collect())
-        .unwrap_or_default();
-    ids.retain(|id| !known.contains(id));
-    eprintln!("service chat search: {} candidates", ids.len());
-    if ids.is_empty() {
-        return vec![];
-    }
-    let Ok(v) = web.rpc("get_chats_info", json!({ "chat_ids": ids })).await else {
-        return vec![];
-    };
-    let mut covered: Vec<u64> = sets(app).iter().flat_map(|s| s.organizations.clone()).collect();
     let mut joined = vec![];
-    let mut found = marked_chats(&v);
-    // Of two service chats of one organization every client joins the same one.
-    found.sort();
-    for (id, orgs) in found {
-        if orgs.iter().any(|o| covered.contains(o)) {
+    for org in orgs {
+        if has_aliased(app, org) {
+            continue;
+        }
+        let Some(alias) = ce::service_alias(org) else { continue };
+        let found = match web.rpc("get_chats_info", json!({ "alias": alias })).await {
+            Ok(v) => aliased_chat(&v, org),
+            Err(e) => {
+                eprintln!("service chat alias: {e}");
+                continue;
+            }
+        };
+        let Some((id, orgs)) = found else {
+            name_own(app, &mut web, org, &alias).await;
+            continue;
+        };
+        let member = with_disk(app, |d| {
+            d.aliased.insert(id.clone());
+            d.sets.iter().any(|c| c.set.chat_id.0 == id)
+        });
+        eprintln!("service chat by alias: {}, member: {member}", id_pattern(&id));
+        if member {
             continue;
         }
         if let Ok(mut sh) = live.shared.lock() {
@@ -447,13 +437,91 @@ async fn discover(app: &AppHandle, live: &Live) -> Vec<(String, Vec<u64>)> {
         match web.rpc("activate_chat", json!({ "chat_id": id })).await {
             Ok(r) if rpc_ok(&r).is_ok() => {
                 mute(live, &id).await;
-                covered.extend(&orgs);
                 joined.push((id, orgs));
             }
-            other => eprintln!("service chat join {}: {other:?}", id_pattern(&id)),
+            other => {
+                with_disk(app, |d| d.aliased.remove(&id));
+                eprintln!("service chat join {}: {other:?}", id_pattern(&id));
+            }
         }
     }
+    save(app);
     joined
+}
+
+/// The service chat in a `get_chats_info {alias}` answer, if it is one of organization `org`.
+/// An alias is global in Telemost, so the name, the marker and the organization are checked; the
+/// preview of a chat the user is not in may lack the description or the organizations.
+fn aliased_chat(v: &Value, org: u64) -> Option<(String, Vec<u64>)> {
+    let c = v.pointer("/data/chats/0")?;
+    if c.get("name").and_then(Value::as_str) != Some(SERVICE_CHAT_NAME) {
+        return None;
+    }
+    if let Some(d) = c.get("description").and_then(Value::as_str)
+        && !d.contains(SERVICE_MARKER)
+    {
+        return None;
+    }
+    let orgs = u64_list(c.get("organization_ids"));
+    if !orgs.is_empty() && !orgs.contains(&org) {
+        return None;
+    }
+    let orgs = if orgs.is_empty() { vec![org] } else { orgs };
+    Some((c.get("chat_id")?.as_str()?.to_owned(), orgs))
+}
+
+/// Gives the alias of organization `org` to the user's service chat there (the first by ID, as
+/// [`sets`] picks), when the user may change it.
+async fn name_own(app: &AppHandle, web: &mut WebClient, org: u64, alias: &str) {
+    let Some(id) = with_disk(app, |d| {
+        d.sets
+            .iter()
+            .filter(|c| c.set.organizations.contains(&org))
+            .map(|c| c.set.chat_id.0.clone())
+            .min()
+    }) else {
+        return;
+    };
+    let info = match web.rpc("get_chats_info", json!({ "chat_ids": [id] })).await {
+        Ok(v) => v.pointer("/data/chats/0").cloned().unwrap_or_default(),
+        Err(e) => {
+            eprintln!("service chat {}: {e}", id_pattern(&id));
+            return;
+        }
+    };
+    let may = info
+        .get("rights")
+        .and_then(Value::as_array)
+        .is_some_and(|r| r.iter().any(|x| x == "change"));
+    if !may {
+        return;
+    }
+    let version = info.get("version").and_then(Value::as_u64).unwrap_or(0);
+    if set_alias(web, &id, version, alias).await {
+        with_disk(app, |d| d.aliased.insert(id));
+    }
+}
+
+/// Sets the alias of a service chat, with its name, description and publicity, so nothing else
+/// changes.
+async fn set_alias(web: &mut WebClient, id: &str, version: u64, alias: &str) -> bool {
+    let r = web
+        .rpc(
+            "set_chat_info",
+            json!({ "chat_id": id, "version": version, "name": SERVICE_CHAT_NAME,
+                "description": SERVICE_DESCRIPTION, "public": true, "alias": alias }),
+        )
+        .await;
+    match r.as_ref().map_err(ToString::to_string).and_then(rpc_ok) {
+        Ok(()) => {
+            eprintln!("service chat {}: alias set", id_pattern(id));
+            true
+        }
+        Err(e) => {
+            eprintln!("service chat {} alias: {e}", id_pattern(id));
+            false
+        }
+    }
 }
 
 /// Mutes a service chat in Telemost, so no client notifies about it.
@@ -744,7 +812,7 @@ async fn chat_for(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(Str
     if let Some(s) = ce::set_for(&sets(app), &[], org) {
         return Ok((s.chat_id.0.clone(), s.organizations.clone()));
     }
-    // Someone may have created it since the last search.
+    // Someone may have created it since the last lookup.
     if let Some((id, orgs)) = discover(app, live).await.into_iter().next() {
         refresh(app, live, &id, orgs.clone()).await?;
         return Ok((id, orgs));
@@ -802,11 +870,20 @@ async fn create(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(Strin
         }
     }
     mute(live, &id).await;
-    let orgs = chat_info_raw(live, &id)
-        .await
-        .map(|i| u64_list(i.get("organization_ids")))
-        .unwrap_or_default();
+    let info = chat_info_raw(live, &id).await.unwrap_or_default();
+    let orgs = u64_list(info.get("organization_ids"));
+    // The alias lets colleagues find the chat; when another one took it a moment ago, every
+    // client turns to that one.
+    let version = info.get("version").and_then(Value::as_u64).unwrap_or(0);
+    let alias = org.filter(|o| orgs.contains(o)).and_then(ce::service_alias);
+    let aliased = match alias {
+        Some(alias) => set_alias(&mut web, &id, version, &alias).await,
+        None => false,
+    };
     with_disk(app, |d| {
+        if aliased {
+            d.aliased.insert(id.clone());
+        }
         d.sets.push(Cached {
             set: EmojiSet::empty(ChatId(id.clone()), orgs.clone()),
             last_ts: 0,
@@ -983,5 +1060,32 @@ mod tests {
             {"chat_id": "0/0/c", "name": "other", "description": SERVICE_MARKER},
         ]}});
         assert_eq!(marked_chats(&v), vec![("0/0/a".to_owned(), vec![7])]);
+    }
+
+    #[test]
+    fn reads_an_older_disk_cache() {
+        let old = json!({"me": "u", "searched_ms": 5, "sets": [{"set": {"chat_id": "0/0/a",
+            "organizations": [7], "emoji": [], "taken": []}, "last_ts": 1, "last_edit_ts": 2}]});
+        let d: Disk = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            (d.me.as_str(), d.sets.len(), d.looked_ms, d.aliased.len()),
+            ("u", 1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn checks_the_aliased_chat() {
+        let answer = |c: Value| json!({"status": "ok", "data": {"chats": [c]}});
+        let ours = answer(json!({"chat_id": "0/0/a", "name": SERVICE_CHAT_NAME,
+            "description": format!("x {SERVICE_MARKER}"), "organization_ids": [7]}));
+        assert_eq!(aliased_chat(&ours, 7), Some(("0/0/a".to_owned(), vec![7])));
+        assert_eq!(aliased_chat(&ours, 8), None);
+        let preview = answer(json!({"chat_id": "0/0/a", "name": SERVICE_CHAT_NAME}));
+        assert_eq!(aliased_chat(&preview, 7), Some(("0/0/a".to_owned(), vec![7])));
+        let unmarked = answer(json!({"chat_id": "0/0/b", "name": SERVICE_CHAT_NAME, "description": "a group"}));
+        assert_eq!(aliased_chat(&unmarked, 7), None);
+        let other = answer(json!({"chat_id": "0/0/c", "name": "other", "description": SERVICE_MARKER}));
+        assert_eq!(aliased_chat(&other, 7), None);
+        assert_eq!(aliased_chat(&json!({"status": "ok", "data": {"chats": []}}), 7), None);
     }
 }

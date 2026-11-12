@@ -96,6 +96,26 @@ pub fn rpc_seq(bytes: &[u8]) -> Option<u64> {
     header.as_array()?.get(1)?.as_u64()
 }
 
+/// The event name and metadata of a push frame, read from its header alone: a push whose body is
+/// not JSON (some come in protobuf) can still be told apart. The rest of the frame is its body.
+pub fn push_head(bytes: &[u8]) -> Option<(String, Meta, &[u8])> {
+    let (&kind, rest) = bytes.split_first()?;
+    if kind != FRAME_PUSH {
+        return None;
+    }
+    let mut cursor = Cursor::new(rest);
+    let header = rmpv::decode::read_value(&mut cursor).ok()?;
+    let event = header.as_array()?.get(2)?.as_str()?.to_owned();
+    let tail = rest.get(cursor.position() as usize..)?;
+    let word = |i: usize| Some(u32::from_le_bytes(tail.get(i..i + 4)?.try_into().ok()?));
+    let meta = Meta {
+        version: word(0)?,
+        aux: word(4)?,
+        reserved: word(8)?,
+    };
+    Some((event, meta, &tail[12..]))
+}
+
 /// Decodes a frame received from the socket.
 pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
     let (&kind, rest) = bytes.split_first().ok_or(FrameError::Empty)?;

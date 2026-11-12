@@ -28,6 +28,16 @@ pub const SERVICE_DESCRIPTION: &str = "Служебный чат Mostik: общ�
      Пожалуйста, не пишите сюда вручную. / Mostik service chat for shared settings and custom \
      emoji. Please do not post here by hand. mostik:shared:v1";
 
+/// The longest chat alias Telemost takes.
+pub const MAX_ALIAS: usize = 20;
+
+/// Alias of the service chat of organization `org`. Telemost resolves an alias for anyone (it is
+/// the public link of a chat), while its search finds only the chats the user is already in, so
+/// the alias is how colleagues find the chat.
+pub fn service_alias(org: u64) -> Option<String> {
+    Some(format!("mostik-{org}")).filter(|a| a.len() <= MAX_ALIAS)
+}
+
 /// First reaction type of custom emoji ("M" in the high byte), far from Telemost's own types:
 /// `1000xx`–`1001xx` and Unicode code points.
 pub const REACTION_BASE: u64 = 0x4D00_0000;
@@ -230,6 +240,13 @@ pub fn split<'a>(text: &'a str, known: impl Fn(&str) -> bool) -> Vec<Piece<'a>> 
 mod tests {
     use super::*;
     use crate::model::Attachment;
+
+    #[test]
+    fn aliases_fit_telemost() {
+        assert_eq!(service_alias(1234567).as_deref(), Some("mostik-1234567"));
+        assert_eq!(service_alias(9_999_999_999_999).map(|a| a.len()), Some(MAX_ALIAS));
+        assert_eq!(service_alias(u64::MAX), None);
+    }
 
     fn msg(seq: u64, author: &str, text: &str, images: usize) -> Message {
         Message {

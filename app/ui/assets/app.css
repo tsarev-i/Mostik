@@ -1529,7 +1529,27 @@ button:disabled { opacity: 0.4; cursor: default; }
   border-radius: 4px;
   opacity: 0.75;
 }
-.sb-call ~ .sb-close, .sb-pencil ~ .sb-close, .badge ~ .sb-close { margin-left: 4px; }
+.sb-call ~ .sb-close, .sb-pencil ~ .sb-close, .badge ~ .sb-close, .sb-typing ~ .sb-close { margin-left: 4px; }
+/* Someone is typing in the chat: three dots bouncing in turn. */
+.sb-typing { margin-left: auto; display: flex; align-items: center; gap: 2px; height: 18px; flex: none; }
+.sb-typing ~ .sb-call, .sb-typing ~ .sb-pencil, .sb-typing ~ .badge { margin-left: 6px; }
+.sb-typing i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.4;
+  animation: typing-dot 1.2s infinite ease-in-out;
+}
+.sb-typing i:nth-child(2) { animation-delay: 0.15s; }
+.sb-typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typing-dot {
+  0%, 60%, 100% { opacity: 0.4; transform: none; }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sb-typing i { animation: none; opacity: 0.8; }
+}
 .sb-row:hover .sb-close { display: grid; }
 .window.chat-dragging .sb-close { display: none; }
 .sb-close:hover { opacity: 1; background: rgba(var(--chrome-ink), 0.16); }
