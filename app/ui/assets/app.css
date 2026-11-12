@@ -752,7 +752,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 .mention.me { background: var(--mention-chip-me); color: #f2c744; }
 .mention.group { font-weight: 700; }
 .mention.person:hover { text-decoration: underline; }
-.edited { margin-left: 4px; font-size: 13px; color: var(--text-muted); }
+.edited { margin-left: 4px; font-family: var(--font); font-size: 13px; color: var(--text-muted); }
 
 /* The read line under an own message: muted, with a double check or the latest readers' faces. */
 .read-line { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; color: var(--text-muted); }

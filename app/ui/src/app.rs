@@ -1,6 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
+use leptos::context::Provider;
 use leptos::ev;
 use leptos::html;
 use leptos::prelude::*;
@@ -3110,25 +3111,34 @@ fn MessageList() -> impl IntoView {
     // when older messages load, keep the visible position.
     let stick = RwSignal::new(true);
     let anchor: RwSignal<Option<(i32, i32)>> = RwSignal::new(None);
+    // The last scroll position, to tell the user scrolling up from the list moving by itself.
+    let last_top = StoredValue::new(None::<i32>);
     Effect::new(move |prev: Option<ChatId>| {
         let id = c.current.get();
         if prev.as_ref() != Some(&id) {
             stick.set(true);
+            anchor.set(None);
+            last_top.set_value(None);
         }
         id
     });
     Effect::new(move |_| {
         messages.track();
+        // An older page has come, or failed, when the loading stops.
+        c.loading_older.track();
         // The list may be gone by the next frame (another view opened).
         request_animation_frame(move || {
             let Some(el) = list_ref.try_get_untracked().flatten() else {
                 return;
             };
-            if let Some((height, top)) = anchor.try_get_untracked().flatten() {
-                el.set_scroll_top(el.scroll_height() - height + top);
-                anchor.try_set(None);
-            } else if stick.try_get_untracked() == Some(true) {
-                el.set_scroll_top(el.scroll_height());
+            match anchor.try_get_untracked().flatten() {
+                Some(_) if c.loading_older.get_untracked() => {}
+                Some((height, top)) => {
+                    el.set_scroll_top(el.scroll_height() - height + top);
+                    anchor.try_set(None);
+                }
+                None if stick.try_get_untracked() == Some(true) => el.set_scroll_top(el.scroll_height()),
+                None => {}
             }
         });
     });
@@ -3165,9 +3175,15 @@ fn MessageList() -> impl IntoView {
     });
     let on_scroll = move |_| {
         let Some(el) = list_ref.get_untracked() else { return };
-        stick.set(el.scroll_height() - el.scroll_top() - el.client_height() < 120);
-        if el.scroll_top() < 200 && ops::load_older(c) {
-            anchor.set(Some((el.scroll_height(), el.scroll_top())));
+        let top = el.scroll_top();
+        stick.set(el.scroll_height() - top - el.client_height() < 120);
+        let up = last_top.get_value().is_some_and(|last| top < last);
+        last_top.set_value(Some(top));
+        // Older messages load as the user scrolls up near the top. Not when the list moves by itself:
+        // another chat is shorter, it goes to the bottom, or, before the last older page is in place,
+        // the spinner goes away.
+        if up && top < 200 && anchor.get_untracked().is_none() && ops::load_older(c) {
+            anchor.set(Some((el.scroll_height(), top)));
         }
     };
     view! {
@@ -3448,16 +3464,23 @@ fn Feed(
     #[prop(optional)] read_line: Option<Memo<Option<receipts::ReadLine>>>,
 ) -> impl IntoView {
     let c = ctx();
-    provide_context(FeedCtx {
+    // For the lines only, through an owner of their own: what replaces the feed (a pinned message
+    // shown in its place, the parent of the next thread) must not find it once it is disposed.
+    let shared = FeedCtx {
         names: Memo::new(move |_| c.snap.with(Snapshot::mention_names)),
         read_line,
-    });
+    };
     let days = Memo::new(move |_| messages.with(|list| feed::layout(list, time::day_key)));
     let line = move |key: (ChatId, Timestamp)| view! { <FeedRow days=days ts=key.1 in_thread=in_thread/> };
     let key_of = |l: &feed::FeedLine| (l.msg.chat_id.clone(), l.msg.ts);
     if in_thread {
         let keys = Memo::new(move |_| days.with(|d| d.iter().flat_map(|d| &d.lines).map(key_of).collect::<Vec<_>>()));
-        return view! { <For each=move || keys.get() key=|k| k.clone() children=line/> }.into_any();
+        return view! {
+            <Provider value=shared>
+                <For each=move || keys.get() key=|k| k.clone() children=line/>
+            </Provider>
+        }
+        .into_any();
     }
     let day_keys = Memo::new(move |_| {
         days.with(|d| {
@@ -3467,23 +3490,25 @@ fn Feed(
         })
     });
     view! {
-        <For each=move || day_keys.get() key=|(chat, day, _)| (chat.clone(), *day) children=move |(chat, day, first)| {
-            // The lines of this day of this chat: an outgoing chat's day must not take the new chat's lines.
-            let keys = move || {
-                days.with(|d| {
-                    d.iter()
-                        .find(|x| x.day == day)
-                        .map(|x| x.lines.iter().filter(|l| l.msg.chat_id == chat).map(key_of).collect::<Vec<_>>())
-                        .unwrap_or_default()
-                })
-            };
-            view! {
-                <div class="day-group">
-                    <DayDivider ts=first/>
-                    <For each=keys key=|k| k.clone() children=line/>
-                </div>
-            }
-        }/>
+        <Provider value=shared>
+            <For each=move || day_keys.get() key=|(chat, day, _)| (chat.clone(), *day) children=move |(chat, day, first)| {
+                // The lines of this day of this chat: an outgoing chat's day must not take the new chat's lines.
+                let keys = move || {
+                    days.with(|d| {
+                        d.iter()
+                            .find(|x| x.day == day)
+                            .map(|x| x.lines.iter().filter(|l| l.msg.chat_id == chat).map(key_of).collect::<Vec<_>>())
+                            .unwrap_or_default()
+                    })
+                };
+                view! {
+                    <div class="day-group">
+                        <DayDivider ts=first/>
+                        <For each=keys key=|k| k.clone() children=line/>
+                    </div>
+                }
+            }/>
+        </Provider>
     }
     .into_any()
 }
@@ -3689,13 +3714,23 @@ fn threads_supported(chat: &ChatId) -> bool {
 /// Avatars under a message with a thread, as in Slack.
 const MAX_THREAD_FACES: usize = 5;
 
-/// Message text: paragraphs with inline markup and code blocks.
-fn render_text(text: &str, who: &Mentionable, me: Me) -> AnyView {
-    mostik_core::markup::parse_blocks(text)
+/// Message text: paragraphs with inline markup and code blocks. The "edited" mark, if `edited`,
+/// ends the last line, in a code block too, rather than taking a line of its own below the block.
+fn render_text(text: &str, who: &Mentionable, me: Me, edited: bool) -> AnyView {
+    let blocks = mostik_core::markup::parse_blocks(text);
+    let last = blocks.len().saturating_sub(1);
+    let mark = move |i: usize| (edited && i == last).then(|| view! { <span class="edited">{tr().edited}</span> });
+    if blocks.is_empty() {
+        return mark(0).into_any();
+    }
+    blocks
         .into_iter()
-        .map(|b| match b {
-            mostik_core::markup::Block::Code(code) => view! { <pre class="code-block">{code}</pre> }.into_any(),
-            mostik_core::markup::Block::Text(t) => render_inline(&t, who, me),
+        .enumerate()
+        .map(|(i, b)| match b {
+            mostik_core::markup::Block::Code(code) => {
+                view! { <pre class="code-block">{code}{mark(i)}</pre> }.into_any()
+            }
+            mostik_core::markup::Block::Text(t) => view! { {render_inline(&t, who, me)}{mark(i)} }.into_any(),
         })
         .collect_view()
         .into_any()
@@ -3917,9 +3952,8 @@ fn MessageRow(
                     id: &me_id.0,
                     name: &me_name,
                 };
-                let body = names.with(|n| n.with(|who| render_text(t, who, me)));
-                let edited = edited.then(|| view! { <span class="edited">{tr().edited}</span> });
-                (!t.is_empty() || edited.is_some()).then(|| view! { <div class="msg-text">{body}{edited}</div> })
+                let body = names.with(|n| n.with(|who| render_text(t, who, me, *edited)));
+                (!t.is_empty() || *edited).then(|| view! { <div class="msg-text">{body}</div> })
             })
         }
     };
@@ -4184,7 +4218,6 @@ fn read_info(c: Ctx, msg: &Message) -> Option<String> {
     })
 }
 
-/// Forwarded message, like a "shared message" in Slack: a bar on the left, author, text and origin.
 /// Reaction tooltip: who reacted, as in Slack. Telemost names only the latest people, so the
 /// rest are counted; with nobody known it falls back to the reaction's name.
 fn reaction_title(s: &Snapshot, r: &Reaction, custom: Option<&mostik_core::custom_emoji::CustomEmoji>) -> String {
@@ -4207,13 +4240,13 @@ fn reaction_title(s: &Snapshot, r: &Reaction, custom: Option<&mostik_core::custo
     tr().reacted(&names, more, r.mine)
 }
 
+/// Forwarded message, like a "shared message" in Slack: a bar on the left, author, text and origin.
 #[component]
 fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     let c = ctx();
-    let (author, names, me_name, me_id, chat) = c.snap.with_untracked(|s| {
+    let (author, me_name, me_id, chat) = c.snap.with_untracked(|s| {
         (
             s.user(&f.author).cloned(),
-            s.mention_names(),
             s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
             s.me.clone(),
             f.chat_id
@@ -4228,6 +4261,18 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| f.author_name.clone());
     let face = author.unwrap_or_else(|| User::named(f.author.clone(), name.clone()));
+    // Like the message's own text, it follows the names it mentions and the emoji set.
+    let names = feed_names(c);
+    let text = (!f.text.is_empty()).then(|| {
+        let text = f.text.clone();
+        move || {
+            let me = Me {
+                id: &me_id.0,
+                name: &me_name,
+            };
+            names.with(|n| n.with(|who| render_text(&text, who, me, false)))
+        }
+    });
     let ts = f.ts;
     let footer = chat.map(|(id, title, kind)| {
         let prefix = if matches!(kind, ChatKind::Group { .. } | ChatKind::Broadcast) {
@@ -4247,7 +4292,7 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     view! {
         <div class="fwd">
             <div class="fwd-head"><Avatar user=face size=20/><b>{name}</b></div>
-            {(!f.text.is_empty()).then(|| view! { <div class="msg-text">{names.with(|who| render_text(&f.text, who, Me { id: &me_id.0, name: &me_name }))}</div> })}
+            {text.map(|text| view! { <div class="msg-text">{text}</div> })}
             <Attachments list=f.attachments.clone()/>
             {footer}
         </div>
@@ -6206,7 +6251,7 @@ fn ThreadsView() -> impl IntoView {
                         s.me.clone(),
                     ));
                     let name = author.as_ref().map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
-                    let text = names.with(|who| render_text(&t.parent.text, who, Me { id: &me_id.0, name: &me_name }));
+                    let text = names.with(|who| render_text(&t.parent.text, who, Me { id: &me_id.0, name: &me_name }, false));
                     // The parent loaded in its chat is the fresher copy: deletions lower its count.
                     let replies = c.snap.with(|s| {
                         s.messages
