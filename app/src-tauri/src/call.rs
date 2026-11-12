@@ -140,11 +140,7 @@ impl EndWatch {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn is_yandex(u: &Url) -> bool {
-    u.host_str().is_some_and(|h| {
-        ["yandex.ru", "yandex.com", "yandex.net"]
-            .iter()
-            .any(|d| h == *d || h.ends_with(&format!(".{d}")))
-    })
+    u.host_str().is_some_and(mostik_yandex::endpoints::is_yandex_host)
 }
 
 /// Yandex ID and other sign-in pages: `passport.yandex.ru` and its regional twins, `id.`,
@@ -1244,9 +1240,7 @@ mod imp {
 
     pub async fn focus(app: &AppHandle, h: &Handle) {
         if let Some(w) = app.get_webview_window(&h.label) {
-            let _ = w.unminimize();
-            let _ = w.show();
-            let _ = w.set_focus();
+            crate::webview::raise(&w);
         }
     }
 

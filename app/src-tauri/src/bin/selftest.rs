@@ -22,8 +22,6 @@ use mostik_yandex::wire::{self, HistoryRequest, PushRequest, request_id};
 use mostik_yandex::xiva_client::{Incoming, XivaClient};
 use serde_json::{Value, json};
 
-const UA: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15";
 const TEST_CHAT_NAME: &str = "test";
 const SETTLE: Duration = Duration::from_millis(800);
 
@@ -90,7 +88,7 @@ async fn main() {
 
 async fn run() -> Res<()> {
     let jar = store::load().ok_or("no saved session: sign in with Mostik first")?;
-    let ua = identity::user_agent(UA);
+    let ua = identity::user_agent(identity::BROWSER_UA);
     let mut web = WebClient::new(jar, ua.clone()).map_err(|e| e.to_string())?;
     let page = web.load_page().await.map_err(|e| e.to_string())?;
     if let Some(i) = std::env::args().position(|a| a == "--chat-info") {

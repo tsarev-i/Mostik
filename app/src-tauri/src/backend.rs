@@ -33,11 +33,6 @@ use crate::{call, login, store};
 
 pub mod service;
 
-/// The browser `User-Agent` of every request, the same on all platforms (that of WebKitGTK on
-/// Linux); the unofficial client label is appended to it.
-const BROWSER_UA: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15";
-
 /// Live event for the UI.
 pub const EVENT: &str = "mostik://event";
 /// Open a message: the user clicked its notification.
@@ -425,7 +420,7 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
     let jar = live.as_ref().map(|l| l.web.jar().clone()).or_else(store::load);
     drop(live);
     let revoked = match jar {
-        Some(jar) => passport::logout(&jar, &identity::user_agent(BROWSER_UA))
+        Some(jar) => passport::logout(&jar, &identity::user_agent(identity::BROWSER_UA))
             .await
             .map_err(|e| {
                 format!(
@@ -942,14 +937,12 @@ pub fn open_yandex_id() -> Result<(), String> {
     open_external("https://id.yandex.ru/personal")
 }
 
-/// A link from a message opens in the default browser. Only `http`, `https` and `mailto`:
-/// the address comes from someone else's text, so files and other schemes must not open.
+/// A link from a message opens in the default browser, if it is safe to (see
+/// [`mostik_core::markup::safe_url`]): the address comes from someone else's text.
 /// A Telemost meeting link opens in the call window, like a huddle link in Slack.
 #[tauri::command]
 pub async fn open_url(app: AppHandle, state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
-    let lower = url.to_ascii_lowercase();
-    let allowed = ["http://", "https://", "mailto:"].iter().any(|p| lower.starts_with(p));
-    if !allowed || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if !mostik_core::markup::safe_url(&url) {
         return Err("this link cannot be opened".into());
     }
     if call::is_meeting_url(&url)
@@ -2902,7 +2895,7 @@ async fn connect_inner(
     generation: u64,
     probe: &mut Value,
 ) -> Result<(Snapshot, Live), ConnectError> {
-    let ua = identity::user_agent(BROWSER_UA);
+    let ua = identity::user_agent(identity::BROWSER_UA);
     probe["cookies"] = json!(
         jar.cookies
             .iter()

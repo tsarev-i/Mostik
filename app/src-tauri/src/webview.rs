@@ -29,6 +29,13 @@ pub fn harden<R: Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
+/// Brings a window to the front: shown, unminimized and focused.
+pub fn raise<R: Runtime>(window: &WebviewWindow<R>) {
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 /// Whether `url` is a page of the app itself: `tauri://localhost` on Linux and macOS,
 /// `http://tauri.localhost` on Windows. The main window shows nothing else. Links from messages
 /// open in the default browser; a navigation that slips past the UI (a middle click, a link

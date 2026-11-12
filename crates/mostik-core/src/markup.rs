@@ -251,7 +251,9 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
     out
 }
 
-fn safe_url(url: &str) -> bool {
+/// Whether a link from someone else's text may open: only `http`, `https` and `mailto`, so files
+/// and other schemes do not, and nothing that hides whitespace or control characters.
+pub fn safe_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     (lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:"))
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -421,12 +423,14 @@ fn bare_link(s: &str) -> Option<usize> {
 
 type MakeInline = fn(String) -> Inline;
 
-const PAIRS: &[(&str, MakeInline)] = &[
-    ("`", Inline::Code),
-    ("**", Inline::Bold),
-    ("__", Inline::Italic),
-    ("~~", Inline::Strike),
-    ("++", Inline::Underline),
+/// Markers that enclose inline markup, the same in a message and in its field: what each one is
+/// in the field and the span it makes in a message.
+const PAIRS: &[(&str, Mark, MakeInline)] = &[
+    ("`", Mark::Code, Inline::Code),
+    ("**", Mark::Bold, Inline::Bold),
+    ("__", Mark::Italic, Inline::Italic),
+    ("~~", Mark::Strike, Inline::Strike),
+    ("++", Mark::Underline, Inline::Underline),
 ];
 
 /// Splits a text block into inline spans; `who` is what can be mentioned.
@@ -435,7 +439,7 @@ pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
     let mut plain = String::new();
     let mut rest = text;
     'outer: while !rest.is_empty() {
-        for (marker, make) in PAIRS {
+        for (marker, _, make) in PAIRS {
             if let Some(after) = rest.strip_prefix(marker)
                 && let Some(end) = after.find(marker)
                 && end > 0
@@ -505,14 +509,6 @@ pub enum Mark {
     Link,
 }
 
-const EDIT_PAIRS: &[(&str, Mark)] = &[
-    ("`", Mark::Code),
-    ("**", Mark::Bold),
-    ("__", Mark::Italic),
-    ("~~", Mark::Strike),
-    ("++", Mark::Underline),
-];
-
 /// Splits the text of the message field into plain text and marked spans, the same markup as
 /// [`parse_blocks`] and [`parse_inline`] read.
 ///
@@ -536,7 +532,7 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
             found = Some((Mark::CodeBlock, 3 + lead, end - lead - trail, trail + 3 + next));
         }
         if found.is_none() {
-            for (marker, kind) in EDIT_PAIRS {
+            for (marker, kind, _) in PAIRS {
                 if let Some(after) = rest.strip_prefix(marker)
                     && let Some(end) = after.find(marker)
                     && end > 0
@@ -772,6 +768,24 @@ mod tests {
         );
         assert_eq!(pasted_link("e.org"), None);
         assert_eq!(pasted_link("https://e.org and more"), None);
+    }
+
+    #[test]
+    fn only_web_and_mail_links_are_safe() {
+        for ok in ["https://e.org/a?b=1", "HTTP://E.ORG", "mailto:olga@example.com"] {
+            assert!(safe_url(ok), "{ok}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "ftp://e.org",
+            "e.org",
+            "https://e.org/a b",
+            "https://e.org/\u{0}",
+            " https://e.org",
+        ] {
+            assert!(!safe_url(bad), "{bad}");
+        }
     }
 
     use super::Inline::*;

@@ -25,9 +25,7 @@ use tauri_plugin_notification::NotificationExt;
 /// Shows, unminimizes and focuses the main window.
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
+        webview::raise(&w);
     }
 }
 

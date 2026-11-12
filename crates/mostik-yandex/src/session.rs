@@ -22,8 +22,7 @@ pub const SESSION_COOKIE: &str = "Session_id";
 
 /// Domains whose cookies the jar keeps.
 fn is_yandex(domain: &str) -> bool {
-    let d = domain.trim_start_matches('.');
-    d == "yandex.ru" || d.ends_with(".yandex.ru") || d == "yandex.net" || d.ends_with(".yandex.net")
+    crate::endpoints::is_yandex_host(domain.trim_start_matches('.'))
 }
 
 impl CookieJar {
@@ -105,12 +104,14 @@ mod tests {
             c("tm", "telemost.360.yandex.ru"),
             c("evil", ".example.com"),
             c("fake", ".notyandex.ru"),
+            c("intl", ".yandex.com"),
         ]);
-        assert_eq!(jar.cookies.len(), 2);
+        assert_eq!(jar.cookies.len(), 3);
         assert!(jar.has_session());
         assert_eq!(jar.header_for("messenger.360.yandex.ru"), "Session_id=v");
         assert_eq!(jar.header_for("telemost.360.yandex.ru"), "Session_id=v; tm=v");
-        assert_eq!(jar.header_for("yandex.com"), "");
+        assert_eq!(jar.header_for("passport.yandex.com"), "intl=v");
+        assert_eq!(jar.header_for("example.com"), "");
     }
 
     #[test]
