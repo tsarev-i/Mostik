@@ -469,10 +469,9 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
 /// "Move to section" submenu of a chat: its own Telemost section, the folders and a new one.
 fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
     let sub_open = RwSignal::new(false);
-    let apart = c.settings.with_untracked(|s| s.group_calls_apart);
     let home = c
         .snap
-        .with_untracked(|s| s.chat(&id).map(|ch| folders::shown_section(ch, apart)))
+        .with_untracked(|s| s.chat(&id).map(Chat::home_section))
         .unwrap_or("channels");
     let (list, current) = c.folders.with_untracked(|f| {
         (

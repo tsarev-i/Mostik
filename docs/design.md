@@ -129,8 +129,7 @@ until then Noto Sans is used.
   (`StateSync` `meeting_updated`) and "Join"; once over, how long it lasted (`DurationSeconds` of a direct
   call, the time since the start for a group one). A group call started outside a chat gets a temporary
   chat of its own (`0/58/…`, "Групповой звонок 01.02 в 10:00") whose creation starts its first call; these
-  chats are meeting chats, or with Preferences → Home → "Group calls in a section of their own" a
-  "Group calls" section of Mostik's own (not a Telemost folder, so nothing is written to Telemost).
+  chats are meeting chats.
 
 ## Connection
 

@@ -458,12 +458,9 @@ fn accepts(c: Ctx, d: &ChatDrag, to: &str) -> bool {
     if d.section == "starred" || to == "starred" {
         return false;
     }
-    let apart = c.settings.with_untracked(|s| s.group_calls_apart);
     folders::is_folder(to)
         || (folders::is_folder(&d.section)
-            && c.snap
-                .with_untracked(|s| s.chat(&d.chat).map(|ch| folders::shown_section(ch, apart)))
-                == Some(to))
+            && c.snap.with_untracked(|s| s.chat(&d.chat).map(Chat::home_section)) == Some(to))
 }
 
 /// Where a dragged chat would land: the section under the pointer and, among its rows, next to

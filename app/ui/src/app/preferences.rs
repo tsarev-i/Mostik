@@ -249,9 +249,6 @@ fn PrefHome() -> impl IntoView {
         {SidebarSort::ALL.into_iter().map(|o| radio(c, "sb-sort", tr().sidebar_sort(o), o, gs, ss)).collect_view()}
         <h3 class="pref-h">{tr().p_muted}</h3>
         {checkbox(c, tr().hide_muted, |s| s.hide_muted, |s, v| s.hide_muted = v)}
-        <h3 class="pref-h">{tr().p_sections}</h3>
-        {checkbox(c, tr().p_group_calls_apart, |s| s.group_calls_apart, |s, v| s.group_calls_apart = v)}
-        <p class="pref-hint">{tr().p_group_calls_hint}</p>
     }
 }
 

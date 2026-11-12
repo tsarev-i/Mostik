@@ -141,10 +141,7 @@ pub fn App() -> impl IntoView {
         deleted: RwSignal::new(Default::default()),
         hidden: RwSignal::new(hidden::load()),
         folders: folder_list,
-        sections: Memo::new(move |_| {
-            let apart = settings.with(|s| s.group_calls_apart);
-            snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f, apart)))
-        }),
+        sections: Memo::new(move |_| snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f)))),
         folder_edit: RwSignal::new(None),
         custom: RwSignal::new(vec![]),
         adding_emoji: RwSignal::new(false),
