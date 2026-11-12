@@ -118,6 +118,11 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
                             reveal_editor(&el);
                         }
                     }
+                    on:beforeinput=move |e: ev::InputEvent| {
+                        if let Some(el) = area.get_untracked() {
+                            crate::editor::before_input(&el, &e, &crate::custom::lookup(c));
+                        }
+                    }
                     on:paste=move |e: ev::ClipboardEvent| { field.paste_link(&e); }
                     on:keydown=move |e: ev::KeyboardEvent| {
                         if e.is_composing() || field.hotkey(&e) { return; }
@@ -476,6 +481,11 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                             }).unwrap_or_default();
                             suggest_sel.set(0);
                             suggestions.set(found);
+                        }
+                        on:beforeinput=move |e: ev::InputEvent| {
+                            if let Some(el) = area.get_untracked() {
+                                crate::editor::before_input(&el, &e, &crate::custom::lookup(c));
+                            }
                         }
                         on:keydown=on_key
                         on:paste=move |e: ev::ClipboardEvent| {

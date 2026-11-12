@@ -430,3 +430,188 @@ pub fn tidy(el: &HtmlElement, emoji: &dyn Fn(&str) -> Option<String>) -> String 
     }
     text
 }
+
+/// The marked spans of the field's text as byte offsets: where each one starts, where its text
+/// starts and ends, and where it ends.
+fn marked_spans(text: &str) -> Vec<[usize; 4]> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for span in edit_spans(text) {
+        match span {
+            EditSpan::Plain(t) => at += t.len(),
+            EditSpan::Marked { open, inner, close, .. } => {
+                let inner_at = at + open.len();
+                let close_at = inner_at + inner.len();
+                out.push([at, inner_at, close_at, close_at + close.len()]);
+                at = close_at + close.len();
+            }
+        }
+    }
+    out
+}
+
+/// `text` with UTF-16 offsets `start..end` deleted as the field shows them: the shown text goes,
+/// the hidden markers stay, and a span whose text goes whole goes with its markers. Returns the
+/// text and the caret; `None` when no marker is in or next to the range, so the browser can delete
+/// it itself: it would take a hidden marker next to the range along, as the same caret position.
+fn delete_shown(text: &str, start: u32, end: u32) -> Option<(String, u32)> {
+    let from = crate::app::utf16_to_byte(text, Some(start));
+    let to = crate::app::utf16_to_byte(text, Some(end)).max(from);
+    let spans = marked_spans(text);
+    let near = |a: usize, b: usize| a <= to && from <= b;
+    if !spans
+        .iter()
+        .any(|&[open, inner, close, end]| near(open, inner) || near(close, end))
+    {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut caret = 0;
+    for (i, ch) in text.char_indices() {
+        let gone = match spans.iter().find(|&&[open, _, _, end]| open <= i && i < end) {
+            Some(&[_, inner, close, _]) if inner < close && from <= inner && close <= to => true,
+            Some(&[_, inner, close, _]) if i < inner || i >= close => false,
+            _ => from <= i && i < to,
+        };
+        if !gone {
+            out.push(ch);
+            if i < from {
+                caret += ch.len_utf16() as u32;
+            }
+        }
+    }
+    Some((out, caret))
+}
+
+/// UTF-16 offset `at` of the field's text moved back or forth over the hidden markers next to it.
+fn past_markers(text: &str, at: u32, back: bool) -> u32 {
+    let spans = marked_spans(text);
+    let mut at = crate::app::utf16_to_byte(text, Some(at));
+    while let Some(next) = spans.iter().find_map(|&[open, inner, close, end]| match back {
+        true if at == inner => Some(open),
+        true if at == end => Some(close),
+        false if at == open => Some(inner),
+        false if at == close => Some(end),
+        _ => None,
+    }) {
+        at = next;
+    }
+    utf16_len(&text[..at])
+}
+
+/// Before the browser deletes text: a deletion in or next to the hidden markers is made here,
+/// since the browser would take the markers along and the markup would fall apart (a fragment
+/// with its first character deleted would show its closing `~~`). The field changes as if typed in.
+pub fn before_input(el: &HtmlElement, ev: &web_sys::InputEvent, emoji: &dyn Fn(&str) -> Option<String>) {
+    let kind = ev.input_type();
+    let (back, unit) = match kind.as_str() {
+        "deleteContentBackward" => (true, "character"),
+        "deleteWordBackward" => (true, "word"),
+        "deleteSoftLineBackward" | "deleteHardLineBackward" => (true, "lineboundary"),
+        "deleteContentForward" | "deleteContent" | "deleteByCut" => (false, "character"),
+        "deleteWordForward" => (false, "word"),
+        "deleteSoftLineForward" | "deleteHardLineForward" | "deleteEntireSoftLine" => (false, "lineboundary"),
+        _ => return,
+    };
+    if ev.is_composing() {
+        return;
+    }
+    let Ok(range) = ev.get_target_ranges().get(0).dyn_into::<web_sys::StaticRange>() else {
+        return;
+    };
+    let (Some(start), Some(end)) = (
+        offset_of(el, &range.start_container(), range.start_offset()),
+        offset_of(el, &range.end_container(), range.end_offset()),
+    ) else {
+        return;
+    };
+    let text = value(el);
+    let Some((mut shown, mut caret)) = delete_shown(&text, start, end) else {
+        return;
+    };
+    ev.prevent_default();
+    // Nothing shown in the range, only markers or the zero-width space after them: the caret is
+    // past formatted text, and the character before it (or after) is in that text.
+    if shown == text {
+        let to = past_markers(&text, if back { start } else { end }, back);
+        let byte = |at: u32| crate::app::utf16_to_byte(&text, Some(at));
+        // Under a code block the caret is on a line of its own: going back takes it into the block.
+        if text[byte(start.min(to))..byte(end.max(to))].contains("```") {
+            if back {
+                set_caret(el, to);
+            }
+            return;
+        }
+        let Some(sel) = web_sys::window().and_then(|w| w.get_selection().ok().flatten()) else {
+            return;
+        };
+        let before = selection(el);
+        set_caret(el, to);
+        let _ = sel.modify("extend", if back { "backward" } else { "forward" }, unit);
+        let deleted = match selection(el) {
+            (Some(start), Some(end)) => delete_shown(&text, start, end),
+            _ => None,
+        };
+        match deleted {
+            Some(deleted) if deleted.0 != text => (shown, caret) = deleted,
+            _ => {
+                if let (Some(start), Some(end)) = before {
+                    set_selection(el, start, end);
+                }
+                return;
+            }
+        }
+    }
+    render(el, &shown, emoji);
+    set_caret(el, caret);
+    let init = web_sys::EventInit::new();
+    init.set_bubbles(true);
+    if let Ok(input) = web_sys::Event::new_with_event_init_dict("input", &init) {
+        let _ = el.dispatch_event(&input);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deleting_keeps_markers() {
+        // The first character of struck text: its markers stay.
+        assert_eq!(delete_shown("a ~~bcd~~ e", 4, 5), Some(("a ~~cd~~ e".to_owned(), 4)));
+        // The last one, also with the closing marker in the range.
+        assert_eq!(delete_shown("a ~~bcd~~ e", 6, 7), Some(("a ~~bc~~ e".to_owned(), 6)));
+        assert_eq!(delete_shown("a ~~bcd~~ e", 6, 9), Some(("a ~~bc~~ e".to_owned(), 6)));
+        // Plain text next to a marker.
+        assert_eq!(delete_shown("a ~~bcd~~ e", 1, 2), Some(("a~~bcd~~ e".to_owned(), 1)));
+        assert_eq!(delete_shown("a ~~bcd~~ e", 9, 10), Some(("a ~~bcd~~e".to_owned(), 9)));
+        // A selection from plain text into struck text.
+        assert_eq!(delete_shown("a ~~bcd~~ e", 0, 5), Some(("~~cd~~ e".to_owned(), 0)));
+        // All the struck text: the markers go too.
+        assert_eq!(delete_shown("a ~~b~~ e", 4, 5), Some(("a  e".to_owned(), 2)));
+        assert_eq!(delete_shown("a ~~bcd~~ e", 1, 10), Some(("ae".to_owned(), 1)));
+        // A link keeps its address while its caption is edited.
+        assert_eq!(
+            delete_shown("[ab](https://x.ru)", 1, 2),
+            Some(("[b](https://x.ru)".to_owned(), 1))
+        );
+        // Only markers in the range: nothing shown to delete.
+        assert_eq!(delete_shown("a ~~b~~", 5, 7), Some(("a ~~b~~".to_owned(), 5)));
+        assert_eq!(delete_shown("a ~~b~~", 7, 7), Some(("a ~~b~~".to_owned(), 7)));
+        // Far from markers: the browser deletes.
+        assert_eq!(delete_shown("ab ~~c~~", 0, 1), None);
+        assert_eq!(delete_shown("abc", 1, 2), None);
+        // UTF-16 offsets: "👍" is two units.
+        assert_eq!(delete_shown("👍 **ab**", 5, 6), Some(("👍 **b**".to_owned(), 5)));
+    }
+
+    #[test]
+    fn caret_steps_over_markers() {
+        assert_eq!(past_markers("a ~~b~~", 7, true), 5);
+        assert_eq!(past_markers("a ~~b~~", 4, true), 2);
+        assert_eq!(past_markers("a ~~b~~", 2, false), 4);
+        assert_eq!(past_markers("~~a~~**b**", 5, true), 3);
+        assert_eq!(past_markers("~~a~~**b**", 3, false), 7);
+        assert_eq!(past_markers("a ~~b~~", 1, true), 1);
+    }
+}
