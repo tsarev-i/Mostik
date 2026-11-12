@@ -106,7 +106,7 @@ fn find_param(html: &str, key: &str) -> Option<String> {
 }
 
 /// Reads the user parameters from the web client page.
-pub fn parse_page_params(html: &str) -> Result<PageParams, WebError> {
+fn parse_page_params(html: &str) -> Result<PageParams, WebError> {
     let logged_in = find_param(html, "loggedIn").as_deref() == Some("true");
     let puid = find_param(html, "puid")
         .filter(|p| !p.is_empty() && p != "null")
@@ -119,7 +119,7 @@ pub fn parse_page_params(html: &str) -> Result<PageParams, WebError> {
 }
 
 /// Extracts the CSRF token from the `/csrf-token/` response; accepts several layouts.
-pub fn parse_csrf(body: &str) -> Option<String> {
+fn parse_csrf(body: &str) -> Option<String> {
     if let Ok(v) = serde_json::from_str::<Value>(body) {
         for key in ["token", "csrf_token", "csrf", "csrfToken"] {
             if let Some(t) = v.get(key).and_then(Value::as_str) {
@@ -257,7 +257,7 @@ impl WebClient {
     }
 
     /// CSRF token for write requests; fetched once and cached until the server rejects it.
-    pub async fn csrf_token(&self) -> Result<String, WebError> {
+    async fn csrf_token(&self) -> Result<String, WebError> {
         if let Some(t) = self.csrf.lock().ok().and_then(|c| c.clone()) {
             return Ok(t);
         }

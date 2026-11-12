@@ -294,7 +294,7 @@ impl XivaClient {
     }
 
     /// Xiva subscription ID from the service frame; `push` needs it (`ClientTransportId`).
-    pub fn subscription_id(&self) -> Option<String> {
+    fn subscription_id(&self) -> Option<String> {
         self.subscription_id.lock().ok().and_then(|s| s.clone())
     }
 

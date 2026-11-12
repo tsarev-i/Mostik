@@ -38,7 +38,7 @@ pub fn thread_chat_id(chat_id: &str, ts: Timestamp) -> Option<String> {
 }
 
 /// Inverse of [`thread_chat_id`]: `(parent chat, time of the parent message)`.
-pub fn thread_parent(thread_id: &str) -> Option<(String, Timestamp)> {
+fn thread_parent(thread_id: &str) -> Option<(String, Timestamp)> {
     let rest = thread_id.strip_prefix("100/")?;
     let (ns, tail) = rest.split_once('/')?;
     let (uuid, ts) = tail.rsplit_once('_')?;
@@ -124,7 +124,7 @@ fn reads(sm: &Value) -> Option<Reads> {
 }
 
 /// People from `RecentUserReactions`, with the names the UI shows in the reaction tooltip.
-pub fn reaction_authors(sm: &Value) -> Vec<User> {
+fn reaction_authors(sm: &Value) -> Vec<User> {
     sm.get("RecentUserReactions")
         .and_then(Value::as_array)
         .into_iter()
@@ -136,7 +136,7 @@ pub fn reaction_authors(sm: &Value) -> Vec<User> {
 /// People the message names: those it mentions (`MentionedUsers`, which Telemost adds next to
 /// `ClientMessage`), so `@<guid>` in the text can show their names, and those a note about the
 /// chat's members adds or removes.
-pub fn mentioned_users(sm: &Value) -> Vec<User> {
+fn mentioned_users(sm: &Value) -> Vec<User> {
     let diff = sm
         .pointer("/ClientMessage/SystemMessage/ParticipantsChangedDiff")
         .or_else(|| sm.pointer("/ClientMessage/SystemMessage/ParticipantsChangedDiffV2"));
@@ -229,7 +229,7 @@ fn user_from(v: &Value) -> Option<User> {
 }
 
 /// Message from a `ServerMessage` (history) or a push body: both have the same structure.
-pub enum Parsed {
+enum Parsed {
     Message(Box<Message>),
     Deleted {
         chat_id: ChatId,
@@ -1088,7 +1088,7 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
 }
 
 /// `UserStatus` → availability and custom status (emoji and text).
-pub fn user_status(v: &Value) -> (Availability, Option<CustomStatus>) {
+fn user_status(v: &Value) -> (Availability, Option<CustomStatus>) {
     let availability = Availability::from_code(n(v, &["Availability"]).unwrap_or(0));
     let status = v.get("CustomStatus").and_then(|c| {
         let emoji = s(c, &["Emoji"]).unwrap_or_default().to_owned();
@@ -1144,7 +1144,7 @@ pub fn statuses_from_subscribe(v: &Value) -> Vec<PresenceInfo> {
 /// How many microseconds after the last `Heartbeat` a person counts as online. Other clients
 /// (web, mobile, background tabs) send it less often than once a minute, so a short window makes
 /// the dot blink between pushes; 10 minutes covers their interval.
-pub const ONLINE_WINDOW_MCS: u64 = 10 * 60 * 1_000_000;
+const ONLINE_WINDOW_MCS: u64 = 10 * 60 * 1_000_000;
 
 /// "Online" from the `subscribe` response with `MessageBodyType: 2` (last `Heartbeat` and `CurrentTime`).
 pub fn online_from_heartbeat(v: &Value) -> Option<bool> {

@@ -51,7 +51,7 @@ pub struct Mentionable<'a> {
 
 impl Mentionable<'_> {
     /// Name of the person with Telemost id `id`, if known.
-    pub fn name_of(&self, id: &str) -> Option<&str> {
+    fn name_of(&self, id: &str) -> Option<&str> {
         self.ids
             .iter()
             .find(|(i, n)| *i == id && !n.is_empty() && *n != id)
@@ -111,7 +111,7 @@ fn ends_word(rest: &str) -> bool {
 const GUID_LEN: usize = 36;
 
 /// Whether `s` is a Telemost user id.
-pub fn is_guid(s: &str) -> bool {
+fn is_guid(s: &str) -> bool {
     s.len() == GUID_LEN
         && s.bytes().enumerate().all(|(i, b)| match i {
             8 | 13 | 18 | 23 => b == b'-',

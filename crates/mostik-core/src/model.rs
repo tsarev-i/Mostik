@@ -722,7 +722,7 @@ pub fn chat_title(snapshot: &Snapshot, chat: &Chat) -> String {
 }
 
 /// Slack shows consecutive messages from one author within 5 minutes without an avatar.
-pub const GROUPING_WINDOW_MCS: Timestamp = 5 * 60 * 1_000_000;
+const GROUPING_WINDOW_MCS: Timestamp = 5 * 60 * 1_000_000;
 
 /// Whether `next` continues the visual group started by `prev`.
 /// Notes of calls and chat changes stand apart and never join a group.

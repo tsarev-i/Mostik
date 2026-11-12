@@ -79,8 +79,8 @@ impl PushRequest {
 }
 
 /// Web client `ReactionAction`: `REMOVE = 1`, `REPLACE = 2`.
-pub const REACTION_REMOVE: u32 = 1;
-pub const REACTION_REPLACE: u32 = 2;
+const REACTION_REMOVE: u32 = 1;
+const REACTION_REPLACE: u32 = 2;
 
 /// Puts (`add = true`) or removes a reaction of type `kind` (ID `1001xx`).
 pub fn reaction(chat_id: &str, ts: u64, kind: u64, add: bool) -> Value {
