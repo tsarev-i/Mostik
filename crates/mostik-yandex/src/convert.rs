@@ -356,21 +356,40 @@ pub fn meeting_url(id: &str) -> String {
 }
 
 /// Forwarded messages: `ForwardedMessages[]{Payload (like Plain), ServerMessageInfo{From, Timestamp}}`.
+/// The quoted fragment of the `i`-th one is `Plain.ForwardedMessageStyles[i].Quote`. As in the web
+/// client, a reply is the only forwarded message from the message's own chat (the thread chat for a
+/// thread reply) or a quoted one.
 fn forwarded(sm: &Value) -> Vec<Forwarded> {
-    sm.get("ForwardedMessages")
+    let list = sm
+        .get("ForwardedMessages")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|f| {
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let plain = sm.pointer("/ClientMessage/Plain");
+    let own_chat = plain.and_then(|p| s(p, &["ChatId"]));
+    list.iter()
+        .enumerate()
+        .filter_map(|(i, f)| {
             let payload = f.get("Payload")?;
             let info = &f["ServerMessageInfo"];
+            let chat = s(payload, &["ChatId"]);
+            let quote = plain
+                .and_then(|p| p.pointer(&format!("/ForwardedMessageStyles/{i}/Quote")))
+                .and_then(Value::as_str)
+                .filter(|q| !q.trim().is_empty())
+                .map(str::to_owned);
+            let gone = is_deletion(payload) || info.get("Deleted").and_then(Value::as_bool) == Some(true);
             Some(Forwarded {
                 author: UserId(s(info, &["From", "Guid"]).unwrap_or_default().to_owned()),
                 author_name: s(info, &["From", "DisplayName"]).unwrap_or_default().to_owned(),
-                ts: n(info, &["Timestamp"]).unwrap_or(0),
-                chat_id: s(payload, &["ChatId"]).map(|c| ChatId(c.to_owned())),
-                text: plain_text(payload),
-                attachments: attachments(payload),
+                ts: n(info, &["Timestamp"])
+                    .or_else(|| n(payload, &["Timestamp"]))
+                    .unwrap_or(0),
+                chat_id: chat.map(|c| ChatId(c.to_owned())),
+                text: if gone { String::new() } else { plain_text(payload) },
+                attachments: if gone { vec![] } else { attachments(payload) },
+                reply: list.len() == 1 && (quote.is_some() || (chat.is_some() && chat == own_chat)),
+                quote,
             })
         })
         .collect()
@@ -1319,6 +1338,72 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    /// A message of `chat` forwarding `refs` (`(chat, ts, text)`) with the `styles` the web client sends.
+    fn with_forwards(chat: &str, refs: &[(&str, u64, &str)], styles: Value) -> Message {
+        let forwarded: Vec<Value> = refs
+            .iter()
+            .map(|(c, ts, text)| {
+                json!({"Payload": {"ChatId": c, "Text": {"MessageText": text}},
+                    "ServerMessageInfo": {"From": {"Guid": "a", "DisplayName": "Anna"}, "Timestamp": ts}})
+            })
+            .collect();
+        let sm = json!({"ClientMessage": {"Plain": {"ChatId": chat, "Text": {"MessageText": "answer"},
+                "ForwardedMessageStyles": styles}},
+            "ForwardedMessages": forwarded,
+            "ServerMessageInfo": {"From": {"Guid": "b"}, "Timestamp": 100, "SeqNo": 3}});
+        match parse_server_message(&sm, None, None) {
+            Parsed::Message(m) => *m,
+            _ => panic!("not a message"),
+        }
+    }
+
+    #[test]
+    fn replies_and_quotes_from_the_web_client() {
+        let reply = with_forwards("0/0/g", &[("0/0/g", 42, "original")], json!([{}]));
+        let to = reply.reply_to().expect("a reply");
+        assert_eq!(
+            (to.ts, to.text.as_str(), to.author_name.as_str()),
+            (42, "original", "Anna")
+        );
+        assert_eq!(to.quote, None);
+        assert_eq!(reply.text, "answer");
+
+        let quote = with_forwards("0/0/g", &[("0/0/g", 42, "original")], json!([{"Quote": "orig"}]));
+        assert_eq!(quote.reply_to().and_then(|f| f.quote.as_deref()), Some("orig"));
+
+        // In a thread both the reply and the original are in the thread chat.
+        let in_thread = with_forwards("100/0/g_7", &[("100/0/g_7", 42, "original")], json!([]));
+        assert_eq!(in_thread.thread_parent, Some(7));
+        assert!(in_thread.reply_to().is_some());
+
+        // A quote from another chat is a reply too; a plain forward from another chat is not.
+        let quoted = with_forwards("0/0/g", &[("0/0/other", 42, "x")], json!([{"Quote": "x"}]));
+        assert!(quoted.reply_to().is_some());
+        let forward = with_forwards("0/0/g", &[("0/0/other", 42, "x")], json!([{}]));
+        assert!(forward.reply_to().is_none());
+        assert_eq!(forward.forwarded.len(), 1);
+        let two = with_forwards(
+            "0/0/g",
+            &[("0/0/g", 1, "a"), ("0/0/g", 2, "b")],
+            json!([{}, {"Quote": "b"}]),
+        );
+        assert!(two.reply_to().is_none());
+        assert_eq!(two.forwarded[1].quote.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_reply_to_a_deleted_message_keeps_no_text() {
+        let sm = json!({"ClientMessage": {"Plain": {"ChatId": "0/0/g", "Text": {"MessageText": "answer"}}},
+            "ForwardedMessages": [{"Payload": {"ChatId": "0/0/g", "Timestamp": 42},
+                "ServerMessageInfo": {"From": {"Guid": "a"}, "Timestamp": 42}}],
+            "ServerMessageInfo": {"From": {"Guid": "b"}, "Timestamp": 100}});
+        let Parsed::Message(m) = parse_server_message(&sm, None, None) else {
+            panic!("not a message")
+        };
+        let to = m.reply_to().expect("a reply");
+        assert!(to.text.is_empty() && to.attachments.is_empty());
+    }
 
     #[test]
     fn own_guid_from_the_notes_chat_or_the_shared_member() {

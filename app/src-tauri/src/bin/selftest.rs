@@ -2,7 +2,7 @@
 //!
 //! Works **only** in a group named `test` that has exactly one member (the user).
 //! Runs: send → edit → reaction (add, remove) → "important" → typing →
-//! read marker → delete → thread reply, checking every step against the chat history.
+//! read marker → delete → thread reply → reply and quote, checking every step against the chat history.
 //!
 //! Run: `cargo run -p mostik-app --features selftest --bin mostik-selftest` (needs a session saved by Mostik).
 //! `-- --threads` only prints the format of thread chat IDs (read-only).
@@ -325,6 +325,36 @@ async fn run() -> Res<()> {
         ctx.push(wire::delete(&thread, rts)).await?;
     }
     ctx.push(wire::delete(&chat_id, pts)).await?;
+
+    // 8. Reply and quote: a message → a reply quoting part of it → Mostik reads both back → delete all.
+    let original = format!("Mostik: reply target {}", request_id());
+    let ots = sent_ts(&ctx.push(wire::plain_text(&chat_id, &request_id(), &original)).await?)?;
+    for (name, q) in [("reply", None), ("quote", Some("reply target"))] {
+        let r = ctx
+            .push(wire::reply(
+                &chat_id,
+                &request_id(),
+                &format!("Mostik: {name}"),
+                &chat_id,
+                ots,
+                q,
+            ))
+            .await?;
+        let rts = sent_ts(&r)?;
+        tokio::time::sleep(SETTLE).await;
+        let m = ctx.find(rts).await?.unwrap_or_default();
+        let parsed =
+            mostik_yandex::convert::from_history(&json!({"Chats": [{"ChatId": chat_id, "Messages": [m]}]}), None);
+        let to = parsed.messages.first().and_then(|m| m.reply_to()).cloned();
+        all_ok &= step(
+            name,
+            to.as_ref()
+                .is_some_and(|f| f.ts == ots && f.text == original && f.quote.as_deref() == q),
+            format!("message {}", shape(&m)),
+        );
+        ctx.push(wire::delete(&chat_id, rts)).await?;
+    }
+    ctx.push(wire::delete(&chat_id, ots)).await?;
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     let pushes = pushes.lock().map(|p| p.clone()).unwrap_or_default();
