@@ -4063,7 +4063,8 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool) -> impl IntoView {
         let _ = window().navigator().clipboard().write_text(&text);
     };
     view! {
-        {(!in_thread).then(|| view! {
+        // Telemost does not make your own message unread, so the item is only for others' messages.
+        {(!in_thread && !mine).then(|| view! {
             <button on:click=move |_| { close_menus(c); ops::mark_unread(c, &m_unread); }>{tr().mark_unread}</button>
         })}
         <button on:click=move |_| { close_menus(c); copy(ops::message_link(&m_link)); c.notice.set(Some(tr().link_copied.into())); }>{tr().copy_link}</button>
