@@ -787,6 +787,7 @@ pub fn App() -> impl IntoView {
     }
     // Only these two settings rebuild the whole view; the others are read where they apply.
     let lang_clock = Memo::new(move |_| c.settings.with(|s| (s.lang, s.clock24)));
+    let lang = Memo::new(move |_| c.settings.with(|s| s.lang));
     view! {
         {move || {
             // Language and time format before building the view: effects run only after rendering.
@@ -810,8 +811,9 @@ pub fn App() -> impl IntoView {
         {move || c.status_dialog.get().then(|| view! { <StatusDialog/> })}
         {move || c.details.get().map(|tab| view! { <ChannelDetailsDialog initial=tab/> })}
         {move || {
-            // Recreate the dialog when the language changes; the selected section is kept in `pref_tab`.
-            crate::i18n::set_current(c.settings.with(|s| s.lang));
+            // Recreate the dialog when the language changes, and only then: another preference keeps
+            // the focus on its control. The selected section is kept in `pref_tab`.
+            crate::i18n::set_current(lang.get());
             c.prefs.get().then(|| view! { <PreferencesDialog/> })
         }}
         <Show when=move || c.confirm_delete.get().is_some()>

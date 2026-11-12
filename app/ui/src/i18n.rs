@@ -1579,13 +1579,15 @@ impl Tr {
     /// How long a call lasted, from whole minutes.
     pub fn call_lasted(&self, minutes: u64) -> String {
         let (h, m) = (minutes / 60, minutes % 60);
-        match (self.lang, h) {
-            (Lang::Ru, 0) if m == 0 => "меньше минуты".to_owned(),
-            (Lang::En, 0) if m == 0 => "under a minute".to_owned(),
-            (Lang::Ru, 0) => format!("длился {m} мин"),
-            (Lang::Ru, _) => format!("длился {h} ч {m} мин"),
-            (Lang::En, 0) => format!("lasted {m} min"),
-            (Lang::En, _) => format!("lasted {h} h {m} min"),
+        match (self.lang, h, m) {
+            (Lang::Ru, 0, 0) => "меньше минуты".to_owned(),
+            (Lang::En, 0, 0) => "under a minute".to_owned(),
+            (Lang::Ru, 0, _) => format!("длился {m} мин"),
+            (Lang::Ru, _, 0) => format!("длился {h} ч"),
+            (Lang::Ru, _, _) => format!("длился {h} ч {m} мин"),
+            (Lang::En, 0, _) => format!("lasted {m} min"),
+            (Lang::En, _, 0) => format!("lasted {h} h"),
+            (Lang::En, _, _) => format!("lasted {h} h {m} min"),
         }
     }
 
@@ -1766,6 +1768,17 @@ mod tests {
     fn moments() {
         assert_eq!(RU.day_at(RU.today_in_text, "10:41"), "сегодня в 10:41");
         assert_eq!(EN.day_at(EN.yesterday_in_text, "9:05 AM"), "yesterday at 9:05 AM");
+    }
+
+    #[test]
+    fn call_durations() {
+        assert_eq!(RU.call_lasted(0), "меньше минуты");
+        assert_eq!(EN.call_lasted(0), "under a minute");
+        assert_eq!(RU.call_lasted(42), "длился 42 мин");
+        assert_eq!(RU.call_lasted(60), "длился 1 ч");
+        assert_eq!(EN.call_lasted(120), "lasted 2 h");
+        assert_eq!(RU.call_lasted(61), "длился 1 ч 1 мин");
+        assert_eq!(EN.call_lasted(95), "lasted 1 h 35 min");
     }
 
     #[test]
