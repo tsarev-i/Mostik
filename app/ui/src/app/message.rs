@@ -100,7 +100,7 @@ pub(super) fn MessageRow(
     };
     // The full time on hover, as in Slack, and whether an own message has been read: written into
     // `data-tip` as the pointer comes, so the rows do not follow every change of the reads. The tip
-    // shows after a second, as Slack's.
+    // shows after half a second.
     let time_tip = move |e: ev::MouseEvent| {
         if let Some(el) = e
             .current_target()
@@ -113,7 +113,7 @@ pub(super) fn MessageRow(
         let (show_profile, user_ctx) = (show_profile.clone(), user_ctx.clone());
         move || {
             if grouped.get() {
-                return view! { <span class="msg-hover-time" data-tip-delay="1000" on:mouseover=time_tip>{time::hm(ts)}</span> }.into_any();
+                return view! { <span class="msg-hover-time" data-tip-delay="500" on:mouseover=time_tip>{time::hm(ts)}</span> }.into_any();
             }
             match author.get() {
                 Some(u) => view! { <button class="face-btn" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()><Avatar user=u size=36/></button> }.into_any(),
@@ -133,7 +133,7 @@ pub(super) fn MessageRow(
                     <button class="msg-author" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()>{name}</button>
                     {author.as_ref().and_then(status_badge)}
                     {robot.then(|| view! { <span class="app-tag">{tr().bot}</span> })}
-                    <span class="msg-time" data-tip-delay="1000" on:mouseover=time_tip>{time::hm(ts)}</span>
+                    <span class="msg-time" data-tip-delay="500" on:mouseover=time_tip>{time::hm(ts)}</span>
                 </div>
             }
         })
