@@ -61,8 +61,9 @@ pub(super) fn status_tip(st: &CustomStatus) -> Option<String> {
     })
 }
 
-/// A hover tip in place of the native `title`, as in Slack: it appears at once, above an
-/// element with `data-tip` (below it near the top of the window) and stays inside the window.
+/// A hover tip in place of the native `title`, as in Slack: it appears at once (or after the
+/// element's `data-tip-delay` in milliseconds), above an element with `data-tip` (below it near
+/// the top of the window) and stays inside the window.
 #[component]
 pub(super) fn HoverTip() -> impl IntoView {
     #[derive(Clone, PartialEq)]
@@ -73,18 +74,25 @@ pub(super) fn HoverTip() -> impl IntoView {
         below: bool,
     }
     let tip = RwSignal::new(None::<Tip>);
+    // The element the tip is shown for, and the one whose tip waits out its `data-tip-delay` with
+    // the timer.
+    let owner = StoredValue::new_local(None::<web_sys::Element>);
+    let waiting = StoredValue::new_local(None::<(web_sys::Element, TimeoutHandle)>);
+    let stop_waiting = move || {
+        if let Some((_, timer)) = waiting.try_update_value(Option::take).flatten() {
+            timer.clear();
+        }
+    };
     let hide = move || {
+        stop_waiting();
+        owner.set_value(None);
         if tip.with_untracked(Option::is_some) {
             tip.set(None);
         }
     };
-    scoped_window_listener(ev::mouseover, move |e| {
-        let el = e
-            .target()
-            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
-            .and_then(|el| el.closest("[data-tip]").ok().flatten());
-        let Some((el, text)) = el.and_then(|el| el.get_attribute("data-tip").map(|t| (el, t))) else {
-            return hide();
+    let show = move |el: &web_sys::Element| {
+        let Some(text) = el.get_attribute("data-tip") else {
+            return;
         };
         let r = el.get_bounding_client_rect();
         let below = r.top() < 48.0;
@@ -94,8 +102,40 @@ pub(super) fn HoverTip() -> impl IntoView {
             y: if below { r.bottom() + 6.0 } else { r.top() - 6.0 },
             below,
         };
+        owner.set_value(Some(el.clone()));
         if tip.with_untracked(|t| t.as_ref() != Some(&next)) {
             tip.set(Some(next));
+        }
+    };
+    scoped_window_listener(ev::mouseover, move |e| {
+        let el = e
+            .target()
+            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
+            .and_then(|el| el.closest("[data-tip]").ok().flatten());
+        let Some(el) = el else { return hide() };
+        let delay = el.get_attribute("data-tip-delay").and_then(|d| d.parse::<u64>().ok());
+        let Some(delay) = delay else {
+            stop_waiting();
+            return show(&el);
+        };
+        // Still over the element: its tip is shown or on its way.
+        let mine = |w: Option<&web_sys::Element>| w == Some(&el);
+        if owner.with_value(|o| mine(o.as_ref())) || waiting.with_value(|w| mine(w.as_ref().map(|(w, _)| w))) {
+            return;
+        }
+        hide();
+        let target = el.clone();
+        let timer = set_timeout_with_handle(
+            move || {
+                waiting.set_value(None);
+                if target.is_connected() && target.matches(":hover").unwrap_or(false) {
+                    show(&target);
+                }
+            },
+            std::time::Duration::from_millis(delay),
+        );
+        if let Ok(timer) = timer {
+            waiting.set_value(Some((el, timer)));
         }
     });
     scoped_window_listener(ev::mouseout, move |e| {

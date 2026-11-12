@@ -99,7 +99,8 @@ pub(super) fn MessageRow(
         }));
     };
     // The full time on hover, as in Slack, and whether an own message has been read: written into
-    // `data-tip` as the pointer comes, so the rows do not follow every change of the reads.
+    // `data-tip` as the pointer comes, so the rows do not follow every change of the reads. The tip
+    // shows after a second, as Slack's.
     let time_tip = move |e: ev::MouseEvent| {
         if let Some(el) = e
             .current_target()
@@ -112,7 +113,7 @@ pub(super) fn MessageRow(
         let (show_profile, user_ctx) = (show_profile.clone(), user_ctx.clone());
         move || {
             if grouped.get() {
-                return view! { <span class="msg-hover-time" on:mouseover=time_tip>{time::hm(ts)}</span> }.into_any();
+                return view! { <span class="msg-hover-time" data-tip-delay="1000" on:mouseover=time_tip>{time::hm(ts)}</span> }.into_any();
             }
             match author.get() {
                 Some(u) => view! { <button class="face-btn" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()><Avatar user=u size=36/></button> }.into_any(),
@@ -132,7 +133,7 @@ pub(super) fn MessageRow(
                     <button class="msg-author" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()>{name}</button>
                     {author.as_ref().and_then(status_badge)}
                     {robot.then(|| view! { <span class="app-tag">{tr().bot}</span> })}
-                    <span class="msg-time" on:mouseover=time_tip>{time::hm(ts)}</span>
+                    <span class="msg-time" data-tip-delay="1000" on:mouseover=time_tip>{time::hm(ts)}</span>
                 </div>
             }
         })
@@ -351,15 +352,13 @@ pub(super) fn MessageRow(
 }
 
 /// The hover tip of a message's time, as in Slack: the full date and time and, for an own message
-/// someone has read, a double check saying so. When it was read does not matter.
+/// someone has read, "(read)" after it. When and by how many it was read does not matter.
 fn time_tip_text(c: Ctx, msg: &Message) -> String {
     let full = time::full(msg.ts);
-    match read_status(c, msg).filter(receipts::ReadStatus::is_read) {
-        Some(receipts::ReadStatus::Read { count, everyone, .. }) => {
-            format!("{full}\n✓✓ {}", tr().read_by(count, everyone))
-        }
-        Some(receipts::ReadStatus::Seen { .. }) => format!("{full}\n✓✓ {}", tr().read),
-        None => full,
+    if read_status(c, msg).is_some_and(|r| r.is_read()) {
+        format!("{full} {}", tr().read_mark)
+    } else {
+        full
     }
 }
 

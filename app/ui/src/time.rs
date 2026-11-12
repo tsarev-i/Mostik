@@ -98,8 +98,8 @@ fn hms(ts: Timestamp) -> String {
     }
 }
 
-/// The full date and time for the hover of a message time, as in Slack: "Thursday, November 12th
-/// at 01:02:45", the year only when it is not this one (and the Russian equivalent).
+/// The full date and time for the hover of a message time, as in Slack: "Nov 12th at 01:02:45 PM"
+/// ("12 ноября в 13:02:45"), the year only when it is not this one.
 pub fn full(ts: Timestamp) -> String {
     let d = date(ts);
     let lang = format().0;
@@ -107,8 +107,7 @@ pub fn full(ts: Timestamp) -> String {
     let this_year = year == Date::new_0().get_full_year();
     let day = match lang {
         Lang::Ru => format!(
-            "{}, {} {}{}",
-            WEEKDAYS_RU[d.get_day() as usize],
+            "{} {}{}",
             d.get_date(),
             MONTHS_RU[d.get_month() as usize],
             if this_year {
@@ -118,9 +117,8 @@ pub fn full(ts: Timestamp) -> String {
             }
         ),
         Lang::En => format!(
-            "{}, {} {}{}{}",
-            WEEKDAYS_EN[d.get_day() as usize],
-            MONTHS_EN[d.get_month() as usize],
+            "{} {}{}{}",
+            &MONTHS_EN[d.get_month() as usize][..3],
             d.get_date(),
             ordinal(d.get_date()),
             if this_year { String::new() } else { format!(", {year}") }

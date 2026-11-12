@@ -75,10 +75,10 @@ until then Noto Sans is used.
   start of the text, × and Escape cancel it); the sent reply shows the original above its text, and a
   click on it scrolls to the original.
 - The day separator is a centred pill that sticks to the top of the feed.
-- Read receipts, in the spirit of Slack: the hover tip of a message's time gives the full date and
-  time and, under it, "✓✓ Read" for an own message the peer has read, "✓✓ Read by 5" in a group
-  (when it was read is left out); the message menu of an own message starts with who read it. None in
-  "Notes", channels and threads. Mostik sends no `ReadMarker`: Telemost counts reads from `SeenMarker`.
+- Read receipts, in the spirit of Slack: the time of a message underlines on hover and a second
+  later its tip gives the date and time, "Nov 10th at 10:26:52 PM", with "(read)" after it for an
+  own message someone has read (when and by how many is left out); the message menu of an own
+  message starts with who read it. None in "Notes", channels and threads. Mostik sends no `ReadMarker`: Telemost counts reads from `SeenMarker`.
 - Changes of a chat are muted lines in its feed, like a call line: who created it, added or removed
   people, joined or left (Telemost's `ChatCreatedInfo`, `ParticipantsChangedDiff`, `UserAction`).
 - A collapsed sidebar section still shows chats with unread messages; the open chat hides with the rest.

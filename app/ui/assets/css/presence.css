@@ -1,8 +1,8 @@
 /* ── Presence and statuses ──────────────────────────────────────── */
 
 .status-emoji { margin-left: 4px; font-size: 14px; line-height: 1; cursor: default; }
-/* Hover tip of an element with `data-tip` (a status, a message time), shown at once like Slack's;
-   a line break in the text starts a new line. */
+/* Hover tip of an element with `data-tip` (a status, a message time), shown at once like Slack's
+   or after `data-tip-delay` milliseconds; a line break in the text starts a new line. */
 .hover-tip {
   position: fixed;
   z-index: 100;

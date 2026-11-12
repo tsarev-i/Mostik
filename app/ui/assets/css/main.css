@@ -205,6 +205,7 @@
   visibility: hidden;
 }
 .msg:hover .msg-hover-time { visibility: visible; }
+.msg-hover-time:hover, .msg-time:hover { text-decoration: underline; }
 
 .msg-content { flex: 1; min-width: 0; }
 .msg-head { display: flex; align-items: baseline; gap: 8px; }
