@@ -62,7 +62,7 @@ fn dot(size: u32, color: [u8; 3]) -> Image<'static> {
 /// Paints a disc of `color` and `radius` at `centre` over the RGBA pixels of a `width` wide
 /// picture, clearing a ring of `ring` around it; the edges are anti-aliased.
 fn paint(rgba: &mut [u8], width: u32, centre: (f32, f32), radius: f32, ring: f32, color: [u8; 3]) {
-    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (x, y) = ((i as u32 % width) as f32 + 0.5, (i as u32 / width) as f32 + 0.5);
         let d = ((x - centre.0).powi(2) + (y - centre.1).powi(2)).sqrt();
         let cleared = (radius + ring + 0.5 - d).clamp(0.0, 1.0);

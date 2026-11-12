@@ -1002,7 +1002,7 @@ pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
 
 /// Builds the UI snapshot: "Channels", "Direct messages" and "Meeting chats" sections.
 pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapshot {
-    data.chats.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    data.chats.sort_by_key(|c| std::cmp::Reverse(c.last_ts));
     let (mut channels, mut dms, mut meetings) = (Vec::new(), Vec::new(), Vec::new());
     // The chat with oneself, like "you" in Slack, always comes first among direct messages.
     if let Some(notes) = data.chats.iter().find(|c| c.kind == ChatKind::Notes) {

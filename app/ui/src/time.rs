@@ -209,7 +209,7 @@ pub fn short_date(ts: Timestamp) -> String {
             Lang::Ru => format!(
                 "{} {}",
                 d.get_date(),
-                &MONTHS_RU[d.get_month() as usize].chars().take(3).collect::<String>()
+                MONTHS_RU[d.get_month() as usize].chars().take(3).collect::<String>()
             ),
             Lang::En => format!("{} {}", &MONTHS_EN[d.get_month() as usize][..3], d.get_date()),
         },
