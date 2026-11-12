@@ -512,6 +512,32 @@ impl Snapshot {
         self.users.iter().find(|u| &u.id == id)
     }
 
+    /// The unread mark for the app icon and how many unread direct messages and mentions are
+    /// behind a red one. A chat that notifies about mentions only counts only its mentions, one
+    /// that notifies about nothing counts nothing, as in the chat's own notifications.
+    pub fn unread_badge(&self) -> (UnreadBadge, u32) {
+        let mut badge = UnreadBadge::None;
+        let mut count = 0;
+        for ch in &self.chats {
+            let level = ch.notify_level();
+            if level == NotifyLevel::Nothing || ch.kind == ChatKind::Notes {
+                continue;
+            }
+            // Every unread message of a direct chat is for the user, mentioned or not.
+            let urgent = match ch.kind {
+                ChatKind::Direct { .. } if level == NotifyLevel::All => ch.unread.max(ch.mentions),
+                _ => ch.mentions,
+            };
+            if urgent > 0 {
+                badge = UnreadBadge::Mention;
+                count += urgent;
+            } else if level == NotifyLevel::All && ch.unread > 0 && badge == UnreadBadge::None {
+                badge = UnreadBadge::Unread;
+            }
+        }
+        (badge, count)
+    }
+
     pub fn chat(&self, id: &ChatId) -> Option<&Chat> {
         self.chats.iter().find(|c| &c.id == id)
     }
@@ -680,6 +706,19 @@ impl NotifyLevel {
     }
 }
 
+/// The unread mark on the app icon, as in Slack: none, a dot for unread messages, or a red mark
+/// for unread direct messages and mentions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnreadBadge {
+    #[default]
+    None,
+    /// Unread messages in chats that notify about everything.
+    Unread,
+    /// An unread direct message or mention.
+    Mention,
+}
+
 impl Chat {
     /// A chat with no name, members, messages or settings yet. What is known goes in with struct
     /// update syntax.
@@ -802,6 +841,75 @@ mod chat_icon_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(chats: Vec<Chat>) -> Snapshot {
+        Snapshot {
+            me: UserId("me".into()),
+            organization: String::new(),
+            organization_avatar: None,
+            organizations: vec![],
+            users: vec![],
+            chats,
+            sections: vec![],
+            messages: vec![],
+            folders: vec![],
+            paused: None,
+        }
+    }
+
+    fn chat(kind: ChatKind, unread: u32, mentions: u32, level: NotifyLevel) -> Chat {
+        let mut ch = Chat {
+            unread,
+            mentions,
+            ..Chat::new(ChatId("c".into()), kind)
+        };
+        ch.set_notify_level(level);
+        ch
+    }
+
+    #[test]
+    fn unread_badge_follows_notification_levels() {
+        let group = ChatKind::Group { public: false };
+        let direct = ChatKind::Direct {
+            peer: UserId("u2".into()),
+        };
+        let badge = |chats: Vec<Chat>| snapshot(chats).unread_badge();
+        assert_eq!(badge(vec![]), (UnreadBadge::None, 0));
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 0, NotifyLevel::All)]),
+            (UnreadBadge::Unread, 0)
+        );
+        // A muted chat shows only its mentions; one set to nothing shows nothing.
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 0, NotifyLevel::Mentions)]),
+            (UnreadBadge::None, 0)
+        );
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 1, NotifyLevel::Mentions)]),
+            (UnreadBadge::Mention, 1)
+        );
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 1, NotifyLevel::Nothing)]),
+            (UnreadBadge::None, 0)
+        );
+        // Every unread direct message counts; a mention outranks plain unread messages.
+        assert_eq!(
+            badge(vec![chat(direct.clone(), 2, 0, NotifyLevel::All)]),
+            (UnreadBadge::Mention, 2)
+        );
+        assert_eq!(
+            badge(vec![
+                chat(group.clone(), 5, 0, NotifyLevel::All),
+                chat(direct, 2, 0, NotifyLevel::All),
+                chat(group, 4, 1, NotifyLevel::All),
+            ]),
+            (UnreadBadge::Mention, 3)
+        );
+        assert_eq!(
+            badge(vec![chat(ChatKind::Notes, 1, 0, NotifyLevel::All)]),
+            (UnreadBadge::None, 0)
+        );
+    }
 
     fn msg(author: &str, ts: Timestamp) -> Message {
         Message {

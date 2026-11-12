@@ -5,6 +5,7 @@
 #[cfg(target_os = "linux")]
 mod appimage;
 mod backend;
+mod badge;
 mod call;
 #[cfg(target_os = "linux")]
 mod cdp;
@@ -97,8 +98,23 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
+    #[cfg(target_os = "linux")]
+    {
+        tray = tray.temp_dir_path(tray_dir());
+    }
     tray.build(app)?;
     Ok(())
+}
+
+/// Where the tray icon is painted on Linux: the panel reads it from a file. Each running copy has a
+/// folder of its own: in the shared `$XDG_RUNTIME_DIR/tray-icon` two copies overwrite and delete
+/// each other's `tray-icon-main-N.png`, so the unread mark of one shows on the other or vanishes.
+#[cfg(target_os = "linux")]
+fn tray_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("mostik-tray-{}", std::process::id()))
 }
 
 /// The main window, as `tauri.conf.json` describes it (`"create": false` there), kept on the
@@ -215,6 +231,7 @@ fn main() {
             backend::prefs::set_preferences,
             backend::prefs::set_zoom,
             backend::prefs::set_window_title,
+            backend::prefs::set_unread_badge,
             backend::chats::user_profile,
             backend::chats::open_dm,
             backend::chats::search_people,
@@ -240,6 +257,8 @@ fn main() {
             // The call browser and its profile with the session cookies go with the app.
             if let tauri::RunEvent::Exit = event {
                 call::shutdown(app);
+                #[cfg(target_os = "linux")]
+                let _ = std::fs::remove_dir_all(tray_dir());
             }
         });
 }

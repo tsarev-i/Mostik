@@ -261,6 +261,17 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // The unread mark on the tray icon, as in Slack: the backend hears of it only when it changes.
+    let badge = Memo::new(move |_| c.snap.with(Snapshot::unread_badge));
+    Effect::new(move |_| {
+        let (badge, count) = badge.get();
+        if bridge::available() {
+            spawn_local(async move {
+                let _ = bridge::set_unread_badge(badge, count).await;
+            });
+        }
+    });
+
     // Jump to a message: scroll to it (once rendered) and remove the highlight after a few seconds.
     Effect::new(move |_| {
         let Some((_, ts)) = c.highlight.get() else { return };

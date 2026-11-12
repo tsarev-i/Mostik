@@ -1,5 +1,7 @@
-//! Settings from the UI: the window title and zoom, and the preferences the backend needs.
+//! Settings from the UI: the window title, the unread mark and zoom, and the preferences the
+//! backend needs.
 
+use mostik_core::UnreadBadge;
 use tauri::{AppHandle, Manager};
 
 use super::{AppState, NotifyMode, Prefs, TrayItems, text};
@@ -9,6 +11,13 @@ use super::{AppState, NotifyMode, Prefs, TrayItems, text};
 pub fn set_window_title(app: AppHandle, title: String) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("no main window")?;
     window.set_title(&title).map_err(|e| e.to_string())
+}
+
+/// The unread mark from the UI, sent when it changes: a dot on the tray icon, and on Windows the
+/// taskbar button, on macOS the Dock icon (see [`crate::badge`]).
+#[tauri::command]
+pub fn set_unread_badge(app: AppHandle, badge: UnreadBadge, count: u32) -> Result<(), String> {
+    crate::badge::show(&app, badge, count).map_err(|e| e.to_string())
 }
 
 /// UI zoom from "Preferences → Accessibility" and Ctrl+= / Ctrl+-.

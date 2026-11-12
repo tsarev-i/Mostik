@@ -1,6 +1,6 @@
 //! Tauri command calls and event subscriptions. Without Tauri (in a browser) the UI runs on demo data.
 
-use mostik_core::{Chat, ChatId, Message, Reaction, Snapshot, Timestamp, User, UserId};
+use mostik_core::{Chat, ChatId, Message, Reaction, Snapshot, Timestamp, UnreadBadge, User, UserId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -507,6 +507,17 @@ struct TitleArgs<'a> {
 /// Application window title (document.title does not affect the window in WebKitGTK).
 pub async fn set_window_title(title: &str) -> Result<(), String> {
     call("set_window_title", TitleArgs { title }).await
+}
+
+#[derive(Serialize)]
+struct BadgeArgs {
+    badge: UnreadBadge,
+    count: u32,
+}
+
+/// The unread mark on the tray icon, the taskbar button or the Dock icon.
+pub async fn set_unread_badge(badge: UnreadBadge, count: u32) -> Result<(), String> {
+    call("set_unread_badge", BadgeArgs { badge, count }).await
 }
 
 #[derive(Serialize)]
