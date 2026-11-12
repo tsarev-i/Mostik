@@ -4408,12 +4408,18 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -
         let (m_reply, m_quote) = (msg.clone(), msg.clone());
         let selected = quote.clone();
         view! {
-            <button on:click=move |_| { close_menus(c); ops::start_reply(c, m_reply.clone(), None); }>{tr().reply}</button>
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::start_reply(c, m_reply.clone(), None); }>
+                {menu_item(I::Reply, tr().reply)}
+            </button>
             {selected.map(|q| {
                 let copied = q.clone();
                 view! {
-                    <button on:click=move |_| { close_menus(c); ops::start_reply(c, m_quote.clone(), Some(q.clone())); }>{tr().quote_selection}</button>
-                    <button on:click=move |_| { close_menus(c); copy(copied.clone()); }>{tr().copy_selection}</button>
+                    <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::start_reply(c, m_quote.clone(), Some(q.clone())); }>
+                        {menu_item(I::Quote, tr().quote_selection)}
+                    </button>
+                    <button class="menu-icon-item" on:click=move |_| { close_menus(c); copy(copied.clone()); }>
+                        {menu_item(I::Copy, tr().copy_selection)}
+                    </button>
                 }
             })}
             <div class="menu-sep"></div>
@@ -4423,32 +4429,43 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -
         {replies}
         // Telemost does not make your own message unread, so the item is only for others' messages.
         {(!in_thread && !mine).then(|| view! {
-            <button on:click=move |_| { close_menus(c); ops::mark_unread(c, &m_unread); }>{tr().mark_unread}</button>
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::mark_unread(c, &m_unread); }>
+                {menu_item(I::MarkUnread, tr().mark_unread)}
+            </button>
         })}
-        <button on:click=move |_| { close_menus(c); copy(ops::message_link(&m_link)); c.notice.set(Some(tr().link_copied.into())); }>{tr().copy_link}</button>
-        <button on:click=move |_| {
+        <button class="menu-icon-item" on:click=move |_| { close_menus(c); copy(ops::message_link(&m_link)); c.notice.set(Some(tr().link_copied.into())); }>
+            {menu_item(I::Link, tr().copy_link)}
+        </button>
+        <button class="menu-icon-item" on:click=move |_| {
             close_menus(c);
             copy(c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0)));
-        }>{tr().copy_text}</button>
+        }>{menu_item(I::Copy, tr().copy_text)}</button>
         <div class="menu-sep"></div>
-        <button on:click=move |_| { close_menus(c); c.forwarding.set(Some(m_fwd.clone())); }>{tr().forward_message}</button>
+        <button class="menu-icon-item" on:click=move |_| { close_menus(c); c.forwarding.set(Some(m_fwd.clone())); }>
+            {menu_item(I::Forward, tr().forward_message)}
+        </button>
         {(!in_thread).then(|| view! {
-            <button on:click=move |_| { close_menus(c); ops::pin_message(c, &m_pin, !pinned); }>
-                {if pinned { tr().unpin_message } else { tr().pin_message }}
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::pin_message(c, &m_pin, !pinned); }>
+                {if pinned { menu_item(I::PinOff, tr().unpin_message) } else { menu_item(I::Pin, tr().pin_message) }}
             </button>
         })}
         {mine.then(|| view! {
             <div class="menu-sep"></div>
-            <button on:click=move |_| {
+            <button class="menu-icon-item" on:click=move |_| {
                 close_menus(c);
                 c.editing.set(Some(m_edit.clone()));
-            }>{tr().edit}</button>
-            <button class="danger" on:click=move |_| {
+            }>{menu_item(I::Pencil, tr().edit)}</button>
+            <button class="menu-icon-item danger" on:click=move |_| {
                 close_menus(c);
                 c.confirm_delete.set(Some(m_del.clone()));
-            }>{tr().delete_message}</button>
+            }>{menu_item(I::Trash, tr().delete_message)}</button>
         })}
     }
+}
+
+/// A menu item with its icon, as in Slack's message menu.
+fn menu_item(icon: I, label: &'static str) -> impl IntoView {
+    view! { <Icon icon=icon size=16/><span>{label}</span> }
 }
 
 /// Selection of the message field as UTF-16 offsets of its text (see [`crate::editor`]).
