@@ -298,7 +298,10 @@ fn event_chat(ev: &LiveEvent) -> Option<(&str, bool)> {
         | LiveEvent::Reactions { chat_id, .. }
         | LiveEvent::Seen { chat_id }
         | LiveEvent::ThreadSeen { chat_id, .. }
-        | LiveEvent::Pinned { chat_id, .. } => (chat_id.0.as_str(), false),
+        | LiveEvent::Pinned { chat_id, .. }
+        | LiveEvent::Joined { chat_id }
+        | LiveEvent::ChatRemoved { chat_id }
+        | LiveEvent::ChatChanged { chat_id, .. } => (chat_id.0.as_str(), false),
         LiveEvent::ChatAdded { chat, .. } => (chat.id.0.as_str(), false),
         _ => return None,
     })

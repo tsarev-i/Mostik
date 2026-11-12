@@ -514,15 +514,18 @@ pub fn App() -> impl IntoView {
             });
         }
     });
-    // Colleagues' presence every 2 minutes (plus real-time pushes).
+    // Colleagues' presence: the subscription lives 10 minutes and is renewed a minute before it
+    // ends; meanwhile changes come as pushes. Leaving is not pushed: a person whose last
+    // `Heartbeat` is too old turns gray locally.
     set_interval(
         move || {
             if c.phase.get_untracked() == Phase::Ready {
                 ops::refresh_presence(c)
             }
         },
-        Duration::from_secs(120),
+        Duration::from_secs(9 * 60),
     );
+    set_interval(move || ops::expire_presence(c), Duration::from_secs(60));
     Effect::new(move |_| c.drafts.with(save_drafts));
     Effect::new(move |_| c.chat_order.with(order::save));
     Effect::new(move |_| c.hidden.with(hidden::save));
@@ -552,16 +555,6 @@ pub fn App() -> impl IntoView {
                     }
                 }
             });
-        }
-    });
-    // Folders made or changed in Telemost come with no push: they are read again when the window
-    // gets the focus, at most once a minute.
-    let folders_read = StoredValue::new(0.0);
-    scoped_window_listener(ev::focus, move |_| {
-        let now = js_sys::Date::now();
-        if c.live && c.phase.get_untracked() == Phase::Ready && now - folders_read.get_value() > 60_000.0 {
-            folders_read.set_value(now);
-            ops::refresh_folders(c);
         }
     });
     // A hidden chat that got something new is an ordinary chat again.
@@ -5337,8 +5330,13 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
             match bridge::create_channel(&n, &d, members, public.get_untracked()).await {
                 Ok(chat) => {
                     let id = chat.id.clone();
+                    // The push about the new chat may have added it already.
                     c.snap.update(|s| {
+                        s.chats.retain(|ch| ch.id != id);
                         s.chats.push(chat);
+                        for sec in &mut s.sections {
+                            sec.chats.retain(|x| x != &id);
+                        }
                         if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == "channels") {
                             sec.chats.insert(0, id.clone());
                         }

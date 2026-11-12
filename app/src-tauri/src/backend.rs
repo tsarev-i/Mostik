@@ -86,6 +86,9 @@ struct Shared {
     my_availability: mostik_core::Availability,
     /// The last `(Timestamp, SeqNo)` per chat, for read markers.
     last: BTreeMap<String, (Timestamp, u64)>,
+    /// The read marker last sent per chat: the same one is not sent again (an own message is
+    /// marked both by the send reply and by its echo).
+    seen_sent: BTreeMap<String, (Timestamp, u64)>,
     /// What muted chats still notify about; chats not here notify about everything.
     muted: BTreeMap<String, NotifyLevel>,
     titles: BTreeMap<String, String>,
@@ -448,11 +451,20 @@ pub(crate) async fn with_profile(app: &AppHandle, user: User) -> User {
 #[tauri::command]
 pub async fn mark_read(state: tauri::State<'_, AppState>, chat_id: String) -> Result<(), String> {
     let live = live(&state).await?;
-    let last = live.shared.lock().ok().and_then(|sh| sh.last.get(&chat_id).copied());
-    let Some((ts, seq)) = last.filter(|(ts, seq)| *ts > 0 && *seq > 0) else {
+    let Some((ts, seq)) = live.shared.lock().ok().and_then(|mut sh| {
+        let last = sh.last.get(&chat_id).copied().filter(|(ts, seq)| *ts > 0 && *seq > 0)?;
+        (sh.seen_sent.insert(chat_id.clone(), last) != Some(last)).then_some(last)
+    }) else {
         return Ok(());
     };
-    push(&live, wire::seen_marker(&chat_id, ts, seq)).await.map(|_| ())
+    let sent = push(&live, wire::seen_marker(&chat_id, ts, seq)).await.map(|_| ());
+    if sent.is_err()
+        && let Ok(mut sh) = live.shared.lock()
+        && sh.seen_sent.get(&chat_id) == Some(&(ts, seq))
+    {
+        sh.seen_sent.remove(&chat_id);
+    }
+    sent
 }
 
 /// What a message replies to: message `ts` of the chat (or thread) it is sent to, with the quoted fragment.
@@ -1093,6 +1105,9 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             if service::swallows(app, shared, &ev) {
                 return;
             }
+            if !sync_shared(app, shared, &ev) {
+                return;
+            }
             if let LiveEvent::Status(p) = &ev
                 && me.as_ref() == Some(&p.user)
                 && let Ok(mut sh) = shared.lock()
@@ -1154,6 +1169,66 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             tauri::async_runtime::spawn(async move { reconnect_loop(app).await });
         }
     }
+}
+
+/// Applies a chat or settings change from a `StateSync` push to `Shared`. Returns whether the UI
+/// gets the event: a new chat reaches it later, as `ChatAdded`.
+fn sync_shared(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, ev: &LiveEvent) -> bool {
+    let Ok(mut sh) = shared.lock() else { return true };
+    match ev {
+        LiveEvent::Joined { chat_id } => {
+            if sh.ready {
+                let (app, shared, chat) = (app.clone(), shared.clone(), chat_id.0.clone());
+                tauri::async_runtime::spawn(async move { join_later(app, shared, chat).await });
+            }
+            false
+        }
+        LiveEvent::ChatRemoved { chat_id } => {
+            let id = &chat_id.0;
+            if let Some(name) = sh.titles.remove(id) {
+                sh.channels.retain(|c| mostik_core::group_label(c) != name);
+            }
+            sh.last.remove(id);
+            sh.muted.remove(id);
+            sh.pending.remove(id);
+            true
+        }
+        LiveEvent::ChatChanged {
+            chat_id,
+            name: Some(name),
+            ..
+        } => {
+            // Direct chats are titled by the person, not by the chat name.
+            if chat_id.0.contains('/')
+                && let Some(title) = sh.titles.get_mut(&chat_id.0)
+            {
+                let old = std::mem::replace(title, mostik_core::group_label(name));
+                if let Some(c) = sh.channels.iter_mut().find(|c| mostik_core::group_label(c) == old) {
+                    *c = name.clone();
+                }
+            }
+            true
+        }
+        LiveEvent::Mutings { chats } => {
+            sh.muted = chats.iter().map(|(id, level)| (id.0.clone(), *level)).collect();
+            true
+        }
+        _ => true,
+    }
+}
+
+/// A `StateSync` says the user is in a new chat. When the user created or joined it here, the
+/// command that did it records the chat a moment later: only a chat still unknown is fetched.
+async fn join_later(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String) {
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    {
+        let Ok(mut sh) = shared.lock() else { return };
+        if sh.titles.contains_key(&chat_id) || sh.pending.contains_key(&chat_id) {
+            return;
+        }
+        sh.pending.insert(chat_id.clone(), vec![]);
+    }
+    add_chat(app, shared, chat_id).await;
 }
 
 /// Fetches a chat that is not in the list yet (`get_chats_info`, plus the profile of a direct
@@ -1637,6 +1712,12 @@ pub async fn create_channel(
         .and_then(Value::as_str)
         .ok_or("Telemost did not return the chat ID")?
         .to_owned();
+    // Known at once: the `StateSync` about the new chat does not fetch it again.
+    if let Ok(mut sh) = live.shared.lock() {
+        sh.titles
+            .entry(id.clone())
+            .or_insert_with(|| mostik_core::group_label(&name));
+    }
     // Description and visibility go through `set_chat_info`, as in the web client (field `public`).
     if !description.trim().is_empty() || public {
         let version = v.pointer("/data/version").and_then(Value::as_u64).unwrap_or(0);
@@ -1856,24 +1937,6 @@ pub async fn set_notify_level(
     Ok(())
 }
 
-/// Chat folders of every organization, read afresh (the `folders` bucket): folders made or
-/// changed in Telemost while Mostik runs come with no push.
-#[tauri::command]
-pub async fn chat_folders(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Vec<ChatFolder>, String> {
-    let live = live(&state).await?;
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc("get_buckets", json!({ "version": 0 }))
-        .await
-        .map_err(|e| web_error(&app, e))?;
-    rpc_ok(&v)?;
-    Ok(v.pointer("/data/buckets")
-        .and_then(Value::as_array)
-        .and_then(|l| l.iter().find(|b| b["bucket_name"] == "folders"))
-        .map(|b| convert::chat_folders(&b["bucket_value"]))
-        .unwrap_or_default())
-}
-
 /// Writes the organization's chat folders (the sidebar sections) into Telemost.
 /// Returns the folders of every organization as they now are.
 #[tauri::command]
@@ -1926,6 +1989,10 @@ pub async fn mark_unread(
     seq_no: u64,
 ) -> Result<(), String> {
     let live = live(&state).await?;
+    // Reading the chat again must send the marker again.
+    if let Ok(mut sh) = live.shared.lock() {
+        sh.seen_sent.remove(&chat_id);
+    }
     push(
         &live,
         json!({ "UnseenMarker": { "ChatId": chat_id, "Timestamp": ts, "SeqNo": seq_no } }),

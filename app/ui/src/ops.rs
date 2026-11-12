@@ -279,12 +279,69 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             s.chats.push(chat);
             sort_sections(s);
         }),
-        LiveEvent::Connection { online } => c.online.set(online),
+        LiveEvent::Connection { online } => {
+            if !online {
+                forget_fresh();
+            }
+            c.online.set(online)
+        }
         LiveEvent::Users { users } => c.snap.update(|s| learn_users(s, users)),
         LiveEvent::Threads { threads, users } => {
             c.snap.update(|s| learn_users(s, users));
             merge_threads(c, threads);
         }
+        LiveEvent::ChatRemoved { chat_id } => drop_chat(c, &chat_id),
+        LiveEvent::ChatChanged {
+            chat_id,
+            name,
+            description,
+            member_count,
+        } => c.snap.update(|s| {
+            let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == chat_id) else {
+                return;
+            };
+            // A direct chat is named after the person, whatever its chat name says.
+            if let Some(name) = name
+                && matches!(ch.kind, ChatKind::Group { .. } | ChatKind::Broadcast)
+            {
+                ch.name = name;
+            }
+            if let Some(d) = description {
+                ch.description = Some(d).filter(|d| !d.is_empty());
+            }
+            if let Some(n) = member_count {
+                ch.member_count = n;
+            }
+        }),
+        LiveEvent::Folders { folders } => {
+            if c.snap.with_untracked(|s| s.folders != folders) {
+                c.snap.update(|s| s.folders = folders);
+            }
+        }
+        LiveEvent::Starred { chats } => {
+            let same = c.snap.with_untracked(|s| {
+                let known: Vec<&ChatId> = chats.iter().filter(|id| s.chat(id).is_some()).collect();
+                let now: Vec<&ChatId> = s
+                    .sections
+                    .iter()
+                    .find(|sec| sec.id == "starred")
+                    .map(|sec| sec.chats.iter().collect())
+                    .unwrap_or_default();
+                known == now
+            });
+            if !same {
+                c.snap.update(|s| apply_starred(s, chats));
+            }
+        }
+        LiveEvent::Mutings { chats } => c.snap.update(|s| {
+            for ch in &mut s.chats {
+                let level = chats
+                    .iter()
+                    .find(|(id, _)| id == &ch.id)
+                    .map_or(NotifyLevel::All, |(_, level)| *level);
+                ch.set_notify_level(level);
+            }
+        }),
     }
 }
 
@@ -336,17 +393,6 @@ pub fn change_folders(c: Ctx, change: impl FnOnce(&mut crate::folders::Folders))
     });
 }
 
-/// Reads the chat folders afresh: they may have changed in Telemost.
-pub fn refresh_folders(c: Ctx) {
-    spawn_local(async move {
-        if let Ok(list) = bridge::chat_folders().await
-            && c.snap.with_untracked(|s| s.folders != list)
-        {
-            c.snap.update(|s| s.folders = list);
-        }
-    });
-}
-
 /// Hides the chat from the sidebar until something new comes in it.
 pub fn hide_chat(c: Ctx, id: ChatId) {
     let Some(last) = c.snap.with_untracked(|s| s.chat(&id).map(|ch| ch.last_ts)) else {
@@ -355,6 +401,17 @@ pub fn hide_chat(c: Ctx, id: ChatId) {
     c.hidden.update(|h| {
         h.insert(id, last);
     });
+}
+
+thread_local! {
+    /// Chats whose latest page was loaded over the current connection: everything new in them
+    /// has come as pushes since, so opening them again asks Telemost for nothing.
+    static FRESH: std::cell::RefCell<std::collections::HashSet<ChatId>> = Default::default();
+}
+
+/// Forgets which chats are up to date: pushes may have been missed while offline.
+fn forget_fresh() {
+    FRESH.with_borrow_mut(|f| f.clear());
 }
 
 /// Makes the chat current (recording it in the navigation history if `record`). Returns `true`
@@ -398,6 +455,13 @@ fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
             }
         });
     }
+    if c.live && FRESH.with_borrow(|f| f.contains(&id)) {
+        // What `load_latest` would do after loading.
+        if read_on_open {
+            mark_read(c, id);
+        }
+        return false;
+    }
     c.live
 }
 
@@ -407,6 +471,7 @@ async fn load_latest(c: Ctx, id: &ChatId) {
     match bridge::history(&id.0, None, None).await {
         Ok(page) => {
             let full = !page.more;
+            FRESH.with_borrow_mut(|f| f.insert(id.clone()));
             c.snap.update(|s| {
                 learn_users(s, page.users);
                 // History never has a ringing call: it stays, or "Join" would go.
@@ -1476,6 +1541,7 @@ pub fn subscribe(c: Ctx) {
 /// open chat does not blank out; it then gets its latest page in place, keeping an edit in
 /// progress. An open thread stays and gets the replies missed while offline.
 fn reconnected(c: Ctx, mut fresh: Snapshot) {
+    forget_fresh();
     c.snap.update(|s| {
         let old = std::mem::take(&mut s.messages);
         // The snapshot has no presence (everyone is offline in it): known people keep theirs
@@ -1542,22 +1608,32 @@ pub fn leave_chat(c: Ctx, id: ChatId) {
         {
             return report(c, format!("{}: {e}", tr().err_leave));
         }
-        c.snap.update(|s| {
-            s.chats.retain(|ch| ch.id != id);
-            s.messages.retain(|m| m.chat_id != id);
-            for sec in &mut s.sections {
-                sec.chats.retain(|x| x != &id);
-            }
-        });
-        if c.current.get_untracked() == id {
-            let next = c
-                .snap
-                .with_untracked(|s| s.sections.iter().flat_map(|sec| sec.chats.first()).next().cloned());
-            if let Some(n) = next {
-                open_chat(c, n);
-            }
+        drop_chat(c, &id);
+    });
+}
+
+/// Removes a chat the user is no longer in from the sidebar; if it was open, opens the first
+/// remaining chat.
+fn drop_chat(c: Ctx, id: &ChatId) {
+    if c.snap.with_untracked(|s| s.chat(id).is_none()) {
+        return;
+    }
+    FRESH.with_borrow_mut(|f| f.remove(id));
+    c.snap.update(|s| {
+        s.chats.retain(|ch| &ch.id != id);
+        s.messages.retain(|m| &m.chat_id != id);
+        for sec in &mut s.sections {
+            sec.chats.retain(|x| x != id);
         }
     });
+    if &c.current.get_untracked() == id {
+        let next = c
+            .snap
+            .with_untracked(|s| s.sections.iter().flat_map(|sec| sec.chats.first()).next().cloned());
+        if let Some(n) = next {
+            open_chat(c, n);
+        }
+    }
 }
 
 /// "Message" in a profile: opens the direct chat, creating it if needed.
@@ -1635,6 +1711,35 @@ pub fn apply_presence(c: Ctx, list: Vec<PresenceInfo>) {
     });
 }
 
+/// Turns gray the people whose last pushed `Heartbeat` is older than the online window: going
+/// offline is not pushed. People known online only from a poll wait for the next poll.
+pub fn expire_presence(c: Ctx) {
+    let now = js_sys::Date::now();
+    let stale: Vec<UserId> = LAST_HEARTBEAT.with_borrow(|m| {
+        m.iter()
+            .filter(|(_, t)| now - **t >= ONLINE_WINDOW_MS)
+            .map(|(u, _)| u.clone())
+            .collect()
+    });
+    if stale.is_empty() {
+        return;
+    }
+    LAST_HEARTBEAT.with_borrow_mut(|m| m.retain(|u, _| !stale.contains(u)));
+    let gone = c.snap.with_untracked(|s| {
+        s.users
+            .iter()
+            .any(|u| u.id != s.me && u.presence == Presence::Online && stale.contains(&u.id))
+    });
+    if gone {
+        c.snap.update(|s| {
+            let me = s.me.clone();
+            for u in s.users.iter_mut().filter(|u| u.id != me && stale.contains(&u.id)) {
+                u.presence = Presence::Offline;
+            }
+        });
+    }
+}
+
 /// Requests the presence of everyone in the snapshot (direct chat peers first).
 pub fn refresh_presence(c: Ctx) {
     if !c.live {
@@ -1666,13 +1771,13 @@ pub fn refresh_presence(c: Ctx) {
 
 /// Own name and photo from the directory, so a new profile picture shows up without a restart.
 /// Runs when the window gets focus (the picture is changed in the browser or on another device),
-/// at most once a minute.
+/// at most once in 10 minutes.
 pub fn refresh_me(c: Ctx) {
     thread_local! {
         static LAST: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     }
     let now = js_sys::Date::now();
-    if !c.live || c.phase.get_untracked() != Phase::Ready || now - LAST.get() < 60_000.0 {
+    if !c.live || c.phase.get_untracked() != Phase::Ready || now - LAST.get() < 10.0 * 60_000.0 {
         return;
     }
     LAST.set(now);

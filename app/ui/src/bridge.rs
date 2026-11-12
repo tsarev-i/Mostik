@@ -112,6 +112,24 @@ pub enum LiveEvent {
         threads: Vec<mostik_core::FollowedThread>,
         users: Vec<User>,
     },
+    ChatRemoved {
+        chat_id: ChatId,
+    },
+    ChatChanged {
+        chat_id: ChatId,
+        name: Option<String>,
+        description: Option<String>,
+        member_count: Option<u32>,
+    },
+    Folders {
+        folders: Vec<mostik_core::ChatFolder>,
+    },
+    Starred {
+        chats: Vec<ChatId>,
+    },
+    Mutings {
+        chats: Vec<(ChatId, mostik_core::NotifyLevel)>,
+    },
 }
 
 pub const EVENT: &str = "mostik://event";
@@ -723,11 +741,6 @@ pub async fn set_notify_level(chat_id: &str, level: mostik_core::NotifyLevel) ->
 struct StarArgs<'a> {
     chat_id: &'a str,
     starred: bool,
-}
-
-/// Chat folders of every organization, read afresh from Telemost.
-pub async fn chat_folders() -> Result<Vec<mostik_core::ChatFolder>, String> {
-    call("chat_folders", NoArgs {}).await
 }
 
 #[derive(Serialize)]

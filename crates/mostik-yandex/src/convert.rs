@@ -604,12 +604,44 @@ pub enum LiveEvent {
         threads: Vec<FollowedThread>,
         users: Vec<User>,
     },
+    /// The user is in a new chat: created it, was added to it, or someone started a direct chat.
+    /// The backend fetches the chat and sends [`LiveEvent::ChatAdded`]; the UI never gets this.
+    Joined {
+        chat_id: ChatId,
+    },
+    /// The user left the chat or was removed from it.
+    ChatRemoved {
+        chat_id: ChatId,
+    },
+    /// The chat's name, description or member count changed; `None` is "not reported".
+    ChatChanged {
+        chat_id: ChatId,
+        name: Option<String>,
+        description: Option<String>,
+        member_count: Option<u32>,
+    },
+    /// The chat folders of every organization, after a change on any device.
+    Folders {
+        folders: Vec<ChatFolder>,
+    },
+    /// The pinned ("starred") chats, after a change on any device.
+    Starred {
+        chats: Vec<ChatId>,
+    },
+    /// What every chat notifies about, after a change on any device: chats not listed notify
+    /// about everything.
+    Mutings {
+        chats: Vec<(ChatId, NotifyLevel)>,
+    },
 }
 
 /// Parses the body of a `delivery` push. `None` means the event is not of interest yet.
 pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     let sm = body.get("ServerMessage").unwrap_or(body);
     let cm = sm.get("ClientMessage")?;
+    if let Some(sync) = cm.get("StateSync") {
+        return state_sync(sync);
+    }
     if let Some(typing) = cm.get("Typing").or_else(|| cm.get("TypingEnhanced")) {
         let chat_id = ChatId(s(typing, &["ChatId"])?.to_owned());
         let user = UserId(s(sm, &["ServerMessageInfo", "From", "Guid"])?.to_owned());
@@ -685,6 +717,105 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
         }),
         Parsed::Skip => None,
     }
+}
+
+/// A `StateSync` push: `Data` is base64 JSON `{"type": …, "data": {…}}`, a change of the
+/// user's chats or synced settings. Types seen: `you_added`, `you_removed`, `chat_info_changed`,
+/// `members_changed_v2`, `user_bucket`; `roles_changed` and `meeting_updated` are not used.
+fn state_sync(sync: &Value) -> Option<LiveEvent> {
+    let data: Value = serde_json::from_slice(&base64(s(sync, &["Data"])?)?).ok()?;
+    let d = &data["data"];
+    let chat_id = || s(d, &["chat_id"]).map(|id| ChatId(id.to_owned()));
+    let text = |key: &str| s(d, &[key]).map(str::to_owned);
+    let count = || n(d, &["members_count"]).map(|c| c as u32);
+    match s(&data, &["type"])? {
+        "you_added" => Some(LiveEvent::Joined {
+            chat_id: s(d, &["chat", "chat_id"])
+                .map(|id| ChatId(id.to_owned()))
+                .or_else(chat_id)?,
+        }),
+        "you_removed" => Some(LiveEvent::ChatRemoved { chat_id: chat_id()? }),
+        "chat_info_changed" => Some(LiveEvent::ChatChanged {
+            chat_id: chat_id()?,
+            name: text("name"),
+            description: text("description"),
+            member_count: count(),
+        }),
+        "members_changed_v2" => Some(LiveEvent::ChatChanged {
+            chat_id: chat_id()?,
+            name: None,
+            description: None,
+            member_count: Some(count()?),
+        }),
+        "user_bucket" => {
+            let value = &d["bucket_value"];
+            match s(d, &["bucket_name"])? {
+                "folders" => Some(LiveEvent::Folders {
+                    folders: chat_folders(value),
+                }),
+                "pinned_chats" => Some(LiveEvent::Starred {
+                    chats: pinned_chats(value),
+                }),
+                "chat_mutings" => Some(LiveEvent::Mutings {
+                    chats: chat_mutings(value),
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Decodes base64, standard or URL-safe, with or without padding.
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// The chats of the `pinned_chats` bucket value: `{"pinned_chats": [chat ids]}`.
+fn pinned_chats(value: &Value) -> Vec<ChatId> {
+    value
+        .get("pinned_chats")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|id| ChatId(id.to_owned()))
+        .collect()
+}
+
+/// The muted chats of the `chat_mutings` bucket value: `{"<chat id>": {mute, mute_mentions}}`.
+fn chat_mutings(value: &Value) -> Vec<(ChatId, NotifyLevel)> {
+    let flag = |m: &Value, key: &str| m.get(key).and_then(Value::as_bool).unwrap_or(false);
+    value
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, m)| {
+            (
+                ChatId(id.clone()),
+                NotifyLevel::from_flags(flag(m, "mute"), flag(m, "mute_mentions")),
+            )
+        })
+        .filter(|(_, level)| *level != NotifyLevel::All)
+        .collect()
 }
 
 /// The sidebar section of a chat: `dms`, `meetings` or `channels`.
@@ -1077,21 +1208,17 @@ pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
             .map(|b| b["bucket_value"].clone())
     };
     snapshot.folders = bucket("folders").map(|v| chat_folders(&v)).unwrap_or_default();
-    if let Some(mutings) = bucket("chat_mutings").and_then(|v| v.as_object().cloned()) {
-        for ch in &mut snapshot.chats {
-            if let Some(m) = mutings.get(&ch.id.0) {
-                ch.muted = m.get("mute").and_then(Value::as_bool).unwrap_or(ch.muted);
-                ch.mute_mentions = m.get("mute_mentions").and_then(Value::as_bool).unwrap_or(false);
+    if let Some(mutings) = bucket("chat_mutings") {
+        for (id, level) in chat_mutings(&mutings) {
+            if let Some(ch) = snapshot.chats.iter_mut().find(|ch| ch.id == id) {
+                ch.set_notify_level(level);
             }
         }
     }
     let pinned: Vec<ChatId> = bucket("pinned_chats")
-        .and_then(|v| v.get("pinned_chats").cloned())
-        .and_then(|v| v.as_array().cloned())
+        .map(|v| pinned_chats(&v))
         .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_str)
-        .map(|id| ChatId(id.to_owned()))
+        .into_iter()
         .filter(|id| snapshot.chat(id).is_some())
         .collect();
     if pinned.is_empty() {
@@ -1821,5 +1948,101 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A `StateSync` push the way the JSON one carries it: `Data` in base64.
+    fn sync_push(data: Value) -> Value {
+        const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = data.to_string().into_bytes();
+        let mut text = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let v = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                text.push(if i <= chunk.len() {
+                    ABC[(v >> (18 - 6 * i) & 63) as usize] as char
+                } else {
+                    '='
+                });
+            }
+        }
+        json!({"ServerMessage": {"ClientMessage": {"StateSync": {"Data": text}},
+                                 "ServerMessageInfo": {"Timestamp": 1}}})
+    }
+
+    #[test]
+    fn state_sync_events() {
+        let me = UserId("me".into());
+        let added =
+            sync_push(json!({"type": "you_added", "data": {"chat": {"chat_id": "0/0/new", "name": "Planning"}}}));
+        assert_eq!(
+            from_push(&added, Some(&me)),
+            Some(LiveEvent::Joined {
+                chat_id: ChatId("0/0/new".into())
+            })
+        );
+        let removed = sync_push(json!({"type": "you_removed", "data": {"chat_id": "0/0/old", "version": 2}}));
+        assert_eq!(
+            from_push(&removed, Some(&me)),
+            Some(LiveEvent::ChatRemoved {
+                chat_id: ChatId("0/0/old".into())
+            })
+        );
+        let members = sync_push(json!({"type": "members_changed_v2",
+            "data": {"chat_id": "0/0/a", "members_count": 3, "members": {"add": ["u2"], "remove": []}}}));
+        assert_eq!(
+            from_push(&members, Some(&me)),
+            Some(LiveEvent::ChatChanged {
+                chat_id: ChatId("0/0/a".into()),
+                name: None,
+                description: None,
+                member_count: Some(3)
+            })
+        );
+        let renamed = sync_push(json!({"type": "chat_info_changed",
+            "data": {"chat_id": "0/0/a", "name": "Design", "description": "", "members_count": 3}}));
+        assert_eq!(
+            from_push(&renamed, Some(&me)),
+            Some(LiveEvent::ChatChanged {
+                chat_id: ChatId("0/0/a".into()),
+                name: Some("Design".into()),
+                description: Some(String::new()),
+                member_count: Some(3)
+            })
+        );
+        let folders = sync_push(
+            json!({"type": "user_bucket", "data": {"bucket_name": "folders", "version": 5,
+            "bucket_value": {"0": {"custom_folders": [
+                {"id": "f1", "name": "Work", "included_chat_ids": ["0/0/a"]},
+                {"id": "default_private", "name": "Private", "included_type_ids": ["private"]}]}}}}),
+        );
+        match from_push(&folders, Some(&me)) {
+            Some(LiveEvent::Folders { folders }) => {
+                assert_eq!(folders.len(), 1);
+                assert_eq!((folders[0].name.as_str(), folders[0].chats.len()), ("Work", 1));
+            }
+            other => panic!("{other:?}"),
+        }
+        let mutings = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "chat_mutings",
+            "bucket_value": {"0/0/a": {"mute": true, "mute_mentions": true}, "0/0/b": {"mute": false}}}}));
+        assert_eq!(
+            from_push(&mutings, Some(&me)),
+            Some(LiveEvent::Mutings {
+                chats: vec![(ChatId("0/0/a".into()), NotifyLevel::Nothing)]
+            })
+        );
+        let pinned = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "pinned_chats",
+            "bucket_value": {"pinned_chats": ["0/0/b"]}}}));
+        assert_eq!(
+            from_push(&pinned, Some(&me)),
+            Some(LiveEvent::Starred {
+                chats: vec![ChatId("0/0/b".into())]
+            })
+        );
+        let status = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status", "bucket_value": {}}}));
+        assert_eq!(from_push(&status, Some(&me)), None);
+        assert_eq!(base64("aGk"), Some(b"hi".to_vec()));
+        assert_eq!(base64("aGk="), Some(b"hi".to_vec()));
+        assert_eq!(base64("a*"), None);
     }
 }

@@ -160,12 +160,18 @@ impl XivaClient {
             liveness.clone(),
         );
         let reader = tokio::spawn(async move {
-            loop {
+            // Why the connection ended, for the log: Telemost drops it now and then for no
+            // visible reason.
+            let reason = loop {
                 let msg = tokio::select! {
                     msg = stream.next() => msg,
-                    () = live.kill.notified() => break,
+                    () = live.kill.notified() => break "no ping from Xiva".to_owned(),
                 };
-                let Some(Ok(msg)) = msg else { break };
+                let msg = match msg {
+                    Some(Ok(msg)) => msg,
+                    Some(Err(e)) => break format!("read error: {e}"),
+                    None => break "the stream ended".to_owned(),
+                };
                 live.last_frame.store(now_ms(), Ordering::SeqCst);
                 match msg {
                     WsMessage::Binary(data) => match xiva::decode(&data) {
@@ -218,10 +224,17 @@ impl XivaClient {
                     WsMessage::Ping(payload) => {
                         let _ = w.lock().await.send(WsMessage::Pong(payload)).await;
                     }
-                    WsMessage::Close(_) => break,
+                    WsMessage::Close(frame) => {
+                        break match frame {
+                            Some(f) => format!("close frame {}: {}", u16::from(f.code), f.reason),
+                            None => "close frame without a code".to_owned(),
+                        };
+                    }
                     _ => {}
                 }
-            }
+            };
+            eprintln!("xiva: the connection closed: {reason}");
+            crate::diag::traffic_log(serde_json::json!({ "dir": "in", "via": "ws", "closed": reason }));
             c.store(true, Ordering::SeqCst);
             // Release the waiters: their `call` returns `Closed`.
             if let Ok(mut m) = p.lock() {
