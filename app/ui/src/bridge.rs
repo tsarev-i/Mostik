@@ -88,6 +88,12 @@ pub enum LiveEvent {
     Seen {
         chat_id: ChatId,
     },
+    PeerSeen {
+        chat_id: ChatId,
+        user: UserId,
+        ts: Timestamp,
+        reads: Option<mostik_core::Reads>,
+    },
     ThreadSeen {
         chat_id: ChatId,
         parent: Timestamp,
@@ -293,6 +299,9 @@ pub struct HistoryPage {
     /// the next older page starts before it.
     #[serde(default)]
     pub oldest: Option<Timestamp>,
+    /// How far the others have read the chat (`LastSeenTsMcs`); 0 for a thread.
+    #[serde(default)]
+    pub peer_seen: Timestamp,
 }
 
 pub async fn history(

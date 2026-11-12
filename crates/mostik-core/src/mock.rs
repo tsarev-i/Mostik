@@ -42,6 +42,7 @@ fn chat(id: &str, kind: ChatKind, name: &str, members: u32, unread: u32, mention
         muted: false,
         mute_mentions: false,
         last_ts: TODAY,
+        peer_seen_ts: 0,
         pinned: None,
         organizations: vec![],
     }
@@ -63,6 +64,7 @@ fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
         forwarded: vec![],
         call: None,
         system: None,
+        reads: None,
     }
 }
 
@@ -150,7 +152,9 @@ pub fn demo() -> Snapshot {
     random.muted = true;
     let news = chat("news", ChatKind::Broadcast, "company-news", 312, 1, 0);
     let dm_anna = chat("dm-anna", ChatKind::Direct { peer: uid("anna") }, "", 2, 1, 1);
-    let dm_boris = chat("dm-boris", ChatKind::Direct { peer: uid("boris") }, "", 2, 0, 0);
+    let mut dm_boris = chat("dm-boris", ChatKind::Direct { peer: uid("boris") }, "", 2, 0, 0);
+    // Boris has read up to the user's question, not the message after it.
+    dm_boris.peer_seen_ts = TODAY + 5 * MIN;
     let notes = chat("notes", ChatKind::Notes, "Notes", 1, 0, 0);
     // Meeting chats live in their own Telemost namespace, `0/22/…`.
     let mut sync = chat(
@@ -216,6 +220,25 @@ pub fn demo() -> Snapshot {
     );
     edited.edited = true;
 
+    // Read receipts: Vera, Anna and Boris read the user's message, everyone else did not yet.
+    let mut looked = msg(
+        "dev",
+        YESTERDAY + 95 * MIN,
+        "me",
+        "Looked through it, all good. I will pick it up after the login work.",
+    );
+    looked.reads = Some(Reads {
+        count: 5,
+        recent: vec![uid("vera"), uid("anna"), uid("boris")],
+        peer_seen: None,
+    });
+    let mut asked = msg("dm-boris", TODAY + 5 * MIN, "me", "Thanks! Which folder?");
+    asked.reads = Some(Reads {
+        count: 1,
+        recent: vec![uid("boris")],
+        peer_seen: Some(TODAY + 9 * MIN),
+    });
+
     let mut important = msg(
         "dev",
         TODAY + 63 * MIN,
@@ -238,12 +261,7 @@ pub fn demo() -> Snapshot {
             "anna",
             "The link is in the channel description.",
         ),
-        msg(
-            "dev",
-            YESTERDAY + 95 * MIN,
-            "me",
-            "Looked through it, all good. I will pick it up after the login work.",
-        ),
+        looked,
         release_msg,
         edited,
         msg(
@@ -351,6 +369,8 @@ pub fn demo() -> Snapshot {
             "boris",
             "Put the production logs on the shared drive.",
         ),
+        asked,
+        msg("dm-boris", TODAY + 6 * MIN, "me", "Never mind, found it."),
         msg("notes", YESTERDAY + 10 * MIN, "me", "Check Yandex ID login on Wayland."),
         msg(
             "0/22/weekly-sync",

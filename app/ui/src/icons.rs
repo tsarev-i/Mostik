@@ -49,6 +49,8 @@ pub enum I {
     PinOff,
     Pencil,
     Trash,
+    /// Read receipts: a double check.
+    CheckCheck,
     SmilePlus,
     Send,
     Bold,
@@ -159,6 +161,7 @@ fn paths(i: I) -> &'static str {
         I::Trash => {
             r#"<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>"#
         }
+        I::CheckCheck => r#"<path d="M18 6 7 17l-5-5"/><path d="m22 10-7.5 7.5L13 16"/>"#,
         I::SmilePlus => {
             r#"<path d="M22 11v1a10 10 0 1 1-9-10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" x2="9.01" y1="9" y2="9"/><line x1="15" x2="15.01" y1="9" y2="9"/><path d="M16 5h6"/><path d="M19 2v6"/>"#
         }

@@ -780,7 +780,10 @@ pub fn App() -> impl IntoView {
     });
     scoped_window_listener(ev::wheel, move |_| c.ctx_menu.set(None));
     scoped_window_listener(ev::blur, move |_| c.ctx_menu.set(None));
-    scoped_window_listener(ev::focus, move |_| ops::refresh_me(c));
+    scoped_window_listener(ev::focus, move |_| {
+        ops::refresh_me(c);
+        ops::recount_soon(c);
+    });
     scoped_window_listener(ev::resize, move |_| c.ctx_menu.set(None));
 
     if live {
@@ -1553,7 +1556,7 @@ fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
 enum Hit {
     Chat(ChatId, String, Mark),
     Person(User),
-    Message(Message, String),
+    Message(Box<Message>, String),
 }
 
 #[component]
@@ -1857,7 +1860,7 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
             messages.sort_by_key(|m| std::cmp::Reverse(m.ts));
             out.extend(messages.into_iter().take(10).map(|m| {
                 let chat = s.chat(&m.chat_id).map(|ch| display_title(s, ch)).unwrap_or_default();
-                Hit::Message(m, chat)
+                Hit::Message(Box::new(m), chat)
             }));
             out
         });
@@ -3143,6 +3146,21 @@ fn MessageList() -> impl IntoView {
         let id = c.current.get();
         c.snap.with(|s| s.channel_messages(&id))
     });
+    let chat = Memo::new(move |_| {
+        let id = c.current.get();
+        c.snap.with(|s| s.chat(&id).cloned())
+    });
+    // The read line: a reading of the chat moves it, and only the lines it leaves and reaches change.
+    let read_line = Memo::new(move |_| {
+        if !c.settings.with(|s| s.show_read_receipts) {
+            return None;
+        }
+        let me = c.snap.with_untracked(|s| s.me.clone());
+        chat.with(|ch| {
+            let ch = ch.as_ref()?;
+            messages.with(|list| receipts::read_line(ch, &me, list))
+        })
+    });
     // Scrolling: to the bottom when the chat changes or new messages arrive, if the user is at the bottom;
     // when older messages load, keep the visible position.
     let stick = RwSignal::new(true);
@@ -3220,7 +3238,7 @@ fn MessageList() -> impl IntoView {
                     view! { <div class="loading-older"></div> }.into_any()
                 }
             }}
-            <Feed messages=messages/>
+            <Feed messages=messages read_line=read_line/>
         </div>
     }
 }
@@ -3456,10 +3474,11 @@ fn ChannelIntro() -> impl IntoView {
     }
 }
 
-/// The names that mentions in the lines of a feed show, shared by its lines.
+/// What the lines of a feed share: the names that mentions show, and where the read line goes.
 #[derive(Clone, Copy)]
 struct FeedCtx {
     names: Memo<mostik_core::markup::MentionNames>,
+    read_line: Option<Memo<Option<receipts::ReadLine>>>,
 }
 
 /// Mention names for a message line: those of its feed; a line outside a feed (a pinned message,
@@ -3478,10 +3497,15 @@ type FeedDayKey = (ChatId, (u32, u32, u32), Timestamp);
 /// built once and follows its message: a new message, a reaction or an edit elsewhere keeps the
 /// text selected, the open reaction picker with its search and the editor of a message.
 #[component]
-fn Feed(messages: Memo<Vec<Message>>, #[prop(optional)] in_thread: bool) -> impl IntoView {
+fn Feed(
+    messages: Memo<Vec<Message>>,
+    #[prop(optional)] in_thread: bool,
+    #[prop(optional)] read_line: Option<Memo<Option<receipts::ReadLine>>>,
+) -> impl IntoView {
     let c = ctx();
     provide_context(FeedCtx {
         names: Memo::new(move |_| c.snap.with(Snapshot::mention_names)),
+        read_line,
     });
     let days = Memo::new(move |_| messages.with(|list| feed::layout(list, time::day_key)));
     let line = move |key: (ChatId, Timestamp)| view! { <FeedRow days=days ts=key.1 in_thread=in_thread/> };
@@ -4025,6 +4049,14 @@ fn MessageRow(
             })
         }
     };
+    // The read line of the chat, under the user's own message it reaches.
+    let read_view = use_context::<FeedCtx>()
+        .and_then(|f| f.read_line)
+        .filter(|_| mine && !in_thread)
+        .map(|line| {
+            let status = Memo::new(move |_| line.with(|l| l.as_ref().filter(|l| l.ts == ts).map(|l| l.status.clone())));
+            move || status.get().map(|status| view! { <ReadMark status=status/> })
+        });
     let reply_btn = (!in_thread && threads_supported(&chat_id)).then(|| {
         view! { <button title=tr().reply_in_thread on:click=open_thread><Icon icon=I::Threads size=16/></button> }
     });
@@ -4089,6 +4121,7 @@ fn MessageRow(
                     {move || view! { <Attachments list=attachments.get()/> }}
                     {reactions_view}
                     {thread_view}
+                    {read_view}
                 </div>
             </div>
             <div class="msg-actions">
@@ -4121,6 +4154,91 @@ fn MessageRow(
             </Show>
         </div>
     }
+}
+
+/// The read line under an own message, in the spirit of Slack: muted, with a double check in a
+/// direct chat and the faces of the latest readers in a group; the names show on hover.
+#[component]
+fn ReadMark(status: receipts::ReadStatus) -> impl IntoView {
+    let c = ctx();
+    match status {
+        receipts::ReadStatus::Seen { at, .. } => view! {
+            <div class="read-line">
+                <Icon icon=I::CheckCheck size=14/>
+                <span>{tr().seen(at.map(time::relative).as_deref())}</span>
+            </div>
+        }
+        .into_any(),
+        receipts::ReadStatus::Read {
+            count,
+            recent,
+            everyone,
+        } => {
+            let (faces, title) = c.snap.with_untracked(|s| {
+                let faces: Vec<User> = recent.iter().filter_map(|id| s.user(id).cloned()).collect();
+                (faces, readers(s, count, &recent))
+            });
+            let mark = if faces.is_empty() {
+                view! { <Icon icon=I::CheckCheck size=14/> }.into_any()
+            } else {
+                view! {
+                    <span class="read-faces">
+                        {faces.into_iter().map(|u| view! { <Avatar user=u size=16/> }).collect_view()}
+                    </span>
+                }
+                .into_any()
+            };
+            view! {
+                <div class="read-line" title=title>
+                    {mark}
+                    <span>{tr().read_by(count, everyone)}</span>
+                </div>
+            }
+            .into_any()
+        }
+    }
+}
+
+/// Who read a message, for the hover of the read line: "Anna, Boris, Vera and 2 more".
+fn readers(s: &Snapshot, count: u32, recent: &[UserId]) -> String {
+    let names: Vec<String> = recent
+        .iter()
+        .filter_map(|id| s.user(id).filter(|u| u.has_name()).map(|u| u.display_name.clone()))
+        .collect();
+    tr().readers(&names, count.saturating_sub(names.len() as u32))
+}
+
+/// What the message menu says about the reads of an own message, if anything.
+fn read_info(c: Ctx, msg: &Message) -> Option<String> {
+    if !c.settings.with_untracked(|s| s.show_read_receipts) {
+        return None;
+    }
+    c.snap.with_untracked(|s| {
+        // The loaded copy is the fresher one: counters change while the menu is not open.
+        let m = s
+            .messages
+            .iter()
+            .find(|m| m.chat_id == msg.chat_id && m.ts == msg.ts)
+            .unwrap_or(msg);
+        match receipts::read_status(s.chat(&msg.chat_id)?, &s.me, m)? {
+            receipts::ReadStatus::Seen { seen: false, .. } => Some(tr().not_seen_yet.to_owned()),
+            receipts::ReadStatus::Seen { at, .. } => Some(tr().seen(at.map(time::relative).as_deref())),
+            receipts::ReadStatus::Read { count: 0, .. } => Some(tr().not_read_yet.to_owned()),
+            receipts::ReadStatus::Read {
+                count,
+                recent,
+                everyone,
+            } => {
+                let head = tr().read_by(count, everyone);
+                let names = readers(s, count, &recent);
+                Some(if names.is_empty() {
+                    head
+                } else {
+                    format!("{head}: {names}")
+                })
+            }
+        }
+    })
 }
 
 /// Forwarded message, like a "shared message" in Slack: a bar on the left, author, text and origin.
@@ -4403,6 +4521,13 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -
     let copy = |text: String| {
         let _ = window().navigator().clipboard().write_text(&text);
     };
+    // Who read an own message, as a note above the items.
+    let reads = read_info(c, &msg).map(|text| {
+        view! {
+            <div class="menu-info"><Icon icon=I::CheckCheck size=16/><span>{text}</span></div>
+            <div class="menu-sep"></div>
+        }
+    });
     // Replies go to messages, not to notes; as in Telemost, they lead the menu.
     let replies = (!msg.is_note()).then(|| {
         let (m_reply, m_quote) = (msg.clone(), msg.clone());
@@ -4426,6 +4551,7 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -
         }
     });
     view! {
+        {reads}
         {replies}
         // Telemost does not make your own message unread, so the item is only for others' messages.
         {(!in_thread && !mine).then(|| view! {
@@ -6754,6 +6880,8 @@ fn PrefMarkRead() -> impl IntoView {
         <h3>{tr().p_when_view}</h3>
         {radio(c, "read", tr().p_read_on_open, true, g, set)}
         {radio(c, "read", tr().p_leave_unread, false, g, set)}
+        <h3 class="pref-h">{tr().p_read_receipts}</h3>
+        {checkbox(c, tr().p_show_read_receipts, |s| s.show_read_receipts, |s, v| s.show_read_receipts = v)}
     }
 }
 

@@ -9,5 +9,6 @@ pub mod markup;
 pub mod mock;
 pub mod model;
 pub mod reactions;
+pub mod receipts;
 
 pub use model::*;

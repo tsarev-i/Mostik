@@ -61,6 +61,8 @@ pub struct Settings {
     pub inline_media: bool,
     pub clock24: bool,
     pub mark_read_on_open: bool,
+    /// Show who read the user's own messages; the read markers Mostik sends do not depend on it.
+    pub show_read_receipts: bool,
     pub enter_sends: bool,
     /// UI zoom in percent, like "Accessibility → Zoom" in Slack.
     pub zoom: u32,
@@ -86,6 +88,7 @@ impl Default for Settings {
             inline_media: true,
             clock24: true,
             mark_read_on_open: true,
+            show_read_receipts: true,
             enter_sends: true,
             zoom: 100,
             sidebar_filter: SidebarFilter::Active,

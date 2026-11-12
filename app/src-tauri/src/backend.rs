@@ -426,6 +426,8 @@ pub struct HistoryPage {
     /// The time of the oldest record of the page, deleted messages and service records included:
     /// the next page starts before it, or a run of deleted messages would be asked for again.
     oldest: Option<Timestamp>,
+    /// How far the others have read the chat (`LastSeenTsMcs`); 0 for a thread.
+    peer_seen: Timestamp,
 }
 
 /// History page: the latest messages before `before` (exclusive). The page comes back at once;
@@ -487,11 +489,16 @@ pub async fn history(
         });
     }
     prefetch_previews(live.clone(), &data.messages);
+    let peer_seen = match thread {
+        None => data.chats.first().map_or(0, |c| c.peer_seen_ts),
+        Some(_) => 0,
+    };
     Ok(HistoryPage {
         messages: data.messages,
         users,
         more: raw >= limit as usize,
         oldest: convert::oldest_record(&body),
+        peer_seen,
     })
 }
 
@@ -640,6 +647,7 @@ pub async fn send_message(
         forwarded: vec![],
         call: None,
         system: None,
+        reads: None,
     })
 }
 
@@ -1716,6 +1724,7 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<
         muted: false,
         mute_mentions: false,
         last_ts: 0,
+        peer_seen_ts: 0,
         pinned: None,
         organizations: vec![],
     };
@@ -1911,6 +1920,7 @@ pub async fn create_channel(
         muted: false,
         mute_mentions: false,
         last_ts: js_now_mcs(),
+        peer_seen_ts: 0,
         pinned: None,
         organizations: vec![],
     };
@@ -2297,6 +2307,7 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<mostik_core::Chat> {
         muted: false,
         mute_mentions: false,
         last_ts: 0,
+        peer_seen_ts: 0,
         pinned: None,
         organizations: v
             .get("organization_ids")

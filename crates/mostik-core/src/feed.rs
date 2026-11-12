@@ -118,6 +118,7 @@ mod tests {
             forwarded: vec![],
             call: None,
             system: None,
+            reads: None,
         }
     }
 

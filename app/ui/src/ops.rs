@@ -70,12 +70,14 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
                 m.reactions.clone()
             };
             let seq_no = if m.seq_no == 0 { old.seq_no } else { m.seq_no };
-            *old = Message {
+            let mut fresh = Message {
                 thread,
                 reactions,
                 seq_no,
                 ..m.clone()
             };
+            fresh.keep_reads(old);
+            *old = fresh;
             return;
         }
         added = add_new(s, &m, viewing, start);
@@ -275,6 +277,12 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
                 ch.mentions = 0;
             }
         }),
+        LiveEvent::PeerSeen {
+            chat_id,
+            user,
+            ts,
+            reads,
+        } => peer_seen(c, chat_id, user, ts, reads),
         LiveEvent::Typing { chat_id, user } => {
             let until = js_sys::Date::now() + 5000.0;
             c.typing.update(|t| {
@@ -445,6 +453,56 @@ thread_local! {
     /// Chats whose latest page was loaded over the current connection: everything new in them
     /// has come as pushes since, so opening them again asks Telemost for nothing.
     static FRESH: std::cell::RefCell<std::collections::HashSet<ChatId>> = Default::default();
+    /// Group chats where an own message may have been read since its counters came: the
+    /// latest page is asked again for them when the chat is open and in sight.
+    static RECOUNT: std::cell::RefCell<std::collections::HashSet<ChatId>> = Default::default();
+    /// A recount is due shortly.
+    static RECOUNT_SOON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Someone else read a chat: the read receipts follow, and a group whose earlier own messages
+/// may have been read as well gets its counters again.
+fn peer_seen(c: Ctx, chat: ChatId, user: UserId, ts: Timestamp, reads: Option<Reads>) {
+    // Reads of chats with nothing of the user's to show change nothing: no update then.
+    let change = c
+        .snap
+        .try_maybe_update(|s| {
+            let change = s.peer_seen(&chat, &user, ts, reads);
+            (change.changed, change)
+        })
+        .unwrap_or_default();
+    if change.recount {
+        RECOUNT.with_borrow_mut(|r| r.insert(chat));
+        recount_soon(c);
+    }
+}
+
+/// Asks for the counters of the open chat in a moment, once for all the reads meanwhile.
+pub fn recount_soon(c: Ctx) {
+    if !c.live || RECOUNT_SOON.replace(true) {
+        return;
+    }
+    set_timeout(
+        move || {
+            RECOUNT_SOON.set(false);
+            recount(c);
+        },
+        std::time::Duration::from_secs(2),
+    );
+}
+
+/// The latest page of the open chat again, if its counters may be stale, for the counters only.
+fn recount(c: Ctx) {
+    let id = c.current.get_untracked();
+    if !document_visible() || !RECOUNT.with_borrow_mut(|r| r.remove(&id)) {
+        return;
+    }
+    spawn_local(async move {
+        match bridge::history(&id.0, None, None).await {
+            Ok(page) => c.snap.update(|s| s.take_reads(&id, &page.messages, page.peer_seen)),
+            Err(e) => leptos::logging::warn!("read counters: {e}"),
+        }
+    });
 }
 
 /// Forgets which chats are up to date: pushes may have been missed while offline.
@@ -562,6 +620,7 @@ fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
     }
     if c.live && FRESH.with_borrow(|f| f.contains(&id)) {
         // What `load_latest` would do after loading.
+        recount_soon(c);
         if read_on_open {
             mark_read(c, id);
         }
@@ -577,9 +636,13 @@ async fn load_latest(c: Ctx, id: &ChatId) {
         Ok(page) => {
             let full = !page.more;
             FRESH.with_borrow_mut(|f| f.insert(id.clone()));
+            RECOUNT.with_borrow_mut(|r| r.remove(id));
             set_cursor(id, page_start(None, &page));
             c.snap.update(|s| {
                 learn_users(s, page.users);
+                if let Some(ch) = s.chats.iter_mut().find(|ch| &ch.id == id) {
+                    ch.peer_seen_ts = ch.peer_seen_ts.max(page.peer_seen);
+                }
                 // History never has a ringing call: it stays, or "Join" would go.
                 let old: Vec<Message> = s
                     .messages
@@ -845,6 +908,7 @@ fn keep_known(mut m: Message, old: &[Message]) -> Message {
     let Some(known) = old.iter().find(|o| o.chat_id == m.chat_id && o.ts == m.ts) else {
         return m;
     };
+    m.keep_reads(known);
     if let Some(t) = m.thread.as_mut()
         && let Some(known) = known.thread.as_ref()
     {
@@ -1108,6 +1172,7 @@ pub async fn send(
             forwarded: vec![],
             call: None,
             system: None,
+            reads: None,
         }
     };
     if let Some(r) = &reply {
@@ -1553,6 +1618,7 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
         forwarded: original,
         call: None,
         system: None,
+        reads: None,
     };
     upsert(c, message, None);
     Ok(())
@@ -2009,6 +2075,7 @@ mod tests {
             users: vec![],
             more: true,
             oldest,
+            peer_seen: 0,
         }
     }
 
@@ -2038,6 +2105,7 @@ mod tests {
             forwarded: vec![],
             call: None,
             system: None,
+            reads: None,
         }
     }
 

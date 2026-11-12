@@ -334,6 +334,7 @@ fn event_chat(ev: &LiveEvent) -> Option<(&str, bool)> {
         LiveEvent::Typing { chat_id, .. }
         | LiveEvent::Reactions { chat_id, .. }
         | LiveEvent::Seen { chat_id }
+        | LiveEvent::PeerSeen { chat_id, .. }
         | LiveEvent::ThreadSeen { chat_id, .. }
         | LiveEvent::Pinned { chat_id, .. }
         | LiveEvent::Joined { chat_id }

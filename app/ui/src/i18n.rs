@@ -114,6 +114,9 @@ pub struct Tr {
     pub link_copied: &'static str,
     pub copy_link: &'static str,
     pub mark_unread: &'static str,
+    pub not_seen_yet: &'static str,
+    pub not_read_yet: &'static str,
+    pub read_by_all: &'static str,
     /// Heading of a chat's notification choices in its menu.
     pub notify_label: &'static str,
     pub notify_all: &'static str,
@@ -339,6 +342,8 @@ pub struct Tr {
     pub p_when_view: &'static str,
     pub p_read_on_open: &'static str,
     pub p_leave_unread: &'static str,
+    pub p_read_receipts: &'static str,
+    pub p_show_read_receipts: &'static str,
     pub p_enter_to: &'static str,
     pub p_enter_send: &'static str,
     pub p_enter_newline: &'static str,
@@ -507,6 +512,9 @@ pub static RU: Tr = Tr {
     link_copied: "Ссылка скопирована",
     copy_link: "Копировать ссылку",
     mark_unread: "Пометить непрочитанным",
+    not_seen_yet: "Ещё не просмотрено",
+    not_read_yet: "Ещё никто не прочитал",
+    read_by_all: "Прочитали все",
     notify_label: "Уведомления",
     notify_all: "Все сообщения",
     notify_mentions: "Только упоминания",
@@ -732,6 +740,8 @@ pub static RU: Tr = Tr {
     p_when_view: "Когда я открываю чат",
     p_read_on_open: "Отмечать его прочитанным",
     p_leave_unread: "Оставлять непрочитанные сообщения непрочитанными",
+    p_read_receipts: "Отметки о прочтении",
+    p_show_read_receipts: "Показывать отметки о прочтении",
     p_enter_to: "При наборе сообщения Enter…",
     p_enter_send: "Отправляет сообщение",
     p_enter_newline: "Начинает новую строку (отправка — Ctrl+Enter)",
@@ -904,6 +914,9 @@ pub static EN: Tr = Tr {
     link_copied: "Link copied",
     copy_link: "Copy link",
     mark_unread: "Mark unread",
+    not_seen_yet: "Not seen yet",
+    not_read_yet: "Not read yet",
+    read_by_all: "Seen by everyone",
     notify_label: "Notifications",
     notify_all: "All messages",
     notify_mentions: "Mentions only",
@@ -1129,6 +1142,8 @@ pub static EN: Tr = Tr {
     p_when_view: "When I view a chat",
     p_read_on_open: "Mark it as read",
     p_leave_unread: "Leave unseen messages unread",
+    p_read_receipts: "Read receipts",
+    p_show_read_receipts: "Show read receipts",
     p_enter_to: "When writing a message, press Enter to…",
     p_enter_send: "Send the message",
     p_enter_newline: "Start a new line (use Ctrl+Enter to send)",
@@ -1445,6 +1460,37 @@ impl Tr {
         }
     }
 
+    /// The read line of a direct chat: "Seen", or "Seen today at 19:00".
+    pub fn seen(&self, when: Option<&str>) -> String {
+        match (self.lang, when) {
+            (Lang::Ru, None) => "Просмотрено".to_owned(),
+            (Lang::Ru, Some(when)) => format!("Просмотрено {when}"),
+            (Lang::En, None) => "Seen".to_owned(),
+            (Lang::En, Some(when)) => format!("Seen {when}"),
+        }
+    }
+
+    /// The read line of a group: "Seen by 5", or "Seen by everyone".
+    pub fn read_by(&self, n: u32, everyone: bool) -> String {
+        match self.lang {
+            _ if everyone => self.read_by_all.to_owned(),
+            Lang::Ru => format!("{} {n}", ru_plural(n, "Прочитал(а)", "Прочитали", "Прочитали")),
+            Lang::En => format!("Seen by {n}"),
+        }
+    }
+
+    /// Who read a message: the latest readers by name and how many more, "Anna, Boris and 2 more".
+    pub fn readers(&self, names: &[String], more: u32) -> String {
+        let mut who = names.to_vec();
+        if more > 0 && !names.is_empty() {
+            who.push(match self.lang {
+                Lang::Ru => format!("ещё {more}"),
+                Lang::En => format!("{more} more"),
+            });
+        }
+        self.list(&who)
+    }
+
     /// "Anna, Boris and Vera".
     pub fn list(&self, names: &[String]) -> String {
         let and = match self.lang {
@@ -1629,6 +1675,20 @@ mod tests {
         assert_eq!(RU.in_call(3), "3 человека в звонке");
         assert_eq!(RU.in_call(5), "5 человек в звонке");
         assert_eq!(EN.in_call(2), "2 in the call");
+    }
+
+    #[test]
+    fn read_receipts() {
+        assert_eq!(RU.read_by(1, false), "Прочитал(а) 1");
+        assert_eq!(RU.read_by(5, false), "Прочитали 5");
+        assert_eq!(EN.read_by(3, false), "Seen by 3");
+        assert_eq!(RU.read_by(9, true), "Прочитали все");
+        assert_eq!(RU.seen(Some("сегодня в 19:00")), "Просмотрено сегодня в 19:00");
+        assert_eq!(EN.seen(None), "Seen");
+        let names = ["Anna".to_owned(), "Boris".to_owned(), "Vera".to_owned()];
+        assert_eq!(RU.readers(&names, 2), "Anna, Boris, Vera и ещё 2");
+        assert_eq!(EN.readers(&names[..1], 0), "Anna");
+        assert_eq!(EN.readers(&[], 4), "");
     }
 
     #[test]

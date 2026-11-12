@@ -101,6 +101,28 @@ fn reactions(sm: &Value, me: Option<&UserId>) -> Vec<Reaction> {
         .collect()
 }
 
+/// Read counters of one of the user's own messages: `ShowReadsCount`, `ReadsCount`,
+/// `RecentUserReads` and `SeenByPartnerMcs`, next to `ServerMessageInfo` of a message or at the
+/// top of someone's `SeenMarker` push. Without `ShowReadsCount` nothing is known: the same
+/// message comes with it and without (the echo of a sent message has none).
+fn reads(sm: &Value) -> Option<Reads> {
+    if sm.get("ShowReadsCount").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    Some(Reads {
+        count: n(sm, &["ReadsCount"]).unwrap_or(0) as u32,
+        recent: sm
+            .get("RecentUserReads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| s(r, &["UserInfo", "Guid"]))
+            .map(|g| UserId(g.to_owned()))
+            .collect(),
+        peer_seen: n(sm, &["SeenByPartnerMcs"]).filter(|t| *t > 0),
+    })
+}
+
 /// People from `RecentUserReactions`, with the names the UI shows in the reaction tooltip.
 pub fn reaction_authors(sm: &Value) -> Vec<User> {
     sm.get("RecentUserReactions")
@@ -271,6 +293,7 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
         forwarded,
         call: None,
         system: None,
+        reads: reads(sm),
     }))
 }
 
@@ -361,6 +384,7 @@ fn system_note(chat: &str, ts: Timestamp, info: &Value) -> Message {
         forwarded: vec![],
         call: None,
         system: None,
+        reads: None,
     }
 }
 
@@ -406,6 +430,7 @@ fn chat_note(sm: &Value) -> Option<Message> {
     };
     Some(Message {
         system: Some(note),
+        reads: None,
         ..system_note(s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, info)
     })
 }
@@ -559,6 +584,7 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
             muted: chat.get("Muted").and_then(Value::as_bool).unwrap_or(false),
             mute_mentions: false,
             last_ts,
+            peer_seen_ts: n(chat, &["LastSeenTsMcs"]).unwrap_or(0),
             pinned: n(chat, &["PinnedMessageInfo", "PinnedMessageTs"]).filter(|ts| *ts > 0),
             organizations: info
                 .get("OrganizationIds")
@@ -668,6 +694,14 @@ pub enum LiveEvent {
     /// The user read the chat (possibly on another device).
     Seen {
         chat_id: ChatId,
+    },
+    /// Someone else read the chat up to message `ts`; `reads` are that message's counters, if
+    /// it is the user's.
+    PeerSeen {
+        chat_id: ChatId,
+        user: UserId,
+        ts: Timestamp,
+        reads: Option<Reads>,
     },
     /// The user read the thread of message `parent` in `chat_id` (possibly on another device).
     ThreadSeen {
@@ -785,8 +819,16 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     }
     if let Some(seen) = cm.get("SeenMarker") {
         let chat = s(seen, &["ChatId"])?;
-        if me.is_none_or(|me| from.as_ref() != Some(me)) {
-            return None;
+        let (me, from) = (me?, from?);
+        // Someone else's marker carries the counters of the message it points at; a thread's
+        // carries none.
+        if &from != me {
+            return thread_parent(chat).is_none().then(|| LiveEvent::PeerSeen {
+                chat_id: ChatId(chat.to_owned()),
+                user: from,
+                ts: n(seen, &["Timestamp"]).unwrap_or(0),
+                reads: reads(sm),
+            });
         }
         return Some(match thread_parent(chat) {
             Some((chat_id, parent)) => LiveEvent::ThreadSeen {
@@ -983,6 +1025,7 @@ pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
         muted: false,
         mute_mentions: false,
         last_ts: 0,
+        peer_seen_ts: 0,
         pinned: None,
         organizations,
     })
@@ -1230,6 +1273,7 @@ pub fn notes_chat(me: &UserId) -> Chat {
         muted: false,
         mute_mentions: false,
         last_ts: 0,
+        peer_seen_ts: 0,
         pinned: None,
         organizations: vec![],
     }
@@ -1507,6 +1551,68 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn read_counters_of_own_messages() {
+        let me = UserId("me".into());
+        let v = json!({"Chats": [{
+        "ChatId": "0/0/abc", "LastSeqNo": 3, "LastSeenTsMcs": 25, "LastSeenSeqNo": 2,
+        "Messages": [
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/abc", "Text": {"MessageText": "a"}}},
+              "ServerMessageInfo": {"Timestamp": 20, "SeqNo": 2, "From": {"Guid": "me"}},
+              "ShowReadsCount": true, "ReadsCount": 5, "ReadsVersion": 113,
+              "RecentUserReads": [{"UserInfo": {"Guid": "u1", "DisplayName": "Anna Smirnova"}, "Timestamp": 22},
+                                  {"UserInfo": {"Guid": "u2"}, "Timestamp": 21}]}},
+            // The same kind of message without `ShowReadsCount`: nothing is known.
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/abc", "Text": {"MessageText": "b"}}},
+              "ServerMessageInfo": {"Timestamp": 30, "SeqNo": 3, "From": {"Guid": "me"}}, "ReadsCount": 1}}
+        ]}]});
+        let d = from_history(&v, Some(&me));
+        assert_eq!(d.chats[0].peer_seen_ts, 25);
+        assert_eq!(
+            d.messages[0].reads,
+            Some(Reads {
+                count: 5,
+                recent: vec![UserId("u1".into()), UserId("u2".into())],
+                peer_seen: None,
+            })
+        );
+        assert_eq!(d.messages[1].reads, None);
+        assert!(d.users.iter().any(|u| u.display_name == "Anna Smirnova"));
+    }
+
+    #[test]
+    fn seen_markers_of_others_carry_read_counters() {
+        let me = UserId("me".into());
+        let marker = |chat: &str, from: &str| {
+            json!({"ClientMessage": {"SeenMarker": {"ChatId": chat, "Timestamp": 460, "SeqNo": 55},
+                        "NotificationBehaviour": 2},
+                   "ServerMessageInfo": {"From": {"Guid": from}, "Timestamp": 470, "SeqNo": 77},
+                   "ReadsCount": 1, "ReadsVersion": 120, "ShowReadsCount": true, "SeenByPartnerMcs": 440})
+        };
+        assert_eq!(
+            from_push(&marker("me_peer", "peer"), Some(&me)),
+            Some(LiveEvent::PeerSeen {
+                chat_id: ChatId("me_peer".into()),
+                user: UserId("peer".into()),
+                ts: 460,
+                reads: Some(Reads {
+                    count: 1,
+                    recent: vec![],
+                    peer_seen: Some(440),
+                }),
+            })
+        );
+        // A thread has no receipts; one's own marker is a read on another device, as before.
+        assert_eq!(from_push(&marker("100/0/abc_42", "peer"), Some(&me)), None);
+        assert_eq!(
+            from_push(&marker("me_peer", "me"), Some(&me)),
+            Some(LiveEvent::Seen {
+                chat_id: ChatId("me_peer".into())
+            })
+        );
+        assert_eq!(from_push(&marker("me_peer", "peer"), None), None);
     }
 
     #[test]

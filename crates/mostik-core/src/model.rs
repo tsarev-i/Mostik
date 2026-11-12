@@ -164,6 +164,10 @@ pub struct Chat {
     /// Organizations the chat belongs to (`ChatInfo.OrganizationIds`); empty for direct chats.
     #[serde(default)]
     pub organizations: Vec<u64>,
+    /// How far the others have read the chat (`LastSeenTsMcs`): the peer of a direct chat, the
+    /// furthest reader of a group.
+    #[serde(default)]
+    pub peer_seen_ts: Timestamp,
 }
 
 /// User's organization: a "workspace" in Slack terms.
@@ -230,6 +234,24 @@ pub struct Message {
     /// removed, someone joined or left.
     #[serde(default)]
     pub system: Option<SystemNote>,
+    /// Who read the message: only the user's own messages have it, and only when Telemost sent
+    /// it (`ShowReadsCount`); `None` is "not known", not "nobody".
+    #[serde(default)]
+    pub reads: Option<Reads>,
+}
+
+/// Who read one of the user's own messages, as far as Telemost says (`ReadsCount`,
+/// `RecentUserReads`, `SeenByPartnerMcs`); see [`crate::receipts`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reads {
+    /// How many people have read it.
+    pub count: u32,
+    /// The latest readers, at most three, newest first.
+    #[serde(default)]
+    pub recent: Vec<UserId>,
+    /// A direct chat: when the peer read it, rounded down to the minute.
+    #[serde(default)]
+    pub peer_seen: Option<Timestamp>,
 }
 
 impl Message {
@@ -752,6 +774,7 @@ mod tests {
             forwarded: vec![],
             call: None,
             system: None,
+            reads: None,
         }
     }
 

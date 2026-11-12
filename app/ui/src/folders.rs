@@ -304,6 +304,7 @@ mod tests {
             muted: false,
             mute_mentions: false,
             last_ts: 0,
+            peer_seen_ts: 0,
             pinned: None,
             organizations: vec![],
         };
