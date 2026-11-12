@@ -2967,13 +2967,19 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
             };
             let you =
                 matches!(ch.kind, ChatKind::Notes).then(|| view! { <span class="sb-you">{tr().you_short}</span> });
-            let face_status = c.snap.with(|s| match &ch.kind {
-                ChatKind::Direct { peer } => s.user(peer).and_then(status_badge),
-                ChatKind::Notes => s.user(&s.me).and_then(status_badge),
-                _ => None,
+            let live = c.active_calls.with(|a| a.contains_key(&ch.id));
+            // A call in a direct chat shows once: the person's "In meeting" is that very call.
+            let face_status = c.snap.with(|s| {
+                let user = match &ch.kind {
+                    ChatKind::Direct { peer } => s.user(peer),
+                    ChatKind::Notes => s.user(&s.me),
+                    _ => None,
+                }?;
+                let in_this_call = live && user.status.as_ref().is_some_and(|st| st.in_meeting);
+                if in_this_call { None } else { status_badge(user) }
             });
             let badge = (ch.mentions > 0).then(|| view! { <span class="badge">{ch.mentions}</span> });
-            let live_call = c.active_calls.with(|a| a.contains_key(&ch.id)).then(|| {
+            let live_call = live.then(|| {
                 view! { <span class="sb-call" title=tr().call_live_hint><Icon icon=I::Headphones size=13/></span> }
             });
             let has_draft = !selected.get() && c.drafts.with(|d| d.get(&ch.id).is_some_and(|t| !t.trim().is_empty()));
