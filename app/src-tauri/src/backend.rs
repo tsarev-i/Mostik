@@ -495,7 +495,7 @@ pub async fn send_message(
     let resp = push(&live, msg).await?;
     let ts = resp
         .pointer("/MessageInfo/TimestampMcs")
-        .and_then(Value::as_u64)
+        .and_then(convert::uint)
         .ok_or("Telemost did not return the message time")?;
     Ok(Message {
         chat_id: ChatId(chat_id),
@@ -507,7 +507,7 @@ pub async fn send_message(
         important: false,
         reactions: vec![],
         thread: None,
-        seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(Value::as_u64).unwrap_or(0),
+        seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
         attachments: vec![],
         forwarded: vec![],
         call: None,
@@ -1636,7 +1636,7 @@ pub async fn chat_details(state: tauri::State<'_, AppState>, chat_id: String) ->
         name: text("name"),
         description: text("description"),
         role: text("role"),
-        member_count: info.get("members_count").and_then(Value::as_u64).unwrap_or(0),
+        member_count: info.get("members_count").and_then(convert::uint).unwrap_or(0),
     })
 }
 
@@ -1858,7 +1858,7 @@ pub async fn update_chat(
         name: text("name"),
         description: text("description"),
         role: text("role"),
-        member_count: info.get("members_count").and_then(Value::as_u64).unwrap_or(0),
+        member_count: info.get("members_count").and_then(convert::uint).unwrap_or(0),
     })
 }
 
@@ -2065,9 +2065,9 @@ pub async fn forward_message(
     Ok(Sent {
         ts: resp
             .pointer("/MessageInfo/TimestampMcs")
-            .and_then(Value::as_u64)
+            .and_then(convert::uint)
             .ok_or("Telemost did not return the message time")?,
-        seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(Value::as_u64).unwrap_or(0),
+        seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
     })
 }
 
@@ -2167,7 +2167,7 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<mostik_core::Chat> {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_u64)
+            .filter_map(convert::uint)
             .collect(),
     })
 }
@@ -2333,7 +2333,7 @@ async fn send_plain(
     let resp = push(live, msg.clone()).await?;
     let ts = resp
         .pointer("/MessageInfo/TimestampMcs")
-        .and_then(Value::as_u64)
+        .and_then(convert::uint)
         .ok_or("Telemost did not return the message time")?;
     let fake = json!({ "ClientMessage": msg, "ServerMessageInfo": { "Timestamp": ts, "From": { "Guid": live.me.0 } } });
     let mut m = match convert::from_push(&fake, Some(&live.me)) {
@@ -2829,7 +2829,7 @@ async fn connect_inner(
         .flatten()
         .filter_map(|o| {
             Some(mostik_core::Organization {
-                id: o.get("OrganizationId")?.as_u64()?,
+                id: o.get("OrganizationId").and_then(convert::uint)?,
                 name: o
                     .get("OrganizationName")
                     .and_then(Value::as_str)

@@ -14,8 +14,19 @@ fn s<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
 }
 
 fn n(v: &Value, path: &[&str]) -> Option<u64> {
-    let x = path.iter().try_fold(v, |v, k| v.get(*k))?;
-    x.as_u64().or_else(|| x.as_f64().map(|f| f as u64))
+    uint(path.iter().try_fold(v, |v, k| v.get(*k))?)
+}
+
+/// The largest integer JavaScript holds exactly (`Number.MAX_SAFE_INTEGER`).
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+/// A whole number from a response, at most [`MAX_SAFE_INTEGER`]: the UI reads integers as
+/// JavaScript numbers, and one larger value would fail the whole object it is in (an event, a
+/// history page, the snapshot). Real times, numbers and sizes are far below it; a negative or
+/// fractional one becomes 0 or is rounded down.
+pub fn uint(v: &Value) -> Option<u64> {
+    let x = v.as_u64().or_else(|| v.as_f64().map(|f| f as u64))?;
+    Some(x.min(MAX_SAFE_INTEGER))
 }
 
 /// Thread chat for message `ts` of chat `chat_id`: `0/<ns>/<uuid>` → `100/<ns>/<uuid>_<ts>`.
@@ -483,7 +494,7 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(Value::as_u64)
+                .filter_map(uint)
                 .collect(),
         });
     }
@@ -716,7 +727,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
         && let Some(list) = diff.get("PinnedMessageTimestamps")
     {
         let chat = s(&cm["SystemMessage"], &["ChatId"])?;
-        let ts = list.as_array().and_then(|l| l.iter().filter_map(Value::as_u64).max());
+        let ts = list.as_array().and_then(|l| l.iter().filter_map(uint).max());
         return Some(LiveEvent::Pinned {
             chat_id: ChatId(chat.to_owned()),
             ts,
@@ -872,7 +883,7 @@ pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_u64)
+            .filter_map(uint)
             .collect(),
     };
     Some(Chat {
@@ -1815,6 +1826,24 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn numbers_the_ui_cannot_hold_are_clamped() {
+        assert_eq!(uint(&json!(u64::MAX)), Some(MAX_SAFE_INTEGER));
+        assert_eq!(uint(&json!(1e300)), Some(MAX_SAFE_INTEGER));
+        assert_eq!(uint(&json!(1_700_000_000_000_000_u64)), Some(1_700_000_000_000_000));
+        assert_eq!(uint(&json!(-5)), Some(0));
+        assert_eq!(uint(&json!(2.9)), Some(2));
+        assert_eq!(uint(&json!("7")), None);
+        let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Gallery": {"Text": "", "Items": [
+            {"Image": {"FileInfo": {"Id2": "disk/x1", "Name": "a.png", "Size": u64::MAX}, "Width": 8, "Height": 6}}]}}},
+            "ServerMessageInfo": {"Timestamp": u64::MAX, "SeqNo": 1e20, "From": {"Guid": "u"}}});
+        let Some(LiveEvent::Upsert { message, .. }) = from_push(&v, None) else {
+            panic!("not a message")
+        };
+        assert_eq!((message.ts, message.seq_no), (MAX_SAFE_INTEGER, MAX_SAFE_INTEGER));
+        assert_eq!(message.attachments[0].size, MAX_SAFE_INTEGER);
     }
 
     #[test]

@@ -177,7 +177,7 @@ fn u64_list(v: Option<&Value>) -> Vec<u64> {
     v.and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_u64)
+        .filter_map(convert::uint)
         .collect()
 }
 
