@@ -7,6 +7,8 @@
 //! `@First Last` for people (how older Mostik versions wrote them), `@<name>` for public group
 //! chats (a group mention, like user groups in Slack) and `@all` for everyone in the chat.
 
+use std::ops::Range;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inline {
     Text(String),
@@ -49,7 +51,7 @@ pub struct Mentionable<'a> {
 
 impl Mentionable<'_> {
     /// Name of the person with Telemost id `id`, if known.
-    pub fn name_of(&self, id: &str) -> Option<&str> {
+    fn name_of(&self, id: &str) -> Option<&str> {
         self.ids
             .iter()
             .find(|(i, n)| *i == id && !n.is_empty() && *n != id)
@@ -109,7 +111,7 @@ fn ends_word(rest: &str) -> bool {
 const GUID_LEN: usize = 36;
 
 /// Whether `s` is a Telemost user id.
-pub fn is_guid(s: &str) -> bool {
+fn is_guid(s: &str) -> bool {
     s.len() == GUID_LEN
         && s.bytes().enumerate().all(|(i, b)| match i {
             8 | 13 | 18 | 23 => b == b'-',
@@ -249,7 +251,9 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
     out
 }
 
-fn safe_url(url: &str) -> bool {
+/// Whether a link from someone else's text may open: only `http`, `https` and `mailto`, so files
+/// and other schemes do not, and nothing that hides whitespace or control characters.
+pub fn safe_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     (lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:"))
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -267,6 +271,133 @@ fn md_link(s: &str) -> Option<(String, String, usize)> {
     let end = tail.find(')')?;
     let url = &tail[..end];
     safe_url(url).then(|| (text.to_owned(), url.to_owned(), 1 + close + 2 + end + 1))
+}
+
+/// A `[caption](address)` link in the text of the message field, in bytes of that text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpan {
+    /// The whole markup, from `[` to `)`.
+    pub range: Range<usize>,
+    /// The caption between the brackets.
+    pub caption: Range<usize>,
+    pub address: String,
+}
+
+/// The link whose caption holds bytes `start..end` of `text`, edges included: the link the caret
+/// or the selection is in. Links inside other markup are not found, as [`edit_spans`] shows them as text.
+pub fn link_at(text: &str, start: usize, end: usize) -> Option<LinkSpan> {
+    let mut at = 0;
+    for span in edit_spans(text) {
+        let EditSpan::Marked {
+            kind,
+            open,
+            inner,
+            close,
+        } = span
+        else {
+            at += span_len(&span);
+            continue;
+        };
+        let caption = at + open.len()..at + open.len() + inner.len();
+        let range = at..caption.end + close.len();
+        if kind == Mark::Link && caption.start <= start && end <= caption.end {
+            let address = close.strip_prefix("](")?.strip_suffix(')')?.to_owned();
+            return Some(LinkSpan {
+                range,
+                caption,
+                address,
+            });
+        }
+        at = range.end;
+    }
+    None
+}
+
+fn span_len(span: &EditSpan) -> usize {
+    match span {
+        EditSpan::Plain(t) => t.len(),
+        EditSpan::Marked { open, inner, close, .. } => open.len() + inner.len() + close.len(),
+    }
+}
+
+/// A link address typed by hand, made fit for `[caption](address)`: `https://` is added when it
+/// has no scheme (`mailto:` for an e-mail address), and brackets and spaces are percent-encoded,
+/// as the markup ends the address at the first `)`. `None` when it is empty or not a web or
+/// mail address.
+pub fn link_address(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    let lower = typed.to_ascii_lowercase();
+    let full = if ["http://", "https://", "mailto:"].iter().any(|s| lower.starts_with(s)) {
+        typed.to_owned()
+    } else if has_scheme(typed) {
+        return None;
+    } else if typed.contains('@') && !typed.contains(['/', ':']) {
+        format!("mailto:{typed}")
+    } else {
+        format!("https://{typed}")
+    };
+    let mut out = String::with_capacity(full.len());
+    for c in full.chars() {
+        if c == '(' || c == ')' || c.is_whitespace() || c.is_control() {
+            let mut buf = [0; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    let bare = out.split_once(':').map_or("", |(_, rest)| rest.trim_start_matches('/'));
+    (safe_url(&out) && !bare.is_empty()).then_some(out)
+}
+
+/// Whether `s` starts with a URL scheme (`ftp:`, `javascript:`), not a host and port (`localhost:8080`).
+fn has_scheme(s: &str) -> bool {
+    s.split_once(':').is_some_and(|(scheme, rest)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+            && !rest.starts_with(|c: char| c.is_ascii_digit())
+    })
+}
+
+/// An address from [`link_address`] as the user typed it: the brackets and spaces it encoded
+/// shown as they are.
+pub fn typed_address(address: &str) -> String {
+    let mut out = String::with_capacity(address.len());
+    let mut rest = address;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let code = rest.get(i + 1..i + 3).unwrap_or_default();
+        match code.to_ascii_uppercase().as_str() {
+            "28" => out.push('('),
+            "29" => out.push(')'),
+            "20" => out.push(' '),
+            _ => {
+                out.push('%');
+                rest = &rest[i + 1..];
+                continue;
+            }
+        }
+        rest = &rest[i + 3..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Clipboard text that is one web or mail address (`http(s)://…`, `mailto:…`), as an address for
+/// [`link_markup`].
+pub fn pasted_link(text: &str) -> Option<String> {
+    let text = text.trim();
+    safe_url(text).then(|| link_address(text)).flatten()
+}
+
+/// `[caption](address)` for an address from [`link_address`]; `None` when `caption` cannot be a
+/// link caption (empty, several lines, a `[`).
+pub fn link_markup(caption: &str, address: &str) -> Option<String> {
+    let markup = format!("[{caption}]({address})");
+    md_link(&markup)
+        .is_some_and(|(_, _, len)| len == markup.len())
+        .then_some(markup)
 }
 
 /// Bare `http(s)://…` link up to whitespace; trailing punctuation is not part of the link.
@@ -292,12 +423,14 @@ fn bare_link(s: &str) -> Option<usize> {
 
 type MakeInline = fn(String) -> Inline;
 
-const PAIRS: &[(&str, MakeInline)] = &[
-    ("`", Inline::Code),
-    ("**", Inline::Bold),
-    ("__", Inline::Italic),
-    ("~~", Inline::Strike),
-    ("++", Inline::Underline),
+/// Markers that enclose inline markup, the same in a message and in its field: what each one is
+/// in the field and the span it makes in a message.
+const PAIRS: &[(&str, Mark, MakeInline)] = &[
+    ("`", Mark::Code, Inline::Code),
+    ("**", Mark::Bold, Inline::Bold),
+    ("__", Mark::Italic, Inline::Italic),
+    ("~~", Mark::Strike, Inline::Strike),
+    ("++", Mark::Underline, Inline::Underline),
 ];
 
 /// Splits a text block into inline spans; `who` is what can be mentioned.
@@ -306,7 +439,7 @@ pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
     let mut plain = String::new();
     let mut rest = text;
     'outer: while !rest.is_empty() {
-        for (marker, make) in PAIRS {
+        for (marker, _, make) in PAIRS {
             if let Some(after) = rest.strip_prefix(marker)
                 && let Some(end) = after.find(marker)
                 && end > 0
@@ -376,16 +509,12 @@ pub enum Mark {
     Link,
 }
 
-const EDIT_PAIRS: &[(&str, Mark)] = &[
-    ("`", Mark::Code),
-    ("**", Mark::Bold),
-    ("__", Mark::Italic),
-    ("~~", Mark::Strike),
-    ("++", Mark::Underline),
-];
-
 /// Splits the text of the message field into plain text and marked spans, the same markup as
 /// [`parse_blocks`] and [`parse_inline`] read.
+///
+/// The markers of a code block take the line breaks a message drops around its code: after the
+/// opening fence, before the closing one and after it, so the block shown in the field neither
+/// starts nor ends with an empty line. A break that is all the block holds stays in it.
 pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
     let mut out = Vec::new();
     let mut plain_start = 0;
@@ -396,23 +525,25 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
         if let Some(after) = rest.strip_prefix("```")
             && let Some(end) = after.find("```")
         {
-            found = Some((Mark::CodeBlock, "```", end, "```"));
+            let body = &after[..end];
+            let lead = usize::from(body.len() > 1 && body.starts_with('\n'));
+            let trail = usize::from(body.len() - lead > 1 && body.ends_with('\n'));
+            let next = usize::from(after[end + 3..].starts_with('\n'));
+            found = Some((Mark::CodeBlock, 3 + lead, end - lead - trail, trail + 3 + next));
         }
         if found.is_none() {
-            for (marker, kind) in EDIT_PAIRS {
+            for (marker, kind, _) in PAIRS {
                 if let Some(after) = rest.strip_prefix(marker)
                     && let Some(end) = after.find(marker)
                     && end > 0
                 {
-                    found = Some((*kind, *marker, end, *marker));
+                    found = Some((*kind, marker.len(), end, marker.len()));
                     break;
                 }
             }
         }
-        let span = match found {
-            Some((kind, open, end, close)) => Some((kind, open, &rest[open.len()..open.len() + end], close)),
-            None => md_link(rest).map(|(t, _, len)| (Mark::Link, "[", &rest[1..1 + t.len()], &rest[1 + t.len()..len])),
-        };
+        // Lengths in bytes of the opening marker, the text and the closing marker.
+        let span = found.or_else(|| md_link(rest).map(|(t, _, len)| (Mark::Link, 1, t.len(), len - 1 - t.len())));
         let Some((kind, open, inner, close)) = span else {
             i += rest.chars().next().map_or(1, char::len_utf8);
             continue;
@@ -420,15 +551,13 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
         if plain_start < i {
             out.push(EditSpan::Plain(&text[plain_start..i]));
         }
-        let open = &rest[..open.len()];
-        let close = &rest[open.len() + inner.len()..open.len() + inner.len() + close.len()];
         out.push(EditSpan::Marked {
             kind,
-            open,
-            inner,
-            close,
+            open: &rest[..open],
+            inner: &rest[open..open + inner],
+            close: &rest[open + inner..open + inner + close],
         });
-        i += open.len() + inner.len() + close.len();
+        i += open + inner + close;
         plain_start = i;
     }
     if plain_start < text.len() {
@@ -509,6 +638,7 @@ mod tests {
         for text in [
             "a **b** c __d__ ~~e~~ ++f++ `g` [h](https://x.y) i",
             "```\nfn x() {}\n``` after",
+            "a\n```\nx\n\n```\nb ```\n``` ``````",
             "**** ** unclosed __x",
             "Привет, **мир** 👋",
             "",
@@ -547,6 +677,115 @@ mod tests {
             }
         );
         assert_eq!(edit_spans("****"), vec![EditSpan::Plain("****")]);
+    }
+
+    #[test]
+    fn code_block_markers_take_its_line_breaks() {
+        let block = |open, inner, close| EditSpan::Marked {
+            kind: Mark::CodeBlock,
+            open,
+            inner,
+            close,
+        };
+        assert_eq!(
+            edit_spans("a\n```\nlet x;\n```\nb"),
+            vec![
+                EditSpan::Plain("a\n"),
+                block("```\n", "let x;", "\n```\n"),
+                EditSpan::Plain("b")
+            ]
+        );
+        // An empty line typed at the end of the code stays in it.
+        assert_eq!(edit_spans("```\nx\n\n```"), vec![block("```\n", "x\n", "\n```")]);
+        // A block of one empty line (the button with nothing selected) keeps it for the caret.
+        assert_eq!(edit_spans("```\n\n```"), vec![block("```\n", "\n", "```")]);
+        assert_eq!(edit_spans("```\n```"), vec![block("```", "\n", "```")]);
+        assert_eq!(
+            edit_spans("```a``` b"),
+            vec![block("```", "a", "```"), EditSpan::Plain(" b")]
+        );
+    }
+
+    #[test]
+    fn finds_the_link_around_the_caret() {
+        let text = "see [the docs](https://e.org/a%28b%29) now";
+        let link = link_at(text, 9, 9).unwrap();
+        assert_eq!(&text[link.range.clone()], "[the docs](https://e.org/a%28b%29)");
+        assert_eq!(&text[link.caption.clone()], "the docs");
+        assert_eq!(link.address, "https://e.org/a%28b%29");
+        // The edges of the caption count, the markers and the text around do not.
+        assert_eq!(link_at(text, 5, 13).map(|l| l.caption), Some(5..13));
+        assert_eq!(link_at(text, 4, 4), None);
+        assert_eq!(link_at(text, 2, 9), None);
+        assert_eq!(link_at("**[a](https://e.org)**", 4, 4), None);
+    }
+
+    #[test]
+    fn link_addresses() {
+        assert_eq!(
+            link_address(" example.com/x ").as_deref(),
+            Some("https://example.com/x")
+        );
+        assert_eq!(link_address("HTTP://E.org").as_deref(), Some("HTTP://E.org"));
+        assert_eq!(
+            link_address("https://en.wikipedia.org/wiki/Rust_(language) x").as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust_%28language%29%20x")
+        );
+        assert_eq!(
+            link_address("anna.smirnova@example.com").as_deref(),
+            Some("mailto:anna.smirnova@example.com")
+        );
+        assert_eq!(
+            link_address("localhost:8080/a").as_deref(),
+            Some("https://localhost:8080/a")
+        );
+        assert_eq!(link_address(""), None);
+        assert_eq!(link_address("https://"), None);
+        assert_eq!(link_address("ftp://e.org"), None);
+        assert_eq!(link_address("javascript:alert(1)"), None);
+        let typed = "https://e.org/a (b)%2F";
+        assert_eq!(typed_address(&link_address(typed).unwrap()), typed);
+        assert_eq!(typed_address("https://e.org/%2"), "https://e.org/%2");
+        // The markup keeps an encoded address whole.
+        let markup = link_markup("Rust", &link_address("https://e.org/a_(b)").unwrap()).unwrap();
+        assert_eq!(
+            parse_inline(&markup, &NONE),
+            vec![Link {
+                text: "Rust".into(),
+                url: "https://e.org/a_%28b%29".into()
+            }]
+        );
+        assert_eq!(link_markup("a [b]", "https://e.org"), None);
+        assert_eq!(link_markup("two\nlines", "https://e.org"), None);
+        assert_eq!(link_markup("", "https://e.org"), None);
+        assert_eq!(
+            pasted_link(" https://e.org/(x)\n").as_deref(),
+            Some("https://e.org/%28x%29")
+        );
+        assert_eq!(
+            pasted_link("mailto:olga@example.com").as_deref(),
+            Some("mailto:olga@example.com")
+        );
+        assert_eq!(pasted_link("e.org"), None);
+        assert_eq!(pasted_link("https://e.org and more"), None);
+    }
+
+    #[test]
+    fn only_web_and_mail_links_are_safe() {
+        for ok in ["https://e.org/a?b=1", "HTTP://E.ORG", "mailto:olga@example.com"] {
+            assert!(safe_url(ok), "{ok}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "ftp://e.org",
+            "e.org",
+            "https://e.org/a b",
+            "https://e.org/\u{0}",
+            " https://e.org",
+        ] {
+            assert!(!safe_url(bad), "{bad}");
+        }
     }
 
     use super::Inline::*;

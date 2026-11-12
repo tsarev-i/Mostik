@@ -4,8 +4,10 @@
 //! Changing the language re-renders the whole workspace, so
 //! components read strings non-reactively via [`tr`].
 
-use mostik_core::NotifyLevel;
+use mostik_core::{NotifyLevel, SystemNote, UserId};
 use serde::{Deserialize, Serialize};
+
+use crate::settings::{SidebarFilter, SidebarSort};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Lang {
@@ -49,6 +51,7 @@ pub struct Tr {
     pub drag_to_resize: &'static str,
     pub connecting: &'static str,
     pub finish_login: &'static str,
+    pub signing_out: &'static str,
     pub offline: &'static str,
     pub you_short: &'static str,
     pub someone: &'static str,
@@ -113,6 +116,8 @@ pub struct Tr {
     pub link_copied: &'static str,
     pub copy_link: &'static str,
     pub mark_unread: &'static str,
+    /// After the time in its hover tip: an own message someone has read.
+    pub read_mark: &'static str,
     /// Heading of a chat's notification choices in its menu.
     pub notify_label: &'static str,
     pub notify_all: &'static str,
@@ -168,6 +173,9 @@ pub struct Tr {
     pub intro_channel: &'static str,
     pub today: &'static str,
     pub yesterday: &'static str,
+    /// "today" and "yesterday" inside a sentence: "today at 10:41".
+    pub today_in_text: &'static str,
+    pub yesterday_in_text: &'static str,
     pub edited: &'static str,
     pub important: &'static str,
     pub add_reaction: &'static str,
@@ -196,6 +204,9 @@ pub struct Tr {
     pub reply_deleted: &'static str,
     pub copy_name: &'static str,
     pub view_channel_details: &'static str,
+    pub channel_details: &'static str,
+    pub copy_menu: &'static str,
+    pub copy_call_link: &'static str,
     pub view_full_profile: &'static str,
     pub edit: &'static str,
     pub delete_message: &'static str,
@@ -210,6 +221,11 @@ pub struct Tr {
     pub fmt_link: &'static str,
     pub fmt_code: &'static str,
     pub fmt_code_block: &'static str,
+    pub link_add: &'static str,
+    pub link_edit: &'static str,
+    pub link_text: &'static str,
+    pub link_address: &'static str,
+    pub link_remove: &'static str,
     pub hint_shift_enter: &'static str,
     pub hint_ctrl_enter: &'static str,
     pub send: &'static str,
@@ -285,7 +301,9 @@ pub struct Tr {
     pub filter: &'static str,
     pub sort: &'static str,
     pub delete_section: &'static str,
-    pub move_to_section: &'static str,
+    pub move_channel: &'static str,
+    pub move_chat: &'static str,
+    pub move_to: &'static str,
     pub section_name: &'static str,
     pub section_name_ph: &'static str,
     pub section_emoji: &'static str,
@@ -329,6 +347,8 @@ pub struct Tr {
     pub p_when_view: &'static str,
     pub p_read_on_open: &'static str,
     pub p_leave_unread: &'static str,
+    pub p_read_receipts: &'static str,
+    pub p_show_read_receipts: &'static str,
     pub p_enter_to: &'static str,
     pub p_enter_send: &'static str,
     pub p_enter_newline: &'static str,
@@ -435,6 +455,7 @@ pub static RU: Tr = Tr {
     drag_to_resize: "Потяните, чтобы изменить ширину",
     connecting: "Подключаемся к Телемосту…",
     finish_login: "Завершите вход в окне Яндекс ID…",
+    signing_out: "Выходим из аккаунта…",
     offline: "Нет соединения с Телемостом. Переподключаемся…",
     you_short: "вы",
     someone: "Кто-то",
@@ -496,6 +517,7 @@ pub static RU: Tr = Tr {
     link_copied: "Ссылка скопирована",
     copy_link: "Копировать ссылку",
     mark_unread: "Пометить непрочитанным",
+    read_mark: "(прочитано)",
     notify_label: "Уведомления",
     notify_all: "Все сообщения",
     notify_mentions: "Только упоминания",
@@ -547,6 +569,8 @@ pub static RU: Tr = Tr {
     intro_channel: "Это самое начало канала.",
     today: "Сегодня",
     yesterday: "Вчера",
+    today_in_text: "сегодня",
+    yesterday_in_text: "вчера",
     edited: "(изменено)",
     important: "Важное",
     add_reaction: "Добавить реакцию",
@@ -585,6 +609,9 @@ pub static RU: Tr = Tr {
     reply_deleted: "Сообщение удалено",
     copy_name: "Копировать название",
     view_channel_details: "Открыть сведения о канале",
+    channel_details: "Сведения о канале",
+    copy_menu: "Копировать",
+    copy_call_link: "Копировать ссылку на звонок",
     view_full_profile: "Открыть полный профиль",
     edit: "Изменить",
     delete_message: "Удалить сообщение",
@@ -598,6 +625,11 @@ pub static RU: Tr = Tr {
     fmt_link: "Ссылка",
     fmt_code: "Код",
     fmt_code_block: "Блок кода",
+    link_add: "Добавить ссылку",
+    link_edit: "Изменить ссылку",
+    link_text: "Текст",
+    link_address: "Ссылка",
+    link_remove: "Убрать ссылку",
     hint_shift_enter: "Shift+Enter — новая строка",
     hint_ctrl_enter: "Ctrl+Enter — отправить",
     send: "Отправить",
@@ -670,7 +702,9 @@ pub static RU: Tr = Tr {
     filter: "Фильтр",
     sort: "Сортировка",
     delete_section: "Удалить раздел",
-    move_to_section: "Переместить в раздел",
+    move_channel: "Переместить канал",
+    move_chat: "Переместить чат",
+    move_to: "Переместить в…",
     section_name: "Название",
     section_name_ph: "Например, «Проекты»",
     section_emoji: "Выбрать эмодзи",
@@ -712,6 +746,8 @@ pub static RU: Tr = Tr {
     p_when_view: "Когда я открываю чат",
     p_read_on_open: "Отмечать его прочитанным",
     p_leave_unread: "Оставлять непрочитанные сообщения непрочитанными",
+    p_read_receipts: "Отметки о прочтении",
+    p_show_read_receipts: "Показывать отметки о прочтении",
     p_enter_to: "При наборе сообщения Enter…",
     p_enter_send: "Отправляет сообщение",
     p_enter_newline: "Начинает новую строку (отправка — Ctrl+Enter)",
@@ -822,6 +858,7 @@ pub static EN: Tr = Tr {
     drag_to_resize: "Drag to resize",
     connecting: "Connecting to Telemost…",
     finish_login: "Finish signing in in the Yandex ID window…",
+    signing_out: "Signing out…",
     offline: "No connection to Telemost. Reconnecting…",
     you_short: "you",
     someone: "Someone",
@@ -883,6 +920,7 @@ pub static EN: Tr = Tr {
     link_copied: "Link copied",
     copy_link: "Copy link",
     mark_unread: "Mark unread",
+    read_mark: "(read)",
     notify_label: "Notifications",
     notify_all: "All messages",
     notify_mentions: "Mentions only",
@@ -934,6 +972,8 @@ pub static EN: Tr = Tr {
     intro_channel: "This is the very beginning of the channel.",
     today: "Today",
     yesterday: "Yesterday",
+    today_in_text: "today",
+    yesterday_in_text: "yesterday",
     edited: "(edited)",
     important: "Important",
     add_reaction: "Add reaction",
@@ -972,6 +1012,9 @@ pub static EN: Tr = Tr {
     reply_deleted: "Message deleted",
     copy_name: "Copy name",
     view_channel_details: "View channel details",
+    channel_details: "Channel details",
+    copy_menu: "Copy",
+    copy_call_link: "Copy call link",
     view_full_profile: "View full profile",
     edit: "Edit message",
     delete_message: "Delete message",
@@ -985,6 +1028,11 @@ pub static EN: Tr = Tr {
     fmt_link: "Link",
     fmt_code: "Code",
     fmt_code_block: "Code block",
+    link_add: "Add link",
+    link_edit: "Edit link",
+    link_text: "Text",
+    link_address: "Link",
+    link_remove: "Remove link",
     hint_shift_enter: "Shift+Enter to add a new line",
     hint_ctrl_enter: "Ctrl+Enter to send",
     send: "Send now",
@@ -1057,7 +1105,9 @@ pub static EN: Tr = Tr {
     filter: "Filter",
     sort: "Sort",
     delete_section: "Delete section",
-    move_to_section: "Move to section",
+    move_channel: "Move channel",
+    move_chat: "Move conversation",
+    move_to: "Move to…",
     section_name: "Name",
     section_name_ph: "For example, “Projects”",
     section_emoji: "Choose an emoji",
@@ -1099,6 +1149,8 @@ pub static EN: Tr = Tr {
     p_when_view: "When I view a chat",
     p_read_on_open: "Mark it as read",
     p_leave_unread: "Leave unseen messages unread",
+    p_read_receipts: "Read receipts",
+    p_show_read_receipts: "Show read receipts",
     p_enter_to: "When writing a message, press Enter to…",
     p_enter_send: "Send the message",
     p_enter_newline: "Start a new line (use Ctrl+Enter to send)",
@@ -1250,6 +1302,23 @@ impl Tr {
         }
     }
 
+    pub fn sidebar_filter(&self, filter: SidebarFilter) -> &'static str {
+        match filter {
+            SidebarFilter::Active => self.f_active,
+            SidebarFilter::Unreads => self.f_unreads,
+            SidebarFilter::Mentions => self.f_mentions,
+            SidebarFilter::All => self.f_all,
+        }
+    }
+
+    pub fn sidebar_sort(&self, sort: SidebarSort) -> &'static str {
+        match sort {
+            SidebarSort::Alphabetical => self.s_az,
+            SidebarSort::Recency => self.s_recency,
+            SidebarSort::Custom => self.s_custom,
+        }
+    }
+
     pub fn notify_level(&self, level: NotifyLevel) -> &'static str {
         match level {
             NotifyLevel::All => self.notify_all,
@@ -1285,6 +1354,14 @@ impl Tr {
         match self.lang {
             Lang::Ru => format!("Покинуть канал #{channel}?"),
             Lang::En => format!("Leave #{channel}?"),
+        }
+    }
+
+    /// A moment: `day` ("today", a date) at `time`.
+    pub fn day_at(&self, day: &str, time: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{day} в {time}"),
+            Lang::En => format!("{day} at {time}"),
         }
     }
 
@@ -1326,16 +1403,17 @@ impl Tr {
         }
     }
 
+    /// How many people are in a call now.
+    pub fn in_call(&self, n: u32) -> String {
+        match self.lang {
+            Lang::Ru => format!("{n} {} в звонке", ru_plural(n, "человек", "человека", "человек")),
+            Lang::En => format!("{n} in the call"),
+        }
+    }
+
     pub fn members_count(&self, n: u32) -> String {
         match self.lang {
-            Lang::Ru => {
-                let word = match (n % 10, n % 100) {
-                    (1, x) if x != 11 => "участник",
-                    (2..=4, x) if !(12..=14).contains(&x) => "участника",
-                    _ => "участников",
-                };
-                format!("{n} {word}")
-            }
+            Lang::Ru => format!("{n} {}", ru_plural(n, "участник", "участника", "участников")),
             Lang::En => format!("{n} member{}", if n == 1 { "" } else { "s" }),
         }
     }
@@ -1399,31 +1477,83 @@ impl Tr {
                 Lang::En => "you".into(),
             });
         }
-        let and = match self.lang {
-            Lang::Ru => " и ",
-            Lang::En => " and ",
-        };
-        let list = match who.split_last() {
-            Some((last, rest)) if !rest.is_empty() => format!("{}{and}{last}", rest.join(", ")),
-            Some((last, _)) => last.clone(),
-            None => String::new(),
-        };
+        let list = self.list(&who);
         match self.lang {
             Lang::Ru => format!("Отреагировали: {list}"),
             Lang::En => format!("{list} reacted"),
         }
     }
 
+    /// "Anna, Boris and Vera".
+    pub fn list(&self, names: &[String]) -> String {
+        let and = match self.lang {
+            Lang::Ru => " и ",
+            Lang::En => " and ",
+        };
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{}{and}{last}", rest.join(", ")),
+            Some((last, _)) => last.clone(),
+            None => String::new(),
+        }
+    }
+
+    /// What a note about the chat says after the name of its author, as in Slack's "joined
+    /// #channel"; `name` names the people it adds or removes. Russian names are not declined,
+    /// so they follow a colon.
+    pub fn chat_note(&self, note: &SystemNote, author: &UserId, name: impl Fn(&UserId) -> String) -> String {
+        let list = |ids: &[UserId]| self.list(&ids.iter().map(&name).collect::<Vec<_>>());
+        let only_author = |ids: &[UserId]| ids == std::slice::from_ref(author);
+        let ru = self.lang == Lang::Ru;
+        match note {
+            SystemNote::Created { name } => match (ru, mostik_core::split_chat_icon(name).1) {
+                (true, "") => "создал(а) канал".to_owned(),
+                (true, name) => format!("создал(а) канал #{name}"),
+                (false, "") => "created the channel".to_owned(),
+                (false, name) => format!("created #{name}"),
+            },
+            SystemNote::Joined => self.chat_joined(),
+            SystemNote::Left => self.chat_left(),
+            SystemNote::Members { added, removed } if removed.is_empty() && only_author(added) => self.chat_joined(),
+            SystemNote::Members { added, removed } if added.is_empty() && only_author(removed) => self.chat_left(),
+            SystemNote::Members { added, removed } => match (ru, added.is_empty(), removed.is_empty()) {
+                (true, false, true) => format!("добавил(а) в канал: {}", list(added)),
+                (true, true, _) => format!("удалил(а) из канала: {}", list(removed)),
+                (true, false, false) => format!("добавил(а) в канал: {}; удалил(а): {}", list(added), list(removed)),
+                (false, false, true) => format!("added {}", list(added)),
+                (false, true, _) => format!("removed {}", list(removed)),
+                (false, false, false) => format!("added {} and removed {}", list(added), list(removed)),
+            },
+        }
+    }
+
+    fn chat_joined(&self) -> String {
+        match self.lang {
+            Lang::Ru => "присоединился(-ась) к каналу",
+            Lang::En => "joined the channel",
+        }
+        .to_owned()
+    }
+
+    fn chat_left(&self) -> String {
+        match self.lang {
+            Lang::Ru => "покинул(а) канал",
+            Lang::En => "left the channel",
+        }
+        .to_owned()
+    }
+
     /// How long a call lasted, from whole minutes.
     pub fn call_lasted(&self, minutes: u64) -> String {
         let (h, m) = (minutes / 60, minutes % 60);
-        match (self.lang, h) {
-            (Lang::Ru, 0) if m == 0 => "меньше минуты".to_owned(),
-            (Lang::En, 0) if m == 0 => "under a minute".to_owned(),
-            (Lang::Ru, 0) => format!("длился {m} мин"),
-            (Lang::Ru, _) => format!("длился {h} ч {m} мин"),
-            (Lang::En, 0) => format!("lasted {m} min"),
-            (Lang::En, _) => format!("lasted {h} h {m} min"),
+        match (self.lang, h, m) {
+            (Lang::Ru, 0, 0) => "меньше минуты".to_owned(),
+            (Lang::En, 0, 0) => "under a minute".to_owned(),
+            (Lang::Ru, 0, _) => format!("длился {m} мин"),
+            (Lang::Ru, _, 0) => format!("длился {h} ч"),
+            (Lang::Ru, _, _) => format!("длился {h} ч {m} мин"),
+            (Lang::En, 0, _) => format!("lasted {m} min"),
+            (Lang::En, _, 0) => format!("lasted {h} h"),
+            (Lang::En, _, _) => format!("lasted {h} h {m} min"),
         }
     }
 
@@ -1513,6 +1643,8 @@ impl Tr {
     }
 }
 
+/// The Russian word form for `n`: `one` for 1, 21, 101…, `few` for 2–4, 22–24…, `many` for the
+/// rest, 11–14 included.
 fn ru_plural(n: u32, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
     let (m10, m100) = (n % 10, n % 100);
     if m10 == 1 && m100 != 11 {
@@ -1536,6 +1668,69 @@ mod tests {
         assert_eq!(RU.replies(21), "21 ответ");
         assert_eq!(EN.replies(1), "1 reply");
         assert_eq!(EN.replies(2), "2 replies");
+        assert_eq!(RU.in_call(1), "1 человек в звонке");
+        assert_eq!(RU.in_call(3), "3 человека в звонке");
+        assert_eq!(RU.in_call(5), "5 человек в звонке");
+        assert_eq!(EN.in_call(2), "2 in the call");
+        let members = [1, 2, 5, 11, 12, 21, 22, 112].map(|n| RU.members_count(n));
+        assert_eq!(
+            members,
+            [
+                "1 участник",
+                "2 участника",
+                "5 участников",
+                "11 участников",
+                "12 участников",
+                "21 участник",
+                "22 участника",
+                "112 участников"
+            ]
+        );
+        assert_eq!(EN.members_count(1), "1 member");
+        assert_eq!(EN.members_count(21), "21 members");
+    }
+
+    #[test]
+    fn chat_notes() {
+        let id = |s: &str| UserId(s.into());
+        let name = |u: &UserId| format!("<{}>", u.0);
+        let members = |added: &[&str], removed: &[&str]| SystemNote::Members {
+            added: added.iter().map(|a| id(a)).collect(),
+            removed: removed.iter().map(|r| id(r)).collect(),
+        };
+        let me = id("a");
+        assert_eq!(
+            EN.chat_note(&members(&["b", "c", "d"], &[]), &me, name),
+            "added <b>, <c> and <d>"
+        );
+        assert_eq!(
+            RU.chat_note(&members(&["b"], &["c"]), &me, name),
+            "добавил(а) в канал: <b>; удалил(а): <c>"
+        );
+        // Adding or removing oneself is joining or leaving.
+        assert_eq!(EN.chat_note(&members(&["a"], &[]), &me, name), "joined the channel");
+        assert_eq!(RU.chat_note(&members(&[], &["a"]), &me, name), "покинул(а) канал");
+        let created = SystemNote::Created {
+            name: "⚠️|Test".into()
+        };
+        assert_eq!(EN.chat_note(&created, &me, name), "created #Test");
+    }
+
+    #[test]
+    fn moments() {
+        assert_eq!(RU.day_at(RU.today_in_text, "10:41"), "сегодня в 10:41");
+        assert_eq!(EN.day_at(EN.yesterday_in_text, "9:05 AM"), "yesterday at 9:05 AM");
+    }
+
+    #[test]
+    fn call_durations() {
+        assert_eq!(RU.call_lasted(0), "меньше минуты");
+        assert_eq!(EN.call_lasted(0), "under a minute");
+        assert_eq!(RU.call_lasted(42), "длился 42 мин");
+        assert_eq!(RU.call_lasted(60), "длился 1 ч");
+        assert_eq!(EN.call_lasted(120), "lasted 2 h");
+        assert_eq!(RU.call_lasted(61), "длился 1 ч 1 мин");
+        assert_eq!(EN.call_lasted(95), "lasted 1 h 35 min");
     }
 
     #[test]

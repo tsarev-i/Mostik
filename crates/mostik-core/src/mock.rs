@@ -3,11 +3,8 @@
 
 use crate::model::*;
 
-/// 2026-11-09 10:00 MSK.
-const YESTERDAY: Timestamp = 1_794_207_600 * 1_000_000;
-/// 2026-11-10 10:00 MSK.
-const TODAY: Timestamp = 1_794_294_000 * 1_000_000;
 const MIN: Timestamp = 60 * 1_000_000;
+const DAY: Timestamp = 24 * 60 * MIN;
 
 fn uid(s: &str) -> UserId {
     UserId(s.to_owned())
@@ -19,31 +16,20 @@ fn cid(s: &str) -> ChatId {
 
 fn user(id: &str, name: &str, title: &str, presence: Presence) -> User {
     User {
-        id: uid(id),
-        display_name: name.to_owned(),
         title: Some(title.to_owned()),
         presence,
-        status: None,
-        availability: Default::default(),
-        is_robot: false,
-        avatar: None,
+        ..User::named(uid(id), name)
     }
 }
 
-fn chat(id: &str, kind: ChatKind, name: &str, members: u32, unread: u32, mentions: u32) -> Chat {
+fn chat(id: &str, kind: ChatKind, name: &str, members: u32, unread: u32, mentions: u32, last_ts: Timestamp) -> Chat {
     Chat {
-        id: cid(id),
-        kind,
         name: name.to_owned(),
-        description: None,
         member_count: members,
         unread,
         mentions,
-        muted: false,
-        mute_mentions: false,
-        last_ts: TODAY,
-        pinned: None,
-        organizations: vec![],
+        last_ts,
+        ..Chat::new(cid(id), kind)
     }
 }
 
@@ -62,6 +48,8 @@ fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
         attachments: vec![],
         forwarded: vec![],
         call: None,
+        system: None,
+        reads: None,
     }
 }
 
@@ -78,8 +66,19 @@ fn call(chat: &str, ts: Timestamp, author: &str, started: bool) -> Message {
         call: Some(if started {
             CallNote::Started { url }
         } else {
-            CallNote::Ended { url, reason: None }
+            CallNote::Ended {
+                url,
+                reason: None,
+                seconds: None,
+            }
         }),
+        ..msg(chat, ts, author, "")
+    }
+}
+
+fn note(chat: &str, ts: Timestamp, author: &str, system: SystemNote) -> Message {
+    Message {
+        system: Some(system),
         ..msg(chat, ts, author, "")
     }
 }
@@ -100,8 +99,12 @@ fn react(emoji: &str, count: u32, mine: bool) -> Reaction {
     }
 }
 
-/// Demo snapshot: one organization, a few channels, direct chats and a thread.
-pub fn demo() -> Snapshot {
+/// Demo snapshot as of `now` (µs since the Unix epoch): one organization, a few channels,
+/// direct chats and a thread. The day's messages span the last hour and a half, the newest five
+/// minutes old; the rest are from the day before.
+pub fn demo(now: Timestamp) -> Snapshot {
+    let today = now.saturating_sub(80 * MIN);
+    let yesterday = today.saturating_sub(DAY);
     let mut me = user("me", "Ivan Petrov", "Developer", Presence::Online);
     me.status = Some(CustomStatus {
         emoji: "💻".into(),
@@ -118,38 +121,43 @@ pub fn demo() -> Snapshot {
     let vera = user("vera", "Vera Lebedeva", "QA engineer", Presence::Online);
     let gleb = user("gleb", "Gleb Orlov", "Product manager", Presence::Offline);
     let bot = User {
-        id: uid("ci-bot"),
-        display_name: "Build bot".into(),
-        title: None,
         presence: Presence::Online,
-        status: None,
-        availability: Default::default(),
         is_robot: true,
-        avatar: None,
+        ..User::named(uid("ci-bot"), "Build bot")
     };
 
-    let mut general = chat("general", ChatKind::Group { public: true }, "general", 48, 0, 0);
+    let mut general = chat("general", ChatKind::Group { public: true }, "general", 48, 0, 0, today);
     general.description = Some("News and announcements for the whole team".into());
-    let mut dev = chat("dev", ChatKind::Group { public: true }, "dev", 17, 4, 1);
+    let mut dev = chat("dev", ChatKind::Group { public: true }, "dev", 17, 4, 1, today);
     dev.description = Some("Code, reviews and releases".into());
-    let design = chat("design", ChatKind::Group { public: true }, "design", 9, 0, 0);
-    let release = chat("release", ChatKind::Group { public: false }, "release-1-0", 6, 2, 0);
-    let mut random = chat("random", ChatKind::Group { public: true }, "random", 41, 0, 0);
+    let design = chat("design", ChatKind::Group { public: true }, "design", 9, 0, 0, today);
+    let release = chat(
+        "release",
+        ChatKind::Group { public: false },
+        "release-1-0",
+        6,
+        2,
+        0,
+        today,
+    );
+    let mut random = chat("random", ChatKind::Group { public: true }, "random", 41, 0, 0, today);
     random.muted = true;
-    let news = chat("news", ChatKind::Broadcast, "company-news", 312, 1, 0);
-    let dm_anna = chat("dm-anna", ChatKind::Direct { peer: uid("anna") }, "", 2, 1, 1);
-    let dm_boris = chat("dm-boris", ChatKind::Direct { peer: uid("boris") }, "", 2, 0, 0);
-    let notes = chat("notes", ChatKind::Notes, "Notes", 1, 0, 0);
+    let news = chat("news", ChatKind::Broadcast, "company-news", 312, 1, 0, today);
+    let dm_anna = chat("dm-anna", ChatKind::Direct { peer: uid("anna") }, "", 2, 1, 1, today);
+    let mut dm_boris = chat("dm-boris", ChatKind::Direct { peer: uid("boris") }, "", 2, 0, 0, today);
+    // Boris has read up to the user's question, not the message after it.
+    dm_boris.peer_seen_ts = today + 5 * MIN;
+    let notes = chat("notes", ChatKind::Notes, "Notes", 1, 0, 0, today);
     // Meeting chats live in their own Telemost namespace, `0/22/…`.
-    let mut sync = chat(
+    let sync = chat(
         "0/22/weekly-sync",
         ChatKind::Group { public: false },
         "Weekly sync",
         8,
         1,
         0,
+        today + 75 * MIN,
     );
-    sync.last_ts = TODAY + 75 * MIN;
     let demo_call = chat(
         "0/22/release-demo",
         ChatKind::Group { public: false },
@@ -157,6 +165,7 @@ pub fn demo() -> Snapshot {
         12,
         0,
         0,
+        today,
     );
 
     let sections = vec![
@@ -182,7 +191,7 @@ pub fn demo() -> Snapshot {
         },
     ];
 
-    let t_release = TODAY + 12 * MIN;
+    let t_release = today + 12 * MIN;
     let mut release_msg = msg(
         "dev",
         t_release,
@@ -192,21 +201,40 @@ pub fn demo() -> Snapshot {
     release_msg.reactions = vec![react("👍", 3, true), react("🎉", 2, false)];
     release_msg.thread = Some(ThreadSummary {
         reply_count: 3,
-        last_reply_ts: TODAY + 41 * MIN,
+        last_reply_ts: today + 41 * MIN,
         participants: vec![uid("vera"), uid("me"), uid("boris")],
     });
 
     let mut edited = msg(
         "dev",
-        TODAY + 14 * MIN,
+        today + 14 * MIN,
         "boris",
         "Ran the migration on a copy of the production database, it took 40 seconds.",
     );
     edited.edited = true;
 
+    // Read receipts: Vera, Anna and Boris read the user's message, everyone else did not yet.
+    let mut looked = msg(
+        "dev",
+        yesterday + 95 * MIN,
+        "me",
+        "Looked through it, all good. I will pick it up after the login work.",
+    );
+    looked.reads = Some(Reads {
+        count: 5,
+        recent: vec![uid("vera"), uid("anna"), uid("boris")],
+        peer_seen: None,
+    });
+    let mut asked = msg("dm-boris", today + 5 * MIN, "me", "Thanks! Which folder?");
+    asked.reads = Some(Reads {
+        count: 1,
+        recent: vec![uid("boris")],
+        peer_seen: Some(today + 9 * MIN),
+    });
+
     let mut important = msg(
         "dev",
-        TODAY + 63 * MIN,
+        today + 63 * MIN,
         "gleb",
         "@Ivan Petrov please look at the login review before lunch, it blocks the release.",
     );
@@ -216,27 +244,22 @@ pub fn demo() -> Snapshot {
     let messages = vec![
         msg(
             "dev",
-            YESTERDAY + 5 * MIN,
+            yesterday + 5 * MIN,
             "anna",
             "Updated the sidebar mockup: sections now collapse and unread chats are bold.",
         ),
         msg(
             "dev",
-            YESTERDAY + 7 * MIN,
+            yesterday + 7 * MIN,
             "anna",
             "The link is in the channel description.",
         ),
-        msg(
-            "dev",
-            YESTERDAY + 95 * MIN,
-            "me",
-            "Looked through it, all good. I will pick it up after the login work.",
-        ),
+        looked,
         release_msg,
         edited,
         msg(
             "dev",
-            TODAY + 30 * MIN,
+            today + 30 * MIN,
             "ci-bot",
             "Build `main #412` passed: 214 tests, 0 failed.",
         ),
@@ -244,40 +267,58 @@ pub fn demo() -> Snapshot {
         reply(
             "dev",
             t_release,
-            TODAY + 20 * MIN,
+            today + 20 * MIN,
             "vera",
             "Cleared the cache, starting regression testing.",
         ),
         reply(
             "dev",
             t_release,
-            TODAY + 33 * MIN,
+            today + 33 * MIN,
             "me",
             "Everything starts for me, login works.",
         ),
         reply(
             "dev",
             t_release,
-            TODAY + 41 * MIN,
+            today + 41 * MIN,
             "boris",
             "Great, then we release tonight.",
         ),
         msg(
             "general",
-            YESTERDAY + 60 * MIN,
+            yesterday + 60 * MIN,
             "gleb",
             "Release demo on Friday at 16:00. The invite is in the calendar.",
         ),
-        msg("general", TODAY + 2 * MIN, "anna", "Good morning, everyone! ☀️"),
+        msg("general", today + 2 * MIN, "anna", "Good morning, everyone! ☀️"),
         msg(
             "design",
-            YESTERDAY + 200 * MIN,
+            yesterday + 200 * MIN,
             "anna",
             "We picked Lato for the UI, message text is 15/22.",
         ),
+        note(
+            "release",
+            yesterday + 30 * MIN,
+            "gleb",
+            SystemNote::Created {
+                name: "release-1-0".into(),
+            },
+        ),
+        note(
+            "release",
+            yesterday + 31 * MIN,
+            "gleb",
+            SystemNote::Members {
+                added: vec![uid("vera"), uid("boris"), uid("me")],
+                removed: vec![],
+            },
+        ),
+        note("release", today + 40 * MIN, "anna", SystemNote::Joined),
         msg(
             "release",
-            TODAY + 50 * MIN,
+            today + 50 * MIN,
             "vera",
             "Regression passed, filed two minor bugs.",
         ),
@@ -285,7 +326,7 @@ pub fn demo() -> Snapshot {
             forwarded: vec![Forwarded {
                 author: uid("vera"),
                 author_name: "Vera Lebedeva".into(),
-                ts: TODAY + 50 * MIN,
+                ts: today + 50 * MIN,
                 chat_id: Some(cid("release")),
                 text: "Regression passed, filed two minor bugs.".into(),
                 attachments: vec![],
@@ -294,43 +335,45 @@ pub fn demo() -> Snapshot {
             }],
             ..msg(
                 "release",
-                TODAY + 52 * MIN,
+                today + 52 * MIN,
                 "gleb",
                 "Minor ones go into the next patch.",
             )
         },
-        call("design", YESTERDAY + 210 * MIN, "anna", true),
-        call("design", YESTERDAY + 245 * MIN, "anna", false),
-        call("release", TODAY + 55 * MIN, "gleb", true),
-        msg("random", TODAY + 8 * MIN, "boris", "Has anyone seen my cat mug?"),
+        call("design", yesterday + 210 * MIN, "anna", true),
+        call("design", yesterday + 245 * MIN, "anna", false),
+        call("release", today + 55 * MIN, "gleb", true),
+        msg("random", today + 8 * MIN, "boris", "Has anyone seen my cat mug?"),
         msg(
             "news",
-            TODAY + MIN,
+            today + MIN,
             "gleb",
             "From December 1 the office is open until 21:00.",
         ),
         msg(
             "dm-anna",
-            TODAY + 70 * MIN,
+            today + 70 * MIN,
             "anna",
             "@Ivan Petrov hi! Could you send a screenshot of the new channel header?",
         ),
         msg(
             "dm-boris",
-            YESTERDAY + 300 * MIN,
+            yesterday + 300 * MIN,
             "boris",
             "Put the production logs on the shared drive.",
         ),
-        msg("notes", YESTERDAY + 10 * MIN, "me", "Check Yandex ID login on Wayland."),
+        asked,
+        msg("dm-boris", today + 6 * MIN, "me", "Never mind, found it."),
+        msg("notes", yesterday + 10 * MIN, "me", "Check Yandex ID login on Wayland."),
         msg(
             "0/22/weekly-sync",
-            TODAY + 75 * MIN,
+            today + 75 * MIN,
             "vera",
             "Notes from the sync: login review today, release tonight.",
         ),
         msg(
             "0/22/release-demo",
-            YESTERDAY + 62 * MIN,
+            yesterday + 62 * MIN,
             "gleb",
             "The demo plan is in the channel description, questions go here.",
         ),
@@ -352,5 +395,6 @@ pub fn demo() -> Snapshot {
         sections,
         messages,
         folders: vec![],
+        paused: None,
     }
 }

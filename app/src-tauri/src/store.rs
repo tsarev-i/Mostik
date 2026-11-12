@@ -10,6 +10,11 @@ use mostik_yandex::session::CookieJar;
 const SERVICE: &str = "dev.mostik.client";
 const ACCOUNT: &str = "yandex-session";
 
+/// Lets a debug build keep its session under another service name, so that a test copy signs
+/// in with its own account and never reads, rewrites or signs out the session of the copy the
+/// user runs. Release builds ignore it.
+const SERVICE_ENV: &str = "MOSTIK_KEYRING_SERVICE";
+
 /// Longest part in UTF-16 code units: the Credential Manager keeps a password as UTF-16
 /// in a blob of at most 2560 bytes.
 #[cfg(windows)]
@@ -17,19 +22,28 @@ const PART_LEN: usize = 1280;
 #[cfg(not(windows))]
 const PART_LEN: usize = usize::MAX;
 
+/// The service name the session is kept under: [`SERVICE`], or [`SERVICE_ENV`] in a debug build.
+fn service() -> String {
+    std::env::var(SERVICE_ENV)
+        .ok()
+        .filter(|s| cfg!(debug_assertions) && !s.is_empty())
+        .unwrap_or_else(|| SERVICE.to_owned())
+}
+
 /// Saved session, if there is one and it still has the session cookie.
 pub fn load() -> Option<CookieJar> {
-    load_from(SERVICE)
+    load_from(&service())
 }
 
 /// Saves the session in the password store.
 pub fn save(jar: &CookieJar) -> Result<(), String> {
-    save_to(SERVICE, jar)
+    save_to(&service(), jar)
 }
 
-/// Forgets the saved session.
-pub fn delete() {
-    delete_parts(SERVICE, 0);
+/// Forgets the saved session. An error means it is still there: a locked or unreachable
+/// password store would hand it to the next start.
+pub fn delete() -> Result<(), String> {
+    delete_parts(&service(), 0)
 }
 
 fn entry(service: &str, part: usize) -> keyring::Result<keyring::Entry> {
@@ -63,17 +77,19 @@ fn save_to(service: &str, jar: &CookieJar) -> Result<(), String> {
             .map_err(|e| format!("could not save the session to the password store: {e}"))?;
     }
     // Parts left over from a longer session would corrupt the next load.
-    delete_parts(service, parts.len());
-    Ok(())
+    delete_parts(service, parts.len())
 }
 
 /// Deletes the parts from `first` on, up to the first missing one.
-fn delete_parts(service: &str, first: usize) {
+fn delete_parts(service: &str, first: usize) -> Result<(), String> {
     for part in first.. {
-        if entry(service, part).and_then(|e| e.delete_credential()).is_err() {
-            break;
+        match entry(service, part).and_then(|e| e.delete_credential()) {
+            Ok(()) => {}
+            Err(keyring::Error::NoEntry) => break,
+            Err(e) => return Err(format!("could not delete the session from the password store: {e}")),
         }
     }
+    Ok(())
 }
 
 /// Splits `s` into pieces of at most `max` UTF-16 code units, never inside a character.
@@ -141,7 +157,7 @@ mod tests {
         save_to(&service, &short).unwrap();
         assert_eq!(load_from(&service), Some(short));
 
-        delete_parts(&service, 0);
+        delete_parts(&service, 0).unwrap();
         assert_eq!(load_from(&service), None);
     }
 }

@@ -1,0 +1,39 @@
+/* ── Profile ────────────────────────────────────────────────────── */
+
+.face-btn { display: block; border-radius: 8px; }
+.profile { padding: 16px 20px 8px; }
+.profile-photo .avatar {
+  width: 100% !important;
+  height: auto !important;
+  aspect-ratio: 1;
+  max-width: 300px;
+  font-size: 96px !important;
+  border-radius: 12px !important;
+}
+.profile-photo { display: flex; justify-content: center; }
+.profile-name { margin: 16px 0 0; color: var(--text-strong); font-size: 22px; font-weight: 900; }
+.profile-title { margin-top: 2px; color: var(--text); }
+.profile-actions { display: flex; gap: 8px; margin-top: 16px; }
+.profile-actions .btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; }
+.profile-block { padding: 16px 20px; border-top: 1px solid var(--border-soft); }
+.profile-block h3 { margin: 0 0 12px; color: var(--text-strong); font-size: 15px; font-weight: 900; }
+.profile-field { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.pf-icon {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.15);
+  color: var(--text);
+  flex: none;
+}
+.pf-label { font-size: 13px; font-weight: 700; color: var(--text); }
+.pf-value { font-size: 15px; color: var(--text); overflow-wrap: anywhere; }
+.link-text { color: var(--link); }
+.ch-person { display: flex; align-items: center; gap: 4px; padding: 2px 6px; margin-left: -6px; border-radius: 6px; font: inherit; color: inherit; }
+.ch-person:hover { background: rgba(127, 127, 127, 0.15); }
+
+/* ── DMs and “Drafts & sent” ────────────────────────────────────── */
+
+.sb-scroll.hidden { display: none; }

@@ -3,7 +3,7 @@
 //! device. A chat put into a folder leaves its own section; a starred chat stays in "Starred".
 //! The section emoji lives in the folder name, as `⚠️|Test`: Telemost folders have none.
 
-use mostik_core::{Chat, ChatFolder, ChatId, ChatKind, Section, split_chat_icon};
+use mostik_core::{ChatFolder, ChatId, Section, split_chat_icon};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,16 +26,8 @@ const PREFIX: &str = "folder:";
 
 /// Sections kept by an earlier Mostik in `localStorage`; the key is cleared, they move to Telemost.
 pub fn take_local() -> Folders {
-    let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
-        return vec![];
-    };
-    let list = s
-        .get_item(LOCAL_KEY)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default();
-    let _ = s.remove_item(LOCAL_KEY);
+    let list = crate::storage::load(LOCAL_KEY).unwrap_or_default();
+    crate::storage::remove(LOCAL_KEY);
     list
 }
 
@@ -86,23 +78,6 @@ pub fn new_id(folders: &Folders, random: u64) -> String {
         .unwrap_or_default()
 }
 
-/// The Telemost section a chat belongs to by its kind.
-pub fn home_section(ch: &Chat) -> &'static str {
-    match ch.kind {
-        ChatKind::Direct { .. } | ChatKind::Notes => "dms",
-        _ if ch.id.0.starts_with("0/22/") || ch.id.0.starts_with("0/32/") => "meetings",
-        _ => "channels",
-    }
-}
-
-/// The folder's name with its emoji, for menus.
-pub fn label(f: &Folder) -> String {
-    match &f.emoji {
-        Some(e) => format!("{e} {}", f.name),
-        None => f.name.clone(),
-    }
-}
-
 /// The folder the chat is in.
 pub fn folder_of<'a>(folders: &'a Folders, chat: &ChatId) -> Option<&'a Folder> {
     folders.iter().find(|f| f.chats.contains(chat))
@@ -130,11 +105,10 @@ pub fn arrange(sections: &[Section], folders: &Folders) -> Vec<Section> {
                 .collect(),
         }
     }));
-    out.extend(sections.iter().filter(|s| s.id != "starred").map(|s| Section {
-        id: s.id.clone(),
-        title: s.title.clone(),
-        chats: s.chats.iter().filter(|id| !filed(id)).cloned().collect(),
-    }));
+    for s in sections.iter().filter(|s| s.id != "starred") {
+        let chats: Vec<ChatId> = s.chats.iter().filter(|id| !filed(id)).cloned().collect();
+        out.push(Section { chats, ..s.clone() });
+    }
     out
 }
 
@@ -164,6 +138,7 @@ pub fn reorder(folders: &mut Folders, id: &str, shown: &[ChatId]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mostik_core::{Chat, ChatKind};
 
     #[test]
     fn section_emoji_lives_in_the_folder_name() {
@@ -231,6 +206,34 @@ mod tests {
         );
         assert_eq!(out[1].title, "FOLDER:1");
         assert_eq!(arrange(&sections, &vec![]), sections);
+    }
+
+    #[test]
+    fn group_calls_are_meeting_chats() {
+        let sections = vec![
+            section("channels", &["a"]),
+            section("meetings", &["0/22/m", "0/58/g1", "0/58/g2"]),
+        ];
+        // A group call put into a folder stays there.
+        let folders = vec![folder("folder:1", &["0/58/g2"])];
+        let got: Vec<(String, Vec<ChatId>)> = arrange(&sections, &folders)
+            .into_iter()
+            .map(|s| (s.id, s.chats))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("folder:1".into(), ids(&["0/58/g2"])),
+                ("channels".into(), ids(&["a"])),
+                ("meetings".into(), ids(&["0/22/m", "0/58/g1"])),
+            ]
+        );
+        let chat = |id: &str| Chat {
+            member_count: 3,
+            ..Chat::new(ChatId(id.into()), ChatKind::Group { public: false })
+        };
+        assert_eq!(chat("0/58/g1").home_section(), "meetings");
+        assert_eq!(chat("0/0/a").home_section(), "channels");
     }
 
     #[test]

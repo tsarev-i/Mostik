@@ -90,10 +90,7 @@ pub fn traffic_log(mut record: Value) {
     let Some(path) = std::env::var_os("MOSTIK_PUSH_LOG") else {
         return;
     };
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-    record["t"] = json!(t);
+    record["t"] = json!(crate::clock::now_ms());
     // Several threads log at once: one lock and one write per line keep the lines whole.
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let line = format!("{record}\n");

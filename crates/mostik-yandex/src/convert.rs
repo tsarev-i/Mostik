@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use mostik_core::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 fn s<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -14,13 +14,19 @@ fn s<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
 }
 
 fn n(v: &Value, path: &[&str]) -> Option<u64> {
-    let x = path.iter().try_fold(v, |v, k| v.get(*k))?;
-    x.as_u64().or_else(|| x.as_f64().map(|f| f as u64))
+    uint(path.iter().try_fold(v, |v, k| v.get(*k))?)
 }
 
-/// Telemost meeting chat: namespaces 22 and 32 (`namespace_aliases.telemost` in config.json).
-pub fn is_meeting_chat(chat_id: &str) -> bool {
-    chat_id.starts_with("0/22/") || chat_id.starts_with("0/32/")
+/// The largest integer JavaScript holds exactly (`Number.MAX_SAFE_INTEGER`).
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+/// A whole number from a response, at most [`MAX_SAFE_INTEGER`]: the UI reads integers as
+/// JavaScript numbers, and one larger value would fail the whole object it is in (an event, a
+/// history page, the snapshot). Real times, numbers and sizes are far below it; a negative or
+/// fractional one becomes 0 or is rounded down.
+pub fn uint(v: &Value) -> Option<u64> {
+    let x = v.as_u64().or_else(|| v.as_f64().map(|f| f as u64))?;
+    Some(x.min(MAX_SAFE_INTEGER))
 }
 
 /// Thread chat for message `ts` of chat `chat_id`: `0/<ns>/<uuid>` → `100/<ns>/<uuid>_<ts>`.
@@ -32,7 +38,7 @@ pub fn thread_chat_id(chat_id: &str, ts: Timestamp) -> Option<String> {
 }
 
 /// Inverse of [`thread_chat_id`]: `(parent chat, time of the parent message)`.
-pub fn thread_parent(thread_id: &str) -> Option<(String, Timestamp)> {
+fn thread_parent(thread_id: &str) -> Option<(String, Timestamp)> {
     let rest = thread_id.strip_prefix("100/")?;
     let (ns, tail) = rest.split_once('/')?;
     let (uuid, ts) = tail.rsplit_once('_')?;
@@ -95,8 +101,30 @@ fn reactions(sm: &Value, me: Option<&UserId>) -> Vec<Reaction> {
         .collect()
 }
 
+/// Read counters of one of the user's own messages: `ShowReadsCount`, `ReadsCount`,
+/// `RecentUserReads` and `SeenByPartnerMcs`, next to `ServerMessageInfo` of a message or at the
+/// top of someone's `SeenMarker` push. Without `ShowReadsCount` nothing is known: the same
+/// message comes with it and without (the echo of a sent message has none).
+fn reads(sm: &Value) -> Option<Reads> {
+    if sm.get("ShowReadsCount").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    Some(Reads {
+        count: n(sm, &["ReadsCount"]).unwrap_or(0) as u32,
+        recent: sm
+            .get("RecentUserReads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|r| s(r, &["UserInfo", "Guid"]))
+            .map(|g| UserId(g.to_owned()))
+            .collect(),
+        peer_seen: n(sm, &["SeenByPartnerMcs"]).filter(|t| *t > 0),
+    })
+}
+
 /// People from `RecentUserReactions`, with the names the UI shows in the reaction tooltip.
-pub fn reaction_authors(sm: &Value) -> Vec<User> {
+fn reaction_authors(sm: &Value) -> Vec<User> {
     sm.get("RecentUserReactions")
         .and_then(Value::as_array)
         .into_iter()
@@ -105,12 +133,20 @@ pub fn reaction_authors(sm: &Value) -> Vec<User> {
         .collect()
 }
 
-/// People the message mentions (`MentionedUsers`, which Telemost adds next to `ClientMessage`),
-/// so `@<guid>` in the text can show their names.
-pub fn mentioned_users(sm: &Value) -> Vec<User> {
+/// People the message names: those it mentions (`MentionedUsers`, which Telemost adds next to
+/// `ClientMessage`), so `@<guid>` in the text can show their names, and those a note about the
+/// chat's members adds or removes.
+fn mentioned_users(sm: &Value) -> Vec<User> {
+    let diff = sm
+        .pointer("/ClientMessage/SystemMessage/ParticipantsChangedDiff")
+        .or_else(|| sm.pointer("/ClientMessage/SystemMessage/ParticipantsChangedDiffV2"));
+    let members = ["AddedUsers", "RemovedUsers"]
+        .into_iter()
+        .filter_map(|key| diff?.get(key)?.as_array());
     sm.get("MentionedUsers")
         .and_then(Value::as_array)
         .into_iter()
+        .chain(members)
         .flatten()
         .filter_map(user_from)
         .collect()
@@ -181,19 +217,14 @@ fn user_from(v: &Value) -> Option<User> {
     let guid = s(v, &["Guid"])?;
     let name = s(v, &["DisplayName"]).or_else(|| s(v, &["PublicName"])).unwrap_or(guid);
     Some(User {
-        id: UserId(guid.to_owned()),
-        display_name: name.to_owned(),
-        title: None,
-        presence: Presence::Offline,
-        status: None,
-        availability: Default::default(),
         is_robot: v.get("IsRobot").and_then(Value::as_bool).unwrap_or(false),
         avatar: s(v, &["AvatarId"]).filter(|a| !a.is_empty()).map(str::to_owned),
+        ..User::named(UserId(guid.to_owned()), name)
     })
 }
 
 /// Message from a `ServerMessage` (history) or a push body: both have the same structure.
-pub enum Parsed {
+enum Parsed {
     Message(Box<Message>),
     Deleted {
         chat_id: ChatId,
@@ -208,7 +239,9 @@ pub enum Parsed {
 fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>) -> Parsed {
     let info = &sm["ServerMessageInfo"];
     let Some(plain) = sm.pointer("/ClientMessage/Plain") else {
-        return call_note(sm).map_or(Parsed::Skip, |m| Parsed::Message(Box::new(m)));
+        return call_note(sm)
+            .or_else(|| chat_note(sm))
+            .map_or(Parsed::Skip, |m| Parsed::Message(Box::new(m)));
     };
     let Some(chat) = s(plain, &["ChatId"]).or(chat_hint) else {
         return Parsed::Skip;
@@ -254,13 +287,18 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
         attachments: attachments(plain),
         forwarded,
         call: None,
+        system: None,
+        reads: reads(sm),
     }))
 }
 
 /// Telemost's note about a call in the chat:
 /// - `SystemMessage{ChatId, MeetingStartedMessage | MeetingEndedMessage: {MeetingId}}` for a
-///   group call, `PersonalMeetingEndedMessage: {MeetingId, CallType, Reason}` for a direct one;
-///   the author is whoever started or ended the call;
+///   group call, `PersonalMeetingEndedMessage: {MeetingId, CallType, Reason, DurationSeconds}`
+///   for a direct one; the author is whoever started or ended the call;
+/// - `SystemMessage{ChatId, ChatCreatedInfo}` in a group call chat (`0/58/…`): the chat is made
+///   for a call, so its creation is the start of its first call, which has no start note and
+///   no link until it ends;
 /// - `MeetingCallingMessage{IncomingCall: {MeetingInfo: {ChatId, MeetingId, CreateTimestamp}}}`:
 ///   a direct call ringing. It repeats every 5 s while the call rings and history never has it;
 ///   all repeats become one note at the meeting's creation time, without a sequence number.
@@ -275,6 +313,14 @@ fn call_note(sm: &Value) -> Option<Message> {
     }
     let info = &sm["ServerMessageInfo"];
     let (chat, ts, kind, meeting) = if let Some(sys) = sm.pointer("/ClientMessage/SystemMessage") {
+        let chat = s(sys, &["ChatId"])?;
+        let ts = n(info, &["Timestamp"])?;
+        if sys.get("ChatCreatedInfo").is_some() && ChatId(chat.to_owned()).is_group_call() {
+            return Some(Message {
+                call: Some(CallNote::Started { url: String::new() }),
+                ..system_note(chat, ts, info)
+            });
+        }
         let (kind, meeting) = [
             ("MeetingStartedMessage", Kind::Started),
             ("PersonalMeetingStartedMessage", Kind::Started),
@@ -283,7 +329,7 @@ fn call_note(sm: &Value) -> Option<Message> {
         ]
         .into_iter()
         .find_map(|(name, kind)| sys.get(name).map(|m| (kind, m)))?;
-        (s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, kind, meeting)
+        (chat, ts, kind, meeting)
     } else {
         let meeting = sm.pointer("/ClientMessage/MeetingCallingMessage/IncomingCall/MeetingInfo")?;
         (
@@ -294,7 +340,31 @@ fn call_note(sm: &Value) -> Option<Message> {
         )
     };
     let url = meeting_url(s(meeting, &["MeetingId"])?);
+    let seconds = n(meeting, &["DurationSeconds"]);
     Some(Message {
+        call: Some(match kind {
+            Kind::Started => CallNote::Started { url },
+            Kind::Ringing => CallNote::Ringing { url },
+            Kind::Ended => CallNote::Ended {
+                url,
+                reason: None,
+                seconds,
+            },
+            // Zero is left out of the JSON: no `Reason` is 0, "declined" (the web client reads
+            // it as `Reason || 0` too).
+            Kind::PersonalEnded => CallNote::Ended {
+                url,
+                reason: CallEndReason::from_code(n(meeting, &["Reason"]).unwrap_or(0)),
+                seconds,
+            },
+        }),
+        ..system_note(chat, ts, info)
+    })
+}
+
+/// An empty message of Telemost's in `chat` at `ts`, from whoever `info` says it is from.
+fn system_note(chat: &str, ts: Timestamp, info: &Value) -> Message {
+    Message {
         chat_id: ChatId(chat.to_owned()),
         ts,
         author: UserId(s(info, &["From", "Guid"]).unwrap_or_default().to_owned()),
@@ -307,17 +377,56 @@ fn call_note(sm: &Value) -> Option<Message> {
         seq_no: n(info, &["SeqNo"]).unwrap_or(0),
         attachments: vec![],
         forwarded: vec![],
-        call: Some(match kind {
-            Kind::Started => CallNote::Started { url },
-            Kind::Ringing => CallNote::Ringing { url },
-            Kind::Ended => CallNote::Ended { url, reason: None },
-            // Zero is left out of the JSON: no `Reason` is 0, "declined" (the web client reads
-            // it as `Reason || 0` too).
-            Kind::PersonalEnded => CallNote::Ended {
-                url,
-                reason: CallEndReason::from_code(n(meeting, &["Reason"]).unwrap_or(0)),
-            },
-        }),
+        call: None,
+        system: None,
+        reads: None,
+    }
+}
+
+/// Telemost's note about a change of the chat, `SystemMessage{ChatId, …}` by whoever made it:
+/// - `ChatCreatedInfo: {InitialInfo: {Name, Description}}`: created the chat (in a group call
+///   chat it is the start of the call, see [`call_note`]);
+/// - `ParticipantsChangedDiff` (or `…V2`, which may also list groups and departments):
+///   `{AddedUsers, RemovedUsers}` of `UserInfo`s;
+/// - `UserAction`: 0 left the chat, 1 joined it, 2 joined it by an invite link.
+///
+/// Other system messages (renames, generic texts) stay out of the feed.
+fn chat_note(sm: &Value) -> Option<Message> {
+    let sys = sm.pointer("/ClientMessage/SystemMessage")?;
+    let info = &sm["ServerMessageInfo"];
+    let note = if let Some(created) = sys.get("ChatCreatedInfo") {
+        SystemNote::Created {
+            name: s(created, &["InitialInfo", "Name"]).unwrap_or_default().to_owned(),
+        }
+    } else if let Some(diff) = sys
+        .get("ParticipantsChangedDiff")
+        .or_else(|| sys.get("ParticipantsChangedDiffV2"))
+    {
+        let guids = |key: &str| -> Vec<UserId> {
+            diff.get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|u| s(u, &["Guid"]))
+                .map(|g| UserId(g.to_owned()))
+                .collect()
+        };
+        let (added, removed) = (guids("AddedUsers"), guids("RemovedUsers"));
+        if added.is_empty() && removed.is_empty() {
+            return None;
+        }
+        SystemNote::Members { added, removed }
+    } else {
+        match n(sys, &["UserAction"])? {
+            0 => SystemNote::Left,
+            1 | 2 => SystemNote::Joined,
+            _ => return None,
+        }
+    };
+    Some(Message {
+        system: Some(note),
+        reads: None,
+        ..system_note(s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, info)
     })
 }
 
@@ -405,6 +514,19 @@ pub struct HistoryData {
     pub last: BTreeMap<String, (Timestamp, u64)>,
 }
 
+/// The time of the oldest record of a `history` page. Deleted messages and service records count
+/// too: the feed leaves them out, but the next page must start before them.
+pub fn oldest_record(v: &Value) -> Option<Timestamp> {
+    v.pointer("/Chats/0/Messages")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| {
+            let sm = item.get("ServerMessage").unwrap_or(item);
+            n(sm, &["ServerMessageInfo", "Timestamp"]).or_else(|| n(sm, &["ClientMessage", "Plain", "Timestamp"]))
+        })
+        .min()
+}
+
 /// Parses the response of the `history` WS method.
 pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
     let mut users: BTreeMap<String, User> = BTreeMap::new();
@@ -446,25 +568,24 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
         let unread = n(chat, &["LastSeqNo"])
             .unwrap_or(0)
             .saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0));
+        let kind = chat_kind(id, me, info.get("IsPublic").and_then(Value::as_bool).unwrap_or(false));
         out.chats.push(Chat {
-            id: chat_id,
-            kind: chat_kind(id, me, info.get("IsPublic").and_then(Value::as_bool).unwrap_or(false)),
             name: s(info, &["Name"]).unwrap_or_default().to_owned(),
             description: s(info, &["Description"]).filter(|d| !d.is_empty()).map(str::to_owned),
             member_count: n(info, &["MemberCount"]).unwrap_or(0) as u32,
             unread: unread.min(999) as u32,
-            mentions: 0,
             muted: chat.get("Muted").and_then(Value::as_bool).unwrap_or(false),
-            mute_mentions: false,
             last_ts,
+            peer_seen_ts: n(chat, &["LastSeenTsMcs"]).unwrap_or(0),
             pinned: n(chat, &["PinnedMessageInfo", "PinnedMessageTs"]).filter(|ts| *ts > 0),
             organizations: info
                 .get("OrganizationIds")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(Value::as_u64)
+                .filter_map(uint)
                 .collect(),
+            ..Chat::new(chat_id, kind)
         });
     }
     out.users = users.into_values().collect();
@@ -532,7 +653,7 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
 }
 
 /// UI event built from a Xiva push.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveEvent {
     /// New or changed message; `author` in case the UI does not know the sender, `mentioned`
@@ -540,14 +661,12 @@ pub enum LiveEvent {
     Upsert {
         message: Box<Message>,
         author: Option<User>,
-        #[serde(default)]
         mentioned: Vec<User>,
     },
     /// A message was deleted; `thread_parent` is set for a thread reply.
     Deleted {
         chat_id: ChatId,
         ts: Timestamp,
-        #[serde(default)]
         thread_parent: Option<Timestamp>,
     },
     Typing {
@@ -560,12 +679,19 @@ pub enum LiveEvent {
         chat_id: ChatId,
         ts: Timestamp,
         reactions: Vec<Reaction>,
-        #[serde(default)]
         users: Vec<User>,
     },
     /// The user read the chat (possibly on another device).
     Seen {
         chat_id: ChatId,
+    },
+    /// Someone else read the chat up to message `ts`; `reads` are that message's counters, if
+    /// it is the user's.
+    PeerSeen {
+        chat_id: ChatId,
+        user: UserId,
+        ts: Timestamp,
+        reads: Option<Reads>,
     },
     /// The user read the thread of message `parent` in `chat_id` (possibly on another device).
     ThreadSeen {
@@ -575,7 +701,6 @@ pub enum LiveEvent {
     /// A person came online (their `Heartbeat` arrived).
     Online {
         user: UserId,
-        online: bool,
     },
     /// A person changed their availability or custom status.
     Status(PresenceInfo),
@@ -604,12 +729,50 @@ pub enum LiveEvent {
         threads: Vec<FollowedThread>,
         users: Vec<User>,
     },
+    /// The user is in a new chat: created it, was added to it, or someone started a direct chat.
+    /// The backend fetches the chat and sends [`LiveEvent::ChatAdded`]; the UI never gets this.
+    Joined {
+        chat_id: ChatId,
+    },
+    /// The user left the chat or was removed from it.
+    ChatRemoved {
+        chat_id: ChatId,
+    },
+    /// The chat's name, description or member count changed; `None` is "not reported".
+    ChatChanged {
+        chat_id: ChatId,
+        name: Option<String>,
+        description: Option<String>,
+        member_count: Option<u32>,
+    },
+    /// The chat folders of every organization, after a change on any device.
+    Folders {
+        folders: Vec<ChatFolder>,
+    },
+    /// The pinned ("starred") chats, after a change on any device.
+    Starred {
+        chats: Vec<ChatId>,
+    },
+    /// What every chat notifies about, after a change on any device: chats not listed notify
+    /// about everything.
+    Mutings {
+        chats: Vec<(ChatId, NotifyLevel)>,
+    },
+    /// A call in a chat changed: people joined or left, or it ended.
+    Meeting(Meeting),
+    /// Notifications were paused or resumed ("Do not disturb"), on any device.
+    Paused {
+        pause: Option<Pause>,
+    },
 }
 
 /// Parses the body of a `delivery` push. `None` means the event is not of interest yet.
 pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     let sm = body.get("ServerMessage").unwrap_or(body);
     let cm = sm.get("ClientMessage")?;
+    if let Some(sync) = cm.get("StateSync") {
+        return state_sync(sync);
+    }
     if let Some(typing) = cm.get("Typing").or_else(|| cm.get("TypingEnhanced")) {
         let chat_id = ChatId(s(typing, &["ChatId"])?.to_owned());
         let user = UserId(s(sm, &["ServerMessageInfo", "From", "Guid"])?.to_owned());
@@ -620,10 +783,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     }
     let from = s(sm, &["ServerMessageInfo", "From", "Guid"]).map(|g| UserId(g.to_owned()));
     if cm.get("Heartbeat").is_some() {
-        return Some(LiveEvent::Online {
-            user: from?,
-            online: true,
-        });
+        return Some(LiveEvent::Online { user: from? });
     }
     if let Some(us) = cm.get("UserStatus") {
         let (availability, status) = user_status(us);
@@ -645,8 +805,16 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     }
     if let Some(seen) = cm.get("SeenMarker") {
         let chat = s(seen, &["ChatId"])?;
-        if me.is_none_or(|me| from.as_ref() != Some(me)) {
-            return None;
+        let (me, from) = (me?, from?);
+        // Someone else's marker carries the counters of the message it points at; a thread's
+        // carries none.
+        if &from != me {
+            return thread_parent(chat).is_none().then(|| LiveEvent::PeerSeen {
+                chat_id: ChatId(chat.to_owned()),
+                user: from,
+                ts: n(seen, &["Timestamp"]).unwrap_or(0),
+                reads: reads(sm),
+            });
         }
         return Some(match thread_parent(chat) {
             Some((chat_id, parent)) => LiveEvent::ThreadSeen {
@@ -662,7 +830,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
         && let Some(list) = diff.get("PinnedMessageTimestamps")
     {
         let chat = s(&cm["SystemMessage"], &["ChatId"])?;
-        let ts = list.as_array().and_then(|l| l.iter().filter_map(Value::as_u64).max());
+        let ts = list.as_array().and_then(|l| l.iter().filter_map(uint).max());
         return Some(LiveEvent::Pinned {
             chat_id: ChatId(chat.to_owned()),
             ts,
@@ -687,13 +855,124 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     }
 }
 
-/// The sidebar section of a chat: `dms`, `meetings` or `channels`.
-pub fn section_of(chat: &Chat) -> &'static str {
-    match chat.kind {
-        ChatKind::Direct { .. } | ChatKind::Notes => "dms",
-        _ if is_meeting_chat(&chat.id.0) => "meetings",
-        _ => "channels",
+/// A `StateSync` push: `Data` is base64 JSON `{"type": …, "data": {…}}`, a change of the
+/// user's chats, synced settings or calls. Types seen: `you_added`, `you_removed`,
+/// `chat_info_changed`, `members_changed_v2`, `user_bucket`, `meeting_updated`; `roles_changed`
+/// is not used.
+fn state_sync(sync: &Value) -> Option<LiveEvent> {
+    let data: Value = serde_json::from_slice(&base64(s(sync, &["Data"])?)?).ok()?;
+    let d = &data["data"];
+    let chat_id = || s(d, &["chat_id"]).map(|id| ChatId(id.to_owned()));
+    let text = |key: &str| s(d, &[key]).map(str::to_owned);
+    let count = || n(d, &["members_count"]).map(|c| c as u32);
+    match s(&data, &["type"])? {
+        "you_added" => Some(LiveEvent::Joined {
+            chat_id: s(d, &["chat", "chat_id"])
+                .map(|id| ChatId(id.to_owned()))
+                .or_else(chat_id)?,
+        }),
+        "you_removed" => Some(LiveEvent::ChatRemoved { chat_id: chat_id()? }),
+        "chat_info_changed" => Some(LiveEvent::ChatChanged {
+            chat_id: chat_id()?,
+            name: text("name"),
+            description: text("description"),
+            member_count: count(),
+        }),
+        "members_changed_v2" => Some(LiveEvent::ChatChanged {
+            chat_id: chat_id()?,
+            name: None,
+            description: None,
+            member_count: Some(count()?),
+        }),
+        // `{meeting_id, chat_id, create_timestamp, participants_count, max_participants_count,
+        // status, version}`, for every chat the user is in, whether or not they are in the call.
+        "meeting_updated" => Some(LiveEvent::Meeting(Meeting {
+            chat_id: chat_id()?,
+            url: meeting_url(s(d, &["meeting_id"])?),
+            started: n(d, &["create_timestamp"])?,
+            participants: n(d, &["participants_count"]).unwrap_or(0) as u32,
+            ended: n(d, &["status"]) == Some(2),
+        })),
+        "user_bucket" => {
+            let value = &d["bucket_value"];
+            match s(d, &["bucket_name"])? {
+                "folders" => Some(LiveEvent::Folders {
+                    folders: chat_folders(value),
+                }),
+                "pinned_chats" => Some(LiveEvent::Starred {
+                    chats: pinned_chats(value),
+                }),
+                "chat_mutings" => Some(LiveEvent::Mutings {
+                    chats: chat_mutings(value),
+                }),
+                "status" => Some(LiveEvent::Paused { pause: pause(value) }),
+                _ => None,
+            }
+        }
+        _ => None,
     }
+}
+
+/// Decodes base64, standard or URL-safe, with or without padding.
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// The chats of the `pinned_chats` bucket value: `{"pinned_chats": [chat ids]}`.
+fn pinned_chats(value: &Value) -> Vec<ChatId> {
+    value
+        .get("pinned_chats")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|id| ChatId(id.to_owned()))
+        .collect()
+}
+
+/// The notification pause of the `status` bucket value `{mute_deadline, mute_mode}`. Telemost
+/// writes it itself right after each own `UserStatus`: `mute_mode` is its `NotificationMode`
+/// (1: notifications off), `mute_deadline` its time plus `Duration`, in µs (0: no end). When the
+/// deadline passes, nothing is sent.
+fn pause(value: &Value) -> Option<Pause> {
+    (n(value, &["mute_mode"]).unwrap_or(0) != 0).then(|| Pause {
+        until: n(value, &["mute_deadline"]).filter(|t| *t > 0),
+    })
+}
+
+/// The muted chats of the `chat_mutings` bucket value: `{"<chat id>": {mute, mute_mentions}}`.
+fn chat_mutings(value: &Value) -> Vec<(ChatId, NotifyLevel)> {
+    let flag = |m: &Value, key: &str| m.get(key).and_then(Value::as_bool).unwrap_or(false);
+    value
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, m)| {
+            (
+                ChatId(id.clone()),
+                NotifyLevel::from_flags(flag(m, "mute"), flag(m, "mute_mentions")),
+            )
+        })
+        .filter(|(_, level)| *level != NotifyLevel::All)
+        .collect()
 }
 
 /// A chat from a `get_chats_info` item: `{chat_id, name, description, is_public, members_count,
@@ -709,35 +988,28 @@ pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_u64)
+            .filter_map(uint)
             .collect(),
     };
     Some(Chat {
-        id: ChatId(id.to_owned()),
-        kind,
         name: s(info, &["name"]).unwrap_or_default().to_owned(),
         description: s(info, &["description"]).filter(|d| !d.is_empty()).map(str::to_owned),
         member_count: n(info, &["members_count"]).unwrap_or(0) as u32,
-        unread: 0,
-        mentions: 0,
-        muted: false,
-        mute_mentions: false,
-        last_ts: 0,
-        pinned: None,
         organizations,
+        ..Chat::new(ChatId(id.to_owned()), kind)
     })
 }
 
 /// Builds the UI snapshot: "Channels", "Direct messages" and "Meeting chats" sections.
 pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapshot {
-    data.chats.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    data.chats.sort_by_key(|c| std::cmp::Reverse(c.last_ts));
     let (mut channels, mut dms, mut meetings) = (Vec::new(), Vec::new(), Vec::new());
     // The chat with oneself, like "you" in Slack, always comes first among direct messages.
     if let Some(notes) = data.chats.iter().find(|c| c.kind == ChatKind::Notes) {
         dms.push(notes.id.clone());
     }
     for ch in data.chats.iter().filter(|ch| ch.kind != ChatKind::Notes) {
-        match section_of(ch) {
+        match ch.home_section() {
             "dms" => dms.push(ch.id.clone()),
             "meetings" => meetings.push(ch.id.clone()),
             _ => channels.push(ch.id.clone()),
@@ -752,20 +1024,8 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
         if let ChatKind::Direct { peer } = &ch.kind
             && !users.iter().any(|u| &u.id == peer)
         {
-            users.push(User {
-                id: peer.clone(),
-                display_name: if ch.name.is_empty() {
-                    UNKNOWN_USER.into()
-                } else {
-                    ch.name.clone()
-                },
-                title: None,
-                presence: Presence::Offline,
-                status: None,
-                availability: Default::default(),
-                is_robot: false,
-                avatar: None,
-            });
+            let name = if ch.name.is_empty() { UNKNOWN_USER } else { &ch.name };
+            users.push(User::named(peer.clone(), name));
         }
     }
     let section = |id: &str, title: &str, chats| Section {
@@ -787,11 +1047,12 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
         ],
         messages: data.messages,
         folders: vec![],
+        paused: None,
     }
 }
 
 /// `UserStatus` → availability and custom status (emoji and text).
-pub fn user_status(v: &Value) -> (Availability, Option<CustomStatus>) {
+fn user_status(v: &Value) -> (Availability, Option<CustomStatus>) {
     let availability = Availability::from_code(n(v, &["Availability"]).unwrap_or(0));
     let status = v.get("CustomStatus").and_then(|c| {
         let emoji = s(c, &["Emoji"]).unwrap_or_default().to_owned();
@@ -847,7 +1108,7 @@ pub fn statuses_from_subscribe(v: &Value) -> Vec<PresenceInfo> {
 /// How many microseconds after the last `Heartbeat` a person counts as online. Other clients
 /// (web, mobile, background tabs) send it less often than once a minute, so a short window makes
 /// the dot blink between pushes; 10 minutes covers their interval.
-pub const ONLINE_WINDOW_MCS: u64 = 10 * 60 * 1_000_000;
+const ONLINE_WINDOW_MCS: u64 = 10 * 60 * 1_000_000;
 
 /// "Online" from the `subscribe` response with `MessageBodyType: 2` (last `Heartbeat` and `CurrentTime`).
 pub fn online_from_heartbeat(v: &Value) -> Option<bool> {
@@ -959,18 +1220,8 @@ pub fn notes_chat_id(me: &UserId) -> ChatId {
 /// "Notes" chat for the snapshot when the history lacks it (just created, no messages yet).
 pub fn notes_chat(me: &UserId) -> Chat {
     Chat {
-        id: notes_chat_id(me),
-        kind: ChatKind::Notes,
-        name: String::new(),
-        description: None,
         member_count: 1,
-        unread: 0,
-        mentions: 0,
-        muted: false,
-        mute_mentions: false,
-        last_ts: 0,
-        pinned: None,
-        organizations: vec![],
+        ..Chat::new(notes_chat_id(me), ChatKind::Notes)
     }
 }
 
@@ -1063,35 +1314,32 @@ pub fn put_chat_folders(value: &mut Value, org: &str, folders: &[ChatFolder]) {
     entry["custom_folders"] = json!(list);
 }
 
+/// Synced setting `name` of a `get_buckets` answer: `{bucket_name, bucket_value, version}`.
+pub fn bucket<'a>(buckets: &'a Value, name: &str) -> Option<&'a Value> {
+    buckets
+        .pointer("/data/buckets")?
+        .as_array()?
+        .iter()
+        .find(|b| b["bucket_name"] == name)
+}
+
 /// Applies synced settings (`get_buckets`): chat folders, pinned chats go to the "Starred"
-/// section, muted chats set `Chat::muted`.
+/// section, muted chats set `Chat::muted`, a notification pause sets `Snapshot::paused`.
 pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
-    let list = buckets
-        .pointer("/data/buckets")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let bucket = |name: &str| {
-        list.iter()
-            .find(|b| b["bucket_name"] == name)
-            .map(|b| b["bucket_value"].clone())
-    };
-    snapshot.folders = bucket("folders").map(|v| chat_folders(&v)).unwrap_or_default();
-    if let Some(mutings) = bucket("chat_mutings").and_then(|v| v.as_object().cloned()) {
-        for ch in &mut snapshot.chats {
-            if let Some(m) = mutings.get(&ch.id.0) {
-                ch.muted = m.get("mute").and_then(Value::as_bool).unwrap_or(ch.muted);
-                ch.mute_mentions = m.get("mute_mentions").and_then(Value::as_bool).unwrap_or(false);
+    let value = |name: &str| bucket(buckets, name).map(|b| &b["bucket_value"]);
+    snapshot.folders = value("folders").map(chat_folders).unwrap_or_default();
+    snapshot.paused = value("status").and_then(pause);
+    if let Some(mutings) = value("chat_mutings") {
+        for (id, level) in chat_mutings(mutings) {
+            if let Some(ch) = snapshot.chats.iter_mut().find(|ch| ch.id == id) {
+                ch.set_notify_level(level);
             }
         }
     }
-    let pinned: Vec<ChatId> = bucket("pinned_chats")
-        .and_then(|v| v.get("pinned_chats").cloned())
-        .and_then(|v| v.as_array().cloned())
+    let pinned: Vec<ChatId> = value("pinned_chats")
+        .map(pinned_chats)
         .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_str)
-        .map(|id| ChatId(id.to_owned()))
+        .into_iter()
         .filter(|id| snapshot.chat(id).is_some())
         .collect();
     if pinned.is_empty() {
@@ -1196,7 +1444,7 @@ mod tests {
             (ch.name.as_str(), ch.description.as_deref(), ch.member_count),
             ("dev", None, 19)
         );
-        assert_eq!(section_of(&ch), "channels");
+        assert_eq!(ch.home_section(), "channels");
         assert_eq!(ch.organizations, vec![7]);
         let dm = json!({"chat_id": "bb_aa", "members_count": 2, "organization_ids": [7], "public": false});
         let ch = chat_from_info(&dm, Some(&me)).unwrap();
@@ -1207,9 +1455,14 @@ mod tests {
             }
         );
         assert!(ch.organizations.is_empty());
-        assert_eq!(section_of(&ch), "dms");
+        assert_eq!(ch.home_section(), "dms");
         let meeting = json!({"chat_id": "0/22/m", "name": "Sync"});
-        assert_eq!(section_of(&chat_from_info(&meeting, Some(&me)).unwrap()), "meetings");
+        assert_eq!(chat_from_info(&meeting, Some(&me)).unwrap().home_section(), "meetings");
+        let group_call = json!({"chat_id": "0/58/m", "name": "Group call 01.02 at 10:00"});
+        assert_eq!(
+            chat_from_info(&group_call, Some(&me)).unwrap().home_section(),
+            "meetings"
+        );
     }
 
     #[test]
@@ -1242,13 +1495,134 @@ mod tests {
                 Some(CallNote::Ended {
                     url: "https://telemost.360.yandex.ru/j/123".into(),
                     reason: None,
+                    seconds: None,
                 })
             ),
             other => panic!("{other:?}"),
         }
-        let joined = json!({"ClientMessage": {"SystemMessage": {"ChatId": "0/0/abc", "UserAction": 0}},
-            "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 8}});
-        assert_eq!(from_push(&joined, None), None);
+    }
+
+    #[test]
+    fn read_counters_of_own_messages() {
+        let me = UserId("me".into());
+        let v = json!({"Chats": [{
+        "ChatId": "0/0/abc", "LastSeqNo": 3, "LastSeenTsMcs": 25, "LastSeenSeqNo": 2,
+        "Messages": [
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/abc", "Text": {"MessageText": "a"}}},
+              "ServerMessageInfo": {"Timestamp": 20, "SeqNo": 2, "From": {"Guid": "me"}},
+              "ShowReadsCount": true, "ReadsCount": 5, "ReadsVersion": 113,
+              "RecentUserReads": [{"UserInfo": {"Guid": "u1", "DisplayName": "Anna Smirnova"}, "Timestamp": 22},
+                                  {"UserInfo": {"Guid": "u2"}, "Timestamp": 21}]}},
+            // The same kind of message without `ShowReadsCount`: nothing is known.
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/abc", "Text": {"MessageText": "b"}}},
+              "ServerMessageInfo": {"Timestamp": 30, "SeqNo": 3, "From": {"Guid": "me"}}, "ReadsCount": 1}}
+        ]}]});
+        let d = from_history(&v, Some(&me));
+        assert_eq!(d.chats[0].peer_seen_ts, 25);
+        assert_eq!(
+            d.messages[0].reads,
+            Some(Reads {
+                count: 5,
+                recent: vec![UserId("u1".into()), UserId("u2".into())],
+                peer_seen: None,
+            })
+        );
+        assert_eq!(d.messages[1].reads, None);
+        assert!(d.users.iter().any(|u| u.display_name == "Anna Smirnova"));
+    }
+
+    #[test]
+    fn seen_markers_of_others_carry_read_counters() {
+        let me = UserId("me".into());
+        let marker = |chat: &str, from: &str| {
+            json!({"ClientMessage": {"SeenMarker": {"ChatId": chat, "Timestamp": 460, "SeqNo": 55},
+                        "NotificationBehaviour": 2},
+                   "ServerMessageInfo": {"From": {"Guid": from}, "Timestamp": 470, "SeqNo": 77},
+                   "ReadsCount": 1, "ReadsVersion": 120, "ShowReadsCount": true, "SeenByPartnerMcs": 440})
+        };
+        assert_eq!(
+            from_push(&marker("me_peer", "peer"), Some(&me)),
+            Some(LiveEvent::PeerSeen {
+                chat_id: ChatId("me_peer".into()),
+                user: UserId("peer".into()),
+                ts: 460,
+                reads: Some(Reads {
+                    count: 1,
+                    recent: vec![],
+                    peer_seen: Some(440),
+                }),
+            })
+        );
+        // A thread has no receipts; one's own marker is a read on another device, as before.
+        assert_eq!(from_push(&marker("100/0/abc_42", "peer"), Some(&me)), None);
+        assert_eq!(
+            from_push(&marker("me_peer", "me"), Some(&me)),
+            Some(LiveEvent::Seen {
+                chat_id: ChatId("me_peer".into())
+            })
+        );
+        assert_eq!(from_push(&marker("me_peer", "peer"), None), None);
+    }
+
+    #[test]
+    fn chat_changes_are_notes() {
+        let push = |sys: Value| {
+            json!({"ServerMessage": {"ClientMessage": {"SystemMessage": sys},
+                "ServerMessageInfo": {"From": {"DisplayName": "Anna Smirnova", "Guid": "u1"}, "SeqNo": 3, "Timestamp": 8}}})
+        };
+        let note = |sys: Value| match from_push(&push(sys), None) {
+            Some(LiveEvent::Upsert { message, mentioned, .. }) => {
+                assert_eq!(
+                    (message.chat_id.0.as_str(), message.ts, message.seq_no),
+                    ("0/0/abc", 8, 3)
+                );
+                assert_eq!(message.author.0, "u1");
+                assert!(message.is_note() && message.text.is_empty());
+                (
+                    message.system,
+                    mentioned.into_iter().map(|u| u.display_name).collect::<Vec<_>>(),
+                )
+            }
+            other => panic!("{other:?}"),
+        };
+        let created = note(json!({"ChatId": "0/0/abc", "PayloadId": "p",
+            "ChatCreatedInfo": {"InitialInfo": {"Name": "release", "Description": "Releases"}}}));
+        assert_eq!(created.0, Some(SystemNote::Created { name: "release".into() }));
+        let changed = note(json!({"ChatId": "0/0/abc", "ParticipantsChangedDiff": {
+            "AddedUsers": [{"Guid": "u2", "DisplayName": "Boris Kotov"}, {"Guid": "u3", "DisplayName": "Vera Lebedeva"}],
+            "RemovedUsers": [{"Guid": "u4", "DisplayName": "Gleb Orlov"}]}}));
+        let id = |g: &str| UserId(g.into());
+        assert_eq!(
+            changed.0,
+            Some(SystemNote::Members {
+                added: vec![id("u2"), id("u3")],
+                removed: vec![id("u4")]
+            })
+        );
+        // Their names come along, for the line to show them.
+        assert_eq!(changed.1, ["Boris Kotov", "Vera Lebedeva", "Gleb Orlov"]);
+        let v2 = note(json!({"ChatId": "0/0/abc", "ParticipantsChangedDiffV2": {"RemovedUsers": [{"Guid": "u1"}]}}));
+        assert_eq!(
+            v2.0,
+            Some(SystemNote::Members {
+                added: vec![],
+                removed: vec![id("u1")]
+            })
+        );
+        // `UserAction` 0 is leaving (sent explicitly), 1 and 2 are joining.
+        assert_eq!(
+            note(json!({"ChatId": "0/0/abc", "UserAction": 0})).0,
+            Some(SystemNote::Left)
+        );
+        assert_eq!(
+            note(json!({"ChatId": "0/0/abc", "UserAction": 2})).0,
+            Some(SystemNote::Joined)
+        );
+        // Groups or departments only, and system messages the feed does not show, are left out.
+        let groups = push(json!({"ChatId": "0/0/abc", "ParticipantsChangedDiffV2": {"AddedGroups": [{"GroupId": 5}]}}));
+        assert_eq!(from_push(&groups, None), None);
+        let generic = push(json!({"ChatId": "0/0/abc", "GenericMessage": {"MessageText": "x"}}));
+        assert_eq!(from_push(&generic, None), None);
     }
 
     #[test]
@@ -1291,6 +1665,7 @@ mod tests {
                     Some(CallNote::Ended {
                         url: url.into(),
                         reason: Some(CallEndReason::Timeout),
+                        seconds: None,
                     })
                 );
                 assert!(!message.is_ringing());
@@ -1307,6 +1682,7 @@ mod tests {
                 Some(CallNote::Ended {
                     url: url.into(),
                     reason: Some(CallEndReason::Declined),
+                    seconds: None,
                 })
             ),
             other => panic!("{other:?}"),
@@ -1316,6 +1692,79 @@ mod tests {
         assert_eq!(from_push(&rang_off, None), None);
         assert_eq!(ringing(&rang_off), Some(Ringing::Ended { id: "r1".into() }));
         assert_eq!(ringing(&ended), None);
+        // A call that was answered says how long it lasted.
+        let talked = json!({"ClientMessage": {"SystemMessage": {"ChatId": chat, "PayloadId": "p",
+                "PersonalMeetingEndedMessage": {"DurationSeconds": 150, "MeetingId": url, "Reason": 2}}},
+            "ServerMessageInfo": {"From": {"Guid": "aa"}, "SeqNo": 52, "Timestamp": 2_000}});
+        match from_push(&talked, None) {
+            Some(LiveEvent::Upsert { message, .. }) => assert_eq!(
+                message.call,
+                Some(CallNote::Ended {
+                    url: url.into(),
+                    reason: Some(CallEndReason::Disconnected),
+                    seconds: Some(150),
+                })
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A group call chat (`0/58/…`) as its history page has it: Telemost's note that the chat is
+    /// temporary, the chat created by whoever started the call, the first call's end without a
+    /// start, then a second call with both notes.
+    #[test]
+    fn group_call_chat_starts_with_its_call() {
+        let url = "https://telemost.360.yandex.ru/j/555";
+        let sys = |ts: u64, from: &str, body: Value| {
+            let mut sys = json!({"ChatId": "0/58/g1", "PayloadId": "p"});
+            for (k, v) in body.as_object().unwrap() {
+                sys[k] = v.clone();
+            }
+            json!({"ServerMessage": {"ClientMessage": {"SystemMessage": sys},
+                "ServerMessageInfo": {"From": {"Guid": from}, "Timestamp": ts}}})
+        };
+        let page = json!({"Chats": [{"ChatId": "0/58/g1", "LastSeqNo": 3, "Messages": [
+            sys(10, "11111111-1111-1111-1111-111111111111",
+                json!({"GenericMessage": {"LocKey": "meetings.extended_chat_delete_alert"}})),
+            sys(11, "u1", json!({"ChatCreatedInfo": {"InitialInfo": {"Name": "Group call 01.02 at 10:00"}}})),
+            sys(12, "u1", json!({"ParticipantsChangedDiff": {"AddedUsers": [{"Guid": "u2"}]}})),
+            sys(500, "u1", json!({"MeetingEndedMessage": {"CallType": 1, "MeetingId": url}})),
+            sys(700, "u2", json!({"MeetingStartedMessage": {"MeetingId": url}})),
+            sys(900, "u2", json!({"MeetingEndedMessage": {"MeetingId": url}})),
+        ]}]});
+        let data = from_history(&page, None);
+        let notes: Vec<(Timestamp, &str, Option<&CallNote>)> = data
+            .messages
+            .iter()
+            .map(|m| (m.ts, m.author.0.as_str(), m.call.as_ref()))
+            .collect();
+        let ended = CallNote::Ended {
+            url: url.into(),
+            reason: None,
+            seconds: None,
+        };
+        assert_eq!(
+            notes,
+            vec![
+                (11, "u1", Some(&CallNote::Started { url: String::new() })),
+                // People invited to the call are a line about the chat's members.
+                (12, "u1", None),
+                (500, "u1", Some(&ended)),
+                (700, "u2", Some(&CallNote::Started { url: url.into() })),
+                (900, "u2", Some(&ended)),
+            ]
+        );
+        assert!(data.messages[1].system.is_some());
+        // An ordinary group made by someone is not a call but a line about the chat.
+        let made = json!({"ClientMessage": {"SystemMessage": {"ChatId": "0/0/g2", "ChatCreatedInfo": {}}},
+            "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 5}});
+        match from_push(&made, None) {
+            Some(LiveEvent::Upsert { message, .. }) => {
+                assert_eq!(message.call, None);
+                assert_eq!(message.system, Some(SystemNote::Created { name: String::new() }));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1458,7 +1907,6 @@ mod tests {
         );
         assert_eq!(chat_kind("aa_aa", Some(&me), false), ChatKind::Notes);
         assert_eq!(chat_kind("1/0/x", Some(&me), true), ChatKind::Broadcast);
-        assert!(is_meeting_chat("0/22/x") && !is_meeting_chat("0/0/x"));
         assert_eq!(thread_chat_id("0/0/abc-1", 42).as_deref(), Some("100/0/abc-1_42"));
         assert_eq!(thread_chat_id("aa_bb", 42), None);
         assert_eq!(thread_parent("100/0/abc-1_42"), Some(("0/0/abc-1".into(), 42)));
@@ -1501,11 +1949,17 @@ mod tests {
             ]
         }]});
         let d = from_history(&v, Some(&UserId("me".into())));
+        // The system record is the oldest: the next page starts before it.
+        assert_eq!(oldest_record(&v), Some(1));
         assert_eq!(d.chats.len(), 1);
         let ch = &d.chats[0];
         assert_eq!((ch.unread, ch.member_count, ch.muted, ch.last_ts), (3, 19, true, 9));
         assert_eq!(ch.description, None);
-        assert_eq!(d.messages.len(), 1, "system and deleted messages stay out of the feed");
+        assert_eq!(
+            d.messages.len(),
+            1,
+            "empty system and deleted messages stay out of the feed"
+        );
         assert_eq!(d.messages[0].text, "hello");
         assert_eq!(d.messages[0].seq_no, 10);
         assert_eq!(
@@ -1527,14 +1981,8 @@ mod tests {
     fn notes_chat_goes_first_in_dms() {
         let me_id = UserId("me".into());
         let me = User {
-            id: me_id.clone(),
-            display_name: "Me".into(),
-            title: None,
             presence: Presence::Online,
-            status: None,
-            availability: Default::default(),
-            is_robot: false,
-            avatar: None,
+            ..User::named(me_id.clone(), "Me")
         };
         let history = json!({"Chats": [
             {"ChatId": "me_u1", "LastTsMcs": 10},
@@ -1588,6 +2036,24 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn numbers_the_ui_cannot_hold_are_clamped() {
+        assert_eq!(uint(&json!(u64::MAX)), Some(MAX_SAFE_INTEGER));
+        assert_eq!(uint(&json!(1e300)), Some(MAX_SAFE_INTEGER));
+        assert_eq!(uint(&json!(1_700_000_000_000_000_u64)), Some(1_700_000_000_000_000));
+        assert_eq!(uint(&json!(-5)), Some(0));
+        assert_eq!(uint(&json!(2.9)), Some(2));
+        assert_eq!(uint(&json!("7")), None);
+        let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Gallery": {"Text": "", "Items": [
+            {"Image": {"FileInfo": {"Id2": "disk/x1", "Name": "a.png", "Size": u64::MAX}, "Width": 8, "Height": 6}}]}}},
+            "ServerMessageInfo": {"Timestamp": u64::MAX, "SeqNo": 1e20, "From": {"Guid": "u"}}});
+        let Some(LiveEvent::Upsert { message, .. }) = from_push(&v, None) else {
+            panic!("not a message")
+        };
+        assert_eq!((message.ts, message.seq_no), (MAX_SAFE_INTEGER, MAX_SAFE_INTEGER));
+        assert_eq!(message.attachments[0].size, MAX_SAFE_INTEGER);
     }
 
     #[test]
@@ -1659,23 +2125,24 @@ mod tests {
     #[test]
     fn buckets_pin_and_mute() {
         let me = User {
-            id: UserId("me".into()),
-            display_name: "Me".into(),
-            title: None,
             presence: Presence::Online,
-            status: None,
-            availability: Default::default(),
-            is_robot: false,
-            avatar: None,
+            ..User::named(UserId("me".into()), "Me")
         };
         let history = json!({"Chats": [{"ChatId": "0/0/a", "ChatInfo": {"Name": "a"}}, {"ChatId": "0/0/b", "ChatInfo": {"Name": "b"}}]});
         let mut snap = snapshot(me, "org".into(), from_history(&history, None));
         let buckets = json!({"status": "ok", "data": {"buckets": [
             {"bucket_name": "pinned_chats", "bucket_value": {"pinned_chats": ["0/0/b", "0/0/missing"]}},
             {"bucket_name": "chat_mutings", "bucket_value": {"0/0/a": {"mute": true, "mute_mentions": false},
-                                                              "0/0/b": {"mute": true, "mute_mentions": true}}}
+                                                              "0/0/b": {"mute": true, "mute_mentions": true}}},
+            {"bucket_name": "status", "bucket_value": {"mute_deadline": 1_700_000_060_000_000_u64, "mute_mode": 1}}
         ]}});
         apply_buckets(&mut snap, &buckets);
+        assert_eq!(
+            snap.paused,
+            Some(Pause {
+                until: Some(1_700_000_060_000_000)
+            })
+        );
         assert_eq!(snap.sections[0].id, "starred");
         assert_eq!(snap.sections[0].chats, vec![ChatId("0/0/b".into())]);
         assert!(!snap.sections[1].chats.contains(&ChatId("0/0/b".into())));
@@ -1772,16 +2239,7 @@ mod tests {
                     mine: true,
                     users: vec![me.clone()],
                 }],
-                users: vec![User {
-                    id: me.clone(),
-                    display_name: "me".into(),
-                    title: None,
-                    presence: Presence::Offline,
-                    status: None,
-                    availability: Default::default(),
-                    is_robot: false,
-                    avatar: None,
-                }],
+                users: vec![User::named(me.clone(), "me")],
             })
         );
         let unreact =
@@ -1809,8 +2267,7 @@ mod tests {
         assert_eq!(
             from_push(&heartbeat, Some(&me)),
             Some(LiveEvent::Online {
-                user: UserId("u1".into()),
-                online: true
+                user: UserId("u1".into())
             })
         );
         let status = json!({"ClientMessage": {"UserStatus": {"Availability": 3, "CustomStatus": {"Emoji": "🏖", "Text": "Vacation"}}}, "ServerMessageInfo": {"From": {"Guid": "u1"}}});
@@ -1821,5 +2278,161 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A `StateSync` push the way the JSON one carries it: `Data` in base64.
+    fn sync_push(data: Value) -> Value {
+        const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = data.to_string().into_bytes();
+        let mut text = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let v = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                text.push(if i <= chunk.len() {
+                    ABC[(v >> (18 - 6 * i) & 63) as usize] as char
+                } else {
+                    '='
+                });
+            }
+        }
+        json!({"ServerMessage": {"ClientMessage": {"StateSync": {"Data": text}},
+                                 "ServerMessageInfo": {"Timestamp": 1}}})
+    }
+
+    #[test]
+    fn state_sync_events() {
+        let me = UserId("me".into());
+        let added =
+            sync_push(json!({"type": "you_added", "data": {"chat": {"chat_id": "0/0/new", "name": "Planning"}}}));
+        assert_eq!(
+            from_push(&added, Some(&me)),
+            Some(LiveEvent::Joined {
+                chat_id: ChatId("0/0/new".into())
+            })
+        );
+        let removed = sync_push(json!({"type": "you_removed", "data": {"chat_id": "0/0/old", "version": 2}}));
+        assert_eq!(
+            from_push(&removed, Some(&me)),
+            Some(LiveEvent::ChatRemoved {
+                chat_id: ChatId("0/0/old".into())
+            })
+        );
+        let members = sync_push(json!({"type": "members_changed_v2",
+            "data": {"chat_id": "0/0/a", "members_count": 3, "members": {"add": ["u2"], "remove": []}}}));
+        assert_eq!(
+            from_push(&members, Some(&me)),
+            Some(LiveEvent::ChatChanged {
+                chat_id: ChatId("0/0/a".into()),
+                name: None,
+                description: None,
+                member_count: Some(3)
+            })
+        );
+        let renamed = sync_push(json!({"type": "chat_info_changed",
+            "data": {"chat_id": "0/0/a", "name": "Design", "description": "", "members_count": 3}}));
+        assert_eq!(
+            from_push(&renamed, Some(&me)),
+            Some(LiveEvent::ChatChanged {
+                chat_id: ChatId("0/0/a".into()),
+                name: Some("Design".into()),
+                description: Some(String::new()),
+                member_count: Some(3)
+            })
+        );
+        let folders = sync_push(
+            json!({"type": "user_bucket", "data": {"bucket_name": "folders", "version": 5,
+            "bucket_value": {"0": {"custom_folders": [
+                {"id": "f1", "name": "Work", "included_chat_ids": ["0/0/a"]},
+                {"id": "default_private", "name": "Private", "included_type_ids": ["private"]}]}}}}),
+        );
+        match from_push(&folders, Some(&me)) {
+            Some(LiveEvent::Folders { folders }) => {
+                assert_eq!(folders.len(), 1);
+                assert_eq!((folders[0].name.as_str(), folders[0].chats.len()), ("Work", 1));
+            }
+            other => panic!("{other:?}"),
+        }
+        let mutings = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "chat_mutings",
+            "bucket_value": {"0/0/a": {"mute": true, "mute_mentions": true}, "0/0/b": {"mute": false}}}}));
+        assert_eq!(
+            from_push(&mutings, Some(&me)),
+            Some(LiveEvent::Mutings {
+                chats: vec![(ChatId("0/0/a".into()), NotifyLevel::Nothing)]
+            })
+        );
+        let pinned = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "pinned_chats",
+            "bucket_value": {"pinned_chats": ["0/0/b"]}}}));
+        assert_eq!(
+            from_push(&pinned, Some(&me)),
+            Some(LiveEvent::Starred {
+                chats: vec![ChatId("0/0/b".into())]
+            })
+        );
+        let meeting = |status: u64, count: u64| {
+            sync_push(json!({"type": "meeting_updated", "data": {
+                "meeting_id": "https://telemost.360.yandex.ru/j/555", "chat_id": "0/58/g1",
+                "create_timestamp": 1_000, "participants_count": count, "max_participants_count": 300,
+                "status": status, "version": 2_000}}))
+        };
+        let going = Meeting {
+            chat_id: ChatId("0/58/g1".into()),
+            url: "https://telemost.360.yandex.ru/j/555".into(),
+            started: 1_000,
+            participants: 3,
+            ended: false,
+        };
+        assert_eq!(
+            from_push(&meeting(1, 3), Some(&me)),
+            Some(LiveEvent::Meeting(going.clone()))
+        );
+        assert_eq!(
+            from_push(&meeting(2, 0), Some(&me)),
+            Some(LiveEvent::Meeting(Meeting {
+                participants: 0,
+                ended: true,
+                ..going
+            }))
+        );
+        // Values as Telemost wrote them for a one-minute "Do not disturb" and after it.
+        let paused = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status",
+            "bucket_value": {"mute_deadline": 1_700_000_060_000_000_u64, "mute_mode": 1}}}));
+        assert_eq!(
+            from_push(&paused, Some(&me)),
+            Some(LiveEvent::Paused {
+                pause: Some(Pause {
+                    until: Some(1_700_000_060_000_000)
+                })
+            })
+        );
+        let forever = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status",
+            "bucket_value": {"mute_deadline": 0, "mute_mode": 1}}}));
+        assert_eq!(
+            from_push(&forever, Some(&me)),
+            Some(LiveEvent::Paused {
+                pause: Some(Pause { until: None })
+            })
+        );
+        let resumed = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status",
+            "bucket_value": {"mute_deadline": 0, "mute_mode": 0}}}));
+        assert_eq!(from_push(&resumed, Some(&me)), Some(LiveEvent::Paused { pause: None }));
+        assert_eq!(base64("aGk"), Some(b"hi".to_vec()));
+        assert_eq!(base64("aGk="), Some(b"hi".to_vec()));
+        assert_eq!(base64("a*"), None);
+    }
+
+    #[test]
+    fn a_page_of_deleted_messages_still_has_an_oldest_record() {
+        let v = json!({"Chats": [{"ChatId": "0/0/a", "Messages": [
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/a", "Timestamp": 7}},
+              "ServerMessageInfo": {"Timestamp": 7, "From": {"Guid": "u1"}}}},
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/a", "Timestamp": 5}},
+              "ServerMessageInfo": {"Timestamp": 5, "Deleted": true}}}]}]});
+        assert!(from_history(&v, None).messages.is_empty());
+        assert_eq!(oldest_record(&v), Some(5));
+        assert_eq!(
+            oldest_record(&json!({"Chats": [{"ChatId": "0/0/a", "Messages": []}]})),
+            None
+        );
     }
 }

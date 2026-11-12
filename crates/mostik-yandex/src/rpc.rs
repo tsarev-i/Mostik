@@ -4,13 +4,9 @@
 //! holding the JSON `{"method": "...", "params": {...}}`.
 
 use serde::Serialize;
-use serde_json::Value;
 
 /// Form field in which the web client sends the request.
 pub const FORM_FIELD: &str = "request";
-
-/// API version the web client currently uses.
-pub const API_VERSION: u32 = 5;
 
 /// `{method, params}` envelope of an RPC call.
 #[derive(Debug, Clone, Serialize)]
@@ -30,15 +26,10 @@ impl<'a, P: Serialize> RpcRequest<'a, P> {
     }
 }
 
-/// The web client sends a request without parameters with `params: {}`.
-pub fn empty_params() -> Value {
-    Value::Object(Default::default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn serializes_like_web_client() {
@@ -48,11 +39,5 @@ mod tests {
             v,
             json!({"method": "get_chat_members", "params": {"chat_id": "0/0/x", "limit": 50}})
         );
-    }
-
-    #[test]
-    fn empty_params_is_object() {
-        let req = RpcRequest::new("whoami", empty_params());
-        assert_eq!(req.form_value().unwrap(), r#"{"method":"whoami","params":{}}"#);
     }
 }

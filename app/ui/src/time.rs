@@ -85,6 +85,48 @@ pub fn hm(ts: Timestamp) -> String {
     }
 }
 
+/// `10:42:05` or `10:42:05 AM`.
+fn hms(ts: Timestamp) -> String {
+    let d = date(ts);
+    let (h, m, s) = (d.get_hours(), d.get_minutes(), d.get_seconds());
+    if format().1 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        let suffix = if h < 12 { "AM" } else { "PM" };
+        let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+        format!("{h12}:{m:02}:{s:02} {suffix}")
+    }
+}
+
+/// The full date and time for the hover of a message time, as in Slack: "Nov 12th at 01:02:45 PM"
+/// ("12 ноября в 13:02:45"), the year only when it is not this one.
+pub fn full(ts: Timestamp) -> String {
+    let d = date(ts);
+    let lang = format().0;
+    let year = d.get_full_year();
+    let this_year = year == Date::new_0().get_full_year();
+    let day = match lang {
+        Lang::Ru => format!(
+            "{} {}{}",
+            d.get_date(),
+            MONTHS_RU[d.get_month() as usize],
+            if this_year {
+                String::new()
+            } else {
+                format!(" {year} г.")
+            }
+        ),
+        Lang::En => format!(
+            "{} {}{}{}",
+            &MONTHS_EN[d.get_month() as usize][..3],
+            d.get_date(),
+            ordinal(d.get_date()),
+            if this_year { String::new() } else { format!(", {year}") }
+        ),
+    };
+    crate::i18n::for_lang(lang).day_at(&day, &hms(ts))
+}
+
 /// Calendar day key for the feed separators.
 pub fn day_key(ts: Timestamp) -> (u32, u32, u32) {
     let d = date(ts);
@@ -147,18 +189,13 @@ fn ordinal(n: u32) -> &'static str {
 
 /// "today at 10:41" (and the Russian equivalent).
 pub fn relative(ts: Timestamp) -> String {
-    let lang = format().0;
-    let day = match (which_day(ts), lang) {
-        (Day::Today, Lang::Ru) => "сегодня".to_owned(),
-        (Day::Yesterday, Lang::Ru) => "вчера".to_owned(),
-        (Day::Today, Lang::En) => "today".to_owned(),
-        (Day::Yesterday, Lang::En) => "yesterday".to_owned(),
-        (Day::Other, _) => day_label(ts),
+    let tr = crate::i18n::for_lang(format().0);
+    let day = match which_day(ts) {
+        Day::Today => tr.today_in_text.to_owned(),
+        Day::Yesterday => tr.yesterday_in_text.to_owned(),
+        Day::Other => day_label(ts),
     };
-    match lang {
-        Lang::Ru => format!("{day} в {}", hm(ts)),
-        Lang::En => format!("{day} at {}", hm(ts)),
-    }
+    tr.day_at(&day, &hm(ts))
 }
 
 /// Short date for lists: the time today, "Yesterday", otherwise "Nov 9" (or the Russian short form).
@@ -172,7 +209,7 @@ pub fn short_date(ts: Timestamp) -> String {
             Lang::Ru => format!(
                 "{} {}",
                 d.get_date(),
-                &MONTHS_RU[d.get_month() as usize].chars().take(3).collect::<String>()
+                MONTHS_RU[d.get_month() as usize].chars().take(3).collect::<String>()
             ),
             Lang::En => format!("{} {}", &MONTHS_EN[d.get_month() as usize][..3], d.get_date()),
         },

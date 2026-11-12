@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Ivan Tsarev"]
@@ -21,7 +21,8 @@ mostik-yandex = { path = "crates/mostik-yandex" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4"] }
+emojis = "0.9.1"
 
 [profile.release]
 lto = "thin"

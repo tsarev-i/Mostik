@@ -20,6 +20,8 @@ pub const UPDATE_EVENT: &str = "mostik://update";
 /// First check soon after the start, then every few hours while the app keeps running.
 const FIRST_CHECK: Duration = Duration::from_secs(10);
 const CHECK_EVERY: Duration = Duration::from_secs(4 * 60 * 60);
+/// How long a check may wait for GitHub. (The updater's own timeout would also cut the download.)
+const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the UI shows in the top bar and in Preferences → Updates.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -123,7 +125,16 @@ async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
     }
     // A release can go out before its macOS bundle (no runner for it yet): until the bundle is
     // added, latest.json has no entry for this platform, which means no update, not an error.
-    let found = match app.updater().map_err(|e| e.to_string())?.check().await {
+    let checked = tokio::time::timeout(CHECK_TIMEOUT, app.updater().map_err(|e| e.to_string())?.check())
+        .await
+        .map_err(|_| {
+            crate::backend::text(
+                app,
+                "GitHub не ответил за минуту",
+                "GitHub did not answer within a minute",
+            )
+        })?;
+    let found = match checked {
         Ok(found) => found,
         Err(tauri_plugin_updater::Error::TargetNotFound(_) | tauri_plugin_updater::Error::TargetsNotFound(_)) => None,
         Err(e) => return Err(e.to_string()),

@@ -7,6 +7,10 @@ authors.workspace = true
 license.workspace = true
 description = "Mostik domain model: chats, messages, users"
 
+[features]
+# Demo data (`mock`) for the UI in a plain browser and for tests; the app goes without it.
+mock = []
+
 [dependencies]
 serde.workspace = true
-emojis = "0.9.1"
+emojis.workspace = true

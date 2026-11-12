@@ -10,14 +10,30 @@
 //! The sets and the emoji images are cached on disk: a start shows them at once and reads the chat
 //! again only when its last message or edit has changed.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use mostik_core::custom_emoji::{
     self as ce, EmojiSet, MAX_UPLOAD, SERVICE_CHAT_NAME, SERVICE_DESCRIPTION, SERVICE_MARKER, UPLOAD_SIDE,
 };
-use serde::Deserialize;
+use mostik_core::{Chat, ChatId, NotifyLevel, Snapshot, Timestamp, UserId};
+use mostik_yandex::clock;
+use mostik_yandex::convert::{self, LiveEvent};
+use mostik_yandex::diag::id_pattern;
+use mostik_yandex::web::WebClient;
+use mostik_yandex::wire::{self, request_id};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::Mutex;
 
-use super::*;
+use super::chats::{chat_info_raw, put_notify_level};
+use super::files::pick;
+use super::messages::{history_page, original_plain};
+use super::{AppState, Live, PendingFile, Shared, live, push, rpc, rpc_ok, text};
 
 /// The custom emoji sets changed: the payload is the new list.
 pub const EMOJI_EVENT: &str = "mostik://emoji";
@@ -90,6 +106,8 @@ pub struct State {
     marked: StdMutex<BTreeMap<String, u64>>,
     /// One read or write of the service chat at a time.
     busy: Mutex<()>,
+    /// Bytes of the emoji images on disk, counted at every [`download`].
+    cached_bytes: AtomicU64,
 }
 
 /// How often the alias of an organization is looked up while its service chat is unknown.
@@ -99,12 +117,9 @@ const PAGE: u32 = 50;
 const MAX_PAGES: usize = 100;
 /// Emoji images downloaded at the same time.
 const DOWNLOADS: usize = 4;
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
+/// The most bytes the emoji images take on disk. Past it a new image is not kept: it still shows,
+/// fetched when needed.
+const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
 
 fn dir(app: &AppHandle) -> Option<PathBuf> {
     app.path().app_cache_dir().ok().map(|d| d.join("emoji"))
@@ -120,6 +135,33 @@ fn with_disk<R>(app: &AppHandle, f: impl FnOnce(&mut Disk) -> R) -> R {
             .map_or_else(Disk::fresh, |b| Disk::load(&b))
     });
     f(disk)
+}
+
+/// Takes the lock of the service chat work for connection `live`: `None` once that connection is
+/// no longer the app's (a sign-out came first), so nothing of a signed-out account is written
+/// to disk again.
+async fn hold<'a>(state: &'a AppState, live: &Arc<Live>) -> Option<tokio::sync::MutexGuard<'a, ()>> {
+    let busy = state.service.busy.lock().await;
+    let current = super::live(state).await.is_ok_and(|l| Arc::ptr_eq(&l, live));
+    current.then_some(busy)
+}
+
+/// Forgets the custom emoji of a signed-out account: the disk cache and what is known of it in
+/// memory. Work on the service chat in progress finishes first.
+pub async fn forget_account(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let _busy = state.service.busy.lock().await;
+    *state.service.disk.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    state
+        .service
+        .scheduled
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    state.service.marked.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    if let Some(dir) = dir(app) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 fn save(app: &AppHandle) {
@@ -163,7 +205,7 @@ fn emit(app: &AppHandle) {
 }
 
 /// Whether a chat is a service chat: its name and the marker in its description.
-pub fn is_service_chat(chat: &mostik_core::Chat) -> bool {
+pub fn is_service_chat(chat: &Chat) -> bool {
     chat.name == SERVICE_CHAT_NAME && chat.description.as_deref().is_some_and(|d| d.contains(SERVICE_MARKER))
 }
 
@@ -171,7 +213,7 @@ fn u64_list(v: Option<&Value>) -> Vec<u64> {
     v.and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_u64)
+        .filter_map(convert::uint)
         .collect()
 }
 
@@ -290,16 +332,25 @@ pub fn hide(snapshot: &mut Snapshot, mut chats: Vec<ServiceChat>) -> Vec<Service
 /// The chat a live event is about.
 fn event_chat(ev: &LiveEvent) -> Option<(&str, bool)> {
     Some(match ev {
-        LiveEvent::Upsert { message, .. } => (message.chat_id.0.as_str(), message.thread_parent.is_none()),
+        // Joins and leaves of colleagues define no emoji.
+        LiveEvent::Upsert { message, .. } => (
+            message.chat_id.0.as_str(),
+            message.thread_parent.is_none() && message.system.is_none(),
+        ),
         LiveEvent::Deleted {
             chat_id, thread_parent, ..
         } => (chat_id.0.as_str(), thread_parent.is_none()),
         LiveEvent::Typing { chat_id, .. }
         | LiveEvent::Reactions { chat_id, .. }
         | LiveEvent::Seen { chat_id }
+        | LiveEvent::PeerSeen { chat_id, .. }
         | LiveEvent::ThreadSeen { chat_id, .. }
-        | LiveEvent::Pinned { chat_id, .. } => (chat_id.0.as_str(), false),
+        | LiveEvent::Pinned { chat_id, .. }
+        | LiveEvent::Joined { chat_id }
+        | LiveEvent::ChatRemoved { chat_id }
+        | LiveEvent::ChatChanged { chat_id, .. } => (chat_id.0.as_str(), false),
         LiveEvent::ChatAdded { chat, .. } => (chat.id.0.as_str(), false),
+        LiveEvent::Meeting(m) => (m.chat_id.0.as_str(), false),
         _ => return None,
     })
 }
@@ -321,7 +372,7 @@ pub(super) fn swallows(app: &AppHandle, shared: &StdMutex<Shared>, ev: &LiveEven
 
 /// A chat the list did not have turned out to be a service chat (the user joined it elsewhere):
 /// it is hidden from now on and read.
-pub(super) fn adopt(app: &AppHandle, shared: &StdMutex<Shared>, chat: &mostik_core::Chat) {
+pub(super) fn adopt(app: &AppHandle, shared: &StdMutex<Shared>, chat: &Chat) {
     if let Ok(mut sh) = shared.lock() {
         sh.service.insert(chat.id.0.clone());
     }
@@ -342,7 +393,7 @@ fn schedule(app: &AppHandle, chat: String) {
             s.remove(&chat);
         }
         let Ok(live) = live(&state).await else { return };
-        let _busy = state.service.busy.lock().await;
+        let Some(_busy) = hold(&state, &live).await else { return };
         let orgs = organizations_of(&app, &chat);
         if let Err(e) = refresh(&app, &live, &chat, orgs).await {
             eprintln!("service chat {}: {e}", id_pattern(&chat));
@@ -366,7 +417,7 @@ fn organizations_of(app: &AppHandle, chat: &str) -> Vec<u64> {
 pub fn start(app: AppHandle, live: Arc<Live>) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let _busy = state.service.busy.lock().await;
+        let Some(_busy) = hold(&state, &live).await else { return };
         let chats = live
             .shared
             .lock()
@@ -404,7 +455,7 @@ pub fn start(app: AppHandle, live: Arc<Live>) {
         }
         let orgs = live.shared.lock().map(|sh| sh.orgs.clone()).unwrap_or_default();
         let unknown = orgs.iter().any(|o| !has_aliased(&app, *o));
-        let due = with_disk(&app, |d| now_ms().saturating_sub(d.looked_ms) > LOOK_EVERY_MS);
+        let due = with_disk(&app, |d| clock::now_ms().saturating_sub(d.looked_ms) > LOOK_EVERY_MS);
         if unknown && due {
             for (id, orgs) in discover(&app, &live).await {
                 let _ = refresh(&app, &live, &id, orgs).await;
@@ -429,7 +480,7 @@ fn has_aliased(app: &AppHandle, org: u64) -> bool {
 /// user is not in yet. An organization whose alias is free gets it on the user's own service chat
 /// there, if the user may change that chat.
 async fn discover(app: &AppHandle, live: &Live) -> Vec<(String, Vec<u64>)> {
-    with_disk(app, |d| d.looked_ms = now_ms());
+    with_disk(app, |d| d.looked_ms = clock::now_ms());
     let orgs = live.shared.lock().map(|sh| sh.orgs.clone()).unwrap_or_default();
     let mut web = live.web.clone_light();
     let mut joined = vec![];
@@ -587,13 +638,7 @@ async fn set_alias(web: &mut WebClient, id: &str, version: u64, alias: &str) -> 
 
 /// Mutes a service chat in Telemost, so no client notifies about it.
 async fn mute(live: &Live, chat: &str) {
-    let id = chat.to_owned();
-    let (mute, mute_mentions) = NotifyLevel::Nothing.flags();
-    let r = update_bucket(live, "chat_mutings", move |v| {
-        v[&id] = json!({ "mute": mute, "mute_mentions": mute_mentions })
-    })
-    .await;
-    if let Err(e) = r {
+    if let Err(e) = put_notify_level(live, chat, NotifyLevel::Nothing).await {
         eprintln!("service chat mute: {e}");
     }
 }
@@ -638,32 +683,17 @@ fn forget(app: &AppHandle, chat: &str) {
 }
 
 /// Reads the whole service chat, rebuilds its set, keeps it on disk and marks the chat read.
-async fn refresh(app: &AppHandle, live: &Live, chat: &str, mut orgs: Vec<u64>) -> Result<(), String> {
+async fn refresh(app: &AppHandle, live: &Arc<Live>, chat: &str, mut orgs: Vec<u64>) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let mut messages = Vec::new();
     let mut before = None;
     let (mut last_ts, mut last_edit_ts, mut last_seq) = (0, 0, 0);
     for page in 0..MAX_PAGES {
-        let mut body = None;
-        for attempt in 0..2 {
-            match live
-                .xiva
-                .call("history", &HistoryRequest::page(chat, PAGE, before), HISTORY_TIMEOUT_S)
-                .await
-            {
-                Ok(v) if not_member(&v) => {
-                    forget(app, chat);
-                    return Err("the user is not in the chat any more".to_owned());
-                }
-                Ok(v) if v.get("Chats").is_some() => {
-                    body = Some(v);
-                    break;
-                }
-                Ok(v) => return Err(format!("no history: {}", shape(&v))),
-                Err(e) if attempt == 1 => return Err(e.to_string()),
-                Err(_) => {}
-            }
+        let (_, body) = history_page(&state, live.clone(), chat, PAGE, before).await?;
+        if not_member(&body) {
+            forget(app, chat);
+            return Err("the user is not in the chat any more".to_owned());
         }
-        let Some(body) = body else { break };
         let c = &body["Chats"][0];
         if page == 0 {
             last_ts = c.get("LastTsMcs").and_then(Value::as_u64).unwrap_or(0);
@@ -720,22 +750,33 @@ async fn refresh(app: &AppHandle, live: &Live, chat: &str, mut orgs: Vec<u64>) -
     Ok(())
 }
 
-/// File of an emoji image on disk.
+/// File of an emoji image on disk: the file ID made a plain file name, as an attachment's name is.
 fn file_path(app: &AppHandle, file_id: &str) -> Option<PathBuf> {
-    let safe: String = file_id
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
-        .collect();
-    dir(app).map(|d| d.join("files").join(safe))
+    dir(app).map(|d| d.join("files").join(crate::downloads::safe_name(file_id)))
 }
 
-/// Downloads the images of the emoji that are not on disk yet.
+/// Downloads the images of the emoji that are not on disk yet, after deleting the ones of emoji
+/// that are gone.
 async fn download(app: &AppHandle, live: &Live) {
     use futures_util::StreamExt;
-    let missing: Vec<String> = sets(app)
+    let ids: BTreeSet<String> = sets(app)
         .iter()
         .flat_map(|s| s.emoji.iter().chain(&s.taken))
         .map(|e| e.file_id.clone())
+        .collect();
+    if let Some(files) = dir(app).map(|d| d.join("files")) {
+        let keep: BTreeSet<std::ffi::OsString> = ids
+            .iter()
+            .filter_map(|id| file_path(app, id)?.file_name().map(ToOwned::to_owned))
+            .collect();
+        let kept = prune(&files, &keep);
+        app.state::<AppState>()
+            .service
+            .cached_bytes
+            .store(kept, Ordering::SeqCst);
+    }
+    let missing: Vec<String> = ids
+        .into_iter()
         .filter(|id| file_path(app, id).is_some_and(|p| !p.exists()))
         .collect();
     let jobs = missing.into_iter().map(|id| async move { fetch(app, live, &id).await });
@@ -746,7 +787,17 @@ async fn download(app: &AppHandle, live: &Live) {
 }
 
 async fn fetch(app: &AppHandle, live: &Live, file_id: &str) -> Result<Vec<u8>, String> {
-    let (bytes, _) = live.web.fetch_file(file_id, None).await.map_err(|e| e.to_string())?;
+    let (bytes, _) = live
+        .web
+        .fetch_file(file_id, None, ce::MAX_BYTES)
+        .await
+        .map_err(|e| e.to_string())?;
+    let cached = &app.state::<AppState>().service.cached_bytes;
+    let len = bytes.len() as u64;
+    if cached.fetch_add(len, Ordering::SeqCst) + len > CACHE_LIMIT {
+        cached.fetch_sub(len, Ordering::SeqCst);
+        return Ok(bytes);
+    }
     if let Some(path) = file_path(app, file_id)
         && let Some(parent) = path.parent()
         && std::fs::create_dir_all(parent).is_ok()
@@ -757,6 +808,21 @@ async fn fetch(app: &AppHandle, live: &Live, file_id: &str) -> Result<Vec<u8>, S
         }
     }
     Ok(bytes)
+}
+
+/// Deletes the files in `dir` whose names are not in `keep` (images of deleted emoji, leftovers
+/// of an interrupted write). Returns the bytes of the files kept.
+fn prune(dir: &std::path::Path, keep: &BTreeSet<std::ffi::OsString>) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut kept = 0;
+    for entry in entries.flatten() {
+        if keep.contains(&entry.file_name()) {
+            kept += entry.metadata().map_or(0, |m| m.len());
+        } else {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    kept
 }
 
 /// The image type by its first bytes: the storage does not always say.
@@ -793,18 +859,11 @@ pub fn custom_emoji(app: AppHandle) -> Vec<EmojiSet> {
 #[tauri::command]
 pub async fn pick_emoji_image(app: AppHandle) -> Result<Option<PendingFile>, String> {
     use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
+    let dialog = app
+        .dialog()
         .file()
-        .add_filter("Images", &["png", "gif", "jpg", "jpeg", "webp"])
-        .pick_file(move |picked| {
-            let _ = tx.send(picked);
-        });
-    let picked = rx.await.map_err(|e| e.to_string())?;
-    let Some(path) = picked.and_then(|f| f.into_path().ok()) else {
-        return Ok(None);
-    };
-    Ok(allow_files(&app, &[path]).into_iter().next())
+        .add_filter("Images", &["png", "gif", "jpg", "jpeg", "webp"]);
+    Ok(pick(&app, dialog, false).await?.into_iter().next())
 }
 
 /// An image ready to post: bytes, file extension and MIME type, size.
@@ -895,7 +954,7 @@ fn taken_error(app: &AppHandle) -> String {
 
 /// The service chat for organization `org` to post to: a known one, one found among the public
 /// chats, or a new one.
-async fn chat_for(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(String, Vec<u64>), String> {
+async fn chat_for(app: &AppHandle, live: &Arc<Live>, org: Option<u64>) -> Result<(String, Vec<u64>), String> {
     if let Some(s) = ce::set_for(&sets(app), &[], org) {
         return Ok((s.chat_id.0.clone(), s.organizations.clone()));
     }
@@ -917,15 +976,12 @@ async fn chat_for(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(Str
 /// Creates the service chat: a public group of organization `org` with the marker in its
 /// description, muted. Telemost puts a new group in no organization until it is given one.
 async fn create(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(String, Vec<u64>), String> {
-    let mut web = live.web.clone_light();
-    let v = web
-        .rpc(
-            "create_chat",
-            json!({ "name": SERVICE_CHAT_NAME, "members": [live.me.0], "channel": false, "public": true }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&v)?;
+    let v = rpc(
+        live,
+        "create_chat",
+        json!({ "name": SERVICE_CHAT_NAME, "members": [live.me.0], "channel": false, "public": true }),
+    )
+    .await?;
     let id = v
         .pointer("/data/chat_id")
         .and_then(Value::as_str)
@@ -936,15 +992,14 @@ async fn create(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(Strin
         sh.service.insert(id.clone());
     }
     let version = v.pointer("/data/version").and_then(Value::as_u64).unwrap_or(0);
-    let r = web
-        .rpc(
-            "set_chat_info",
-            json!({ "chat_id": id, "version": version, "name": SERVICE_CHAT_NAME,
-                "description": SERVICE_DESCRIPTION, "public": true }),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    rpc_ok(&r)?;
+    rpc(
+        live,
+        "set_chat_info",
+        json!({ "chat_id": id, "version": version, "name": SERVICE_CHAT_NAME,
+            "description": SERVICE_DESCRIPTION, "public": true }),
+    )
+    .await?;
+    let mut web = live.web.clone_light();
     if let Some(org) = org {
         let r = web
             .rpc(
@@ -1033,7 +1088,7 @@ pub async fn add_custom_emoji(
             .to_owned()
         })?;
     let live = live(&state).await?;
-    let _busy = state.service.busy.lock().await;
+    let _busy = hold(&state, &live).await.ok_or("signed out")?;
     let (chat, orgs) = chat_for(&app, &live, emoji.org).await?;
     let taken = sets(&app)
         .iter()
@@ -1044,19 +1099,15 @@ pub async fn add_custom_emoji(
     let payload = request_id();
     let file_name = format!("{}.{}", emoji.name, prepared.ext);
     let size = prepared.bytes.len();
-    let mut web = live.web.clone_light();
-    let up = web
+    let file_id = live
+        .web
+        .clone_light()
         .upload_file(&chat, &payload, &file_name, prepared.mime, prepared.bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let file_id = up
-        .get("file_id")
-        .and_then(Value::as_str)
-        .ok_or("Telemost did not return file_id")?;
-    let item = json!({ "Image": { "Width": prepared.width, "Height": prepared.height,
-        "FileInfo": { "Id2": file_id, "Name": file_name, "Size": size } } });
-    let msg = json!({ "Plain": { "ChatId": chat, "PayloadId": payload,
-        "Gallery": { "Items": [item], "Text": ce::caption(&emoji.name) } } });
+    let info = wire::file_info(&file_id, &file_name, size);
+    let item = wire::gallery_image(prepared.width.into(), prepared.height.into(), info);
+    let msg = wire::gallery(&chat, &payload, vec![item], &ce::caption(&emoji.name));
     push(&live, msg).await?;
     refresh(&app, &live, &chat, orgs).await?;
     emit(&app);
@@ -1076,7 +1127,7 @@ pub async fn rename_custom_emoji(
         return Err(e);
     }
     let live = live(&state).await?;
-    let _busy = state.service.busy.lock().await;
+    let _busy = hold(&state, &live).await.ok_or("signed out")?;
     let taken = sets(&app)
         .iter()
         .any(|s| s.chat_id.0 == chat_id && s.emoji.iter().any(|e| e.name == name && e.ts != ts));
@@ -1100,7 +1151,7 @@ pub async fn delete_custom_emoji(
     ts: Timestamp,
 ) -> Result<Vec<EmojiSet>, String> {
     let live = live(&state).await?;
-    let _busy = state.service.busy.lock().await;
+    let _busy = hold(&state, &live).await.ok_or("signed out")?;
     push(&live, wire::delete(&chat_id, ts)).await?;
     let orgs = organizations_of(&app, &chat_id);
     refresh(&app, &live, &chat_id, orgs).await?;
@@ -1111,6 +1162,24 @@ pub async fn delete_custom_emoji(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_keeps_only_current_images() {
+        let dir = std::env::temp_dir().join(format!("mostik-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, len) in [("disk_a", 3), ("disk_b", 5), ("disk_c.tmp", 7)] {
+            std::fs::write(dir.join(name), vec![0; len]).unwrap();
+        }
+        let keep = BTreeSet::from(["disk_a".into(), "disk_x".into()]);
+        assert_eq!(prune(&dir, &keep), 3);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, ["disk_a"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sniffs_images() {

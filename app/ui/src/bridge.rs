@@ -1,6 +1,6 @@
 //! Tauri command calls and event subscriptions. Without Tauri (in a browser) the UI runs on demo data.
 
-use mostik_core::{Chat, ChatId, Message, Reaction, Snapshot, Timestamp, User, UserId};
+use mostik_core::{Chat, ChatId, Message, Reaction, Snapshot, Timestamp, UnreadBadge, User, UserId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -9,6 +9,10 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
     async fn tauri_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+
+    /// `invoke` with options: raw bytes as the arguments and request headers.
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
+    async fn tauri_invoke_with(cmd: &str, args: JsValue, options: JsValue) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], js_name = listen, catch)]
     async fn tauri_listen(event: &str, handler: &Closure<dyn FnMut(JsValue)>) -> Result<JsValue, JsValue>;
@@ -51,7 +55,7 @@ pub async fn listen<T: DeserializeOwned + 'static>(event: &str, mut handler: imp
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Boot {
     NeedLogin { reason: Option<String> },
-    Ready { snapshot: Snapshot },
+    Ready { snapshot: Box<Snapshot> },
 }
 
 /// Mirror of `mostik_yandex::convert::LiveEvent`.
@@ -84,13 +88,18 @@ pub enum LiveEvent {
     Seen {
         chat_id: ChatId,
     },
+    PeerSeen {
+        chat_id: ChatId,
+        user: UserId,
+        ts: Timestamp,
+        reads: Option<mostik_core::Reads>,
+    },
     ThreadSeen {
         chat_id: ChatId,
         parent: Timestamp,
     },
     Online {
         user: UserId,
-        online: bool,
     },
     Status(mostik_core::PresenceInfo),
     Pinned {
@@ -112,6 +121,28 @@ pub enum LiveEvent {
         threads: Vec<mostik_core::FollowedThread>,
         users: Vec<User>,
     },
+    ChatRemoved {
+        chat_id: ChatId,
+    },
+    ChatChanged {
+        chat_id: ChatId,
+        name: Option<String>,
+        description: Option<String>,
+        member_count: Option<u32>,
+    },
+    Folders {
+        folders: Vec<mostik_core::ChatFolder>,
+    },
+    Starred {
+        chats: Vec<ChatId>,
+    },
+    Mutings {
+        chats: Vec<(ChatId, mostik_core::NotifyLevel)>,
+    },
+    Meeting(mostik_core::Meeting),
+    Paused {
+        pause: Option<mostik_core::Pause>,
+    },
 }
 
 pub const EVENT: &str = "mostik://event";
@@ -120,6 +151,8 @@ pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
 /// The current call changed: [`CallInfo`] or `null`.
 pub const CALL_EVENT: &str = "mostik://call";
+/// The call ringing for the user changed: [`Ring`] or `null`.
+pub const RING_EVENT: &str = "mostik://ring";
 
 /// Mirror of the backend `CallInfo`: the call window that is open now.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -261,6 +294,13 @@ pub struct HistoryPage {
     pub users: Vec<User>,
     /// The server may have older messages.
     pub more: bool,
+    /// The time of the oldest record of the page, deleted messages and service records included:
+    /// the next older page starts before it.
+    #[serde(default)]
+    pub oldest: Option<Timestamp>,
+    /// How far the others have read the chat (`LastSeenTsMcs`); 0 for a thread.
+    #[serde(default)]
+    pub peer_seen: Timestamp,
 }
 
 pub async fn history(
@@ -470,6 +510,17 @@ pub async fn set_window_title(title: &str) -> Result<(), String> {
 }
 
 #[derive(Serialize)]
+struct BadgeArgs {
+    badge: UnreadBadge,
+    count: u32,
+}
+
+/// The unread mark on the tray icon, the taskbar button or the Dock icon.
+pub async fn set_unread_badge(badge: UnreadBadge, count: u32) -> Result<(), String> {
+    call("set_unread_badge", BadgeArgs { badge, count }).await
+}
+
+#[derive(Serialize)]
 struct ZoomArgs {
     scale: f64,
 }
@@ -588,7 +639,7 @@ pub async fn chat_details(chat_id: &str) -> Result<ChatDetails, String> {
     call("chat_details", ChatArgs { chat_id }).await
 }
 
-/// A file picked in the dialog or dropped onto the window.
+/// A file picked in the dialog, dropped onto the window or pasted.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PendingFile {
     pub path: String,
@@ -613,6 +664,24 @@ pub struct OpenTarget {
 
 pub async fn pick_files() -> Result<Vec<PendingFile>, String> {
     call("pick_files", NoArgs {}).await
+}
+
+/// Hands the contents of a pasted or dropped file to the app, which keeps it to be sent like a
+/// picked one. The bytes go as they are, not as JSON.
+pub async fn keep_file(name: &str, data: &js_sys::ArrayBuffer) -> Result<PendingFile, String> {
+    if !available() {
+        return Err("keep_file: no Tauri backend".into());
+    }
+    let headers = js_sys::Object::new();
+    let name = js_sys::encode_uri_component(name);
+    js_sys::Reflect::set(&headers, &"x-file-name".into(), &name).map_err(|e| format!("{e:?}"))?;
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &"headers".into(), &headers).map_err(|e| format!("{e:?}"))?;
+    let body = js_sys::Uint8Array::new(data);
+    let value = tauri_invoke_with("keep_file", body.into(), options.into())
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| format!("keep_file: {e}"))
 }
 
 #[derive(Serialize)]
@@ -725,11 +794,6 @@ struct StarArgs<'a> {
     starred: bool,
 }
 
-/// Chat folders of every organization, read afresh from Telemost.
-pub async fn chat_folders() -> Result<Vec<mostik_core::ChatFolder>, String> {
-    call("chat_folders", NoArgs {}).await
-}
-
 #[derive(Serialize)]
 struct FoldersArgs<'a> {
     org: &'a str,
@@ -823,7 +887,7 @@ pub async fn leave_call() -> Result<(), String> {
     call("leave_call", NoArgs {}).await
 }
 
-/// A call ringing for the user, for the popup (mirror of the backend `ring::Ring`).
+/// A call ringing for the user, for the incoming call dialog (mirror of the backend `ring::Ring`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ring {
@@ -839,7 +903,7 @@ struct AnswerArgs {
     accept: bool,
 }
 
-/// "Accept" or "Decline" in the popup.
+/// "Accept" or "Decline" in the incoming call dialog.
 pub async fn answer_ring(accept: bool) -> Result<(), String> {
     call("answer_ring", AnswerArgs { accept }).await
 }

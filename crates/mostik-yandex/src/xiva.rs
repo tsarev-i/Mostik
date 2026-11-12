@@ -9,6 +9,10 @@
 //! u32 LE   0
 //! JSON     body in protobuf JSON (PascalCase fields)
 //! ```
+//!
+//! Some pushes come with protocol version 4 and a protobuf body instead. Each of them is a twin
+//! of a JSON push with the same event (same `ServerMessageInfo.Timestamp` and author, checked on
+//! an hour of live traffic including calls), so they are recognised and skipped unread.
 
 use rmpv::Value as Mp;
 use serde::Serialize;
@@ -18,6 +22,8 @@ use std::io::Cursor;
 pub const FRAME_RPC: u8 = 1;
 pub const FRAME_PUSH: u8 = 3;
 pub const PROTOCOL_VERSION: u32 = 5;
+/// The version of a push whose body is protobuf: a duplicate of a JSON push.
+pub const PROTOBUF_VERSION: u32 = 4;
 
 /// The three words between the msgpack header and the JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +59,8 @@ pub enum Frame {
         meta: Meta,
         body: Value,
     },
+    /// A push in protobuf ([`PROTOBUF_VERSION`]): the same event also comes in JSON.
+    ProtobufTwin { event: String },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +93,22 @@ fn write_meta(out: &mut Vec<u8>, meta: Meta) {
     }
 }
 
+/// A `delivery` push as the server sends it, for tests.
+#[cfg(test)]
+pub(crate) fn encode_push(meta: Meta, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![FRAME_PUSH];
+    let header = Mp::Array(vec![
+        Mp::from("1130000000000001"),
+        Mp::from("messenger-prod"),
+        Mp::from("delivery"),
+        Mp::from("transit-0001"),
+    ]);
+    let _ = rmpv::encode::write_value(&mut out, &header);
+    write_meta(&mut out, meta);
+    out.extend_from_slice(body);
+    out
+}
+
 /// The `seq` of a response frame, read from its header alone: a response whose body does not
 /// decode can still be matched to its request.
 pub fn rpc_seq(bytes: &[u8]) -> Option<u64> {
@@ -94,26 +118,6 @@ pub fn rpc_seq(bytes: &[u8]) -> Option<u64> {
     }
     let header = rmpv::decode::read_value(&mut Cursor::new(rest)).ok()?;
     header.as_array()?.get(1)?.as_u64()
-}
-
-/// The event name and metadata of a push frame, read from its header alone: a push whose body is
-/// not JSON (some come in protobuf) can still be told apart. The rest of the frame is its body.
-pub fn push_head(bytes: &[u8]) -> Option<(String, Meta, &[u8])> {
-    let (&kind, rest) = bytes.split_first()?;
-    if kind != FRAME_PUSH {
-        return None;
-    }
-    let mut cursor = Cursor::new(rest);
-    let header = rmpv::decode::read_value(&mut cursor).ok()?;
-    let event = header.as_array()?.get(2)?.as_str()?.to_owned();
-    let tail = rest.get(cursor.position() as usize..)?;
-    let word = |i: usize| Some(u32::from_le_bytes(tail.get(i..i + 4)?.try_into().ok()?));
-    let meta = Meta {
-        version: word(0)?,
-        aux: word(4)?,
-        reserved: word(8)?,
-    };
-    Some((event, meta, &tail[12..]))
 }
 
 /// Decodes a frame received from the socket.
@@ -131,12 +135,6 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
         aux: word(4),
         reserved: word(8),
     };
-    let json = &tail[12..];
-    let body = if json.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(json)?
-    };
     let items = header
         .as_array()
         .ok_or_else(|| FrameError::Header("header is not an array".into()))?;
@@ -146,6 +144,15 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
             .and_then(Mp::as_str)
             .map(str::to_owned)
             .ok_or_else(|| FrameError::Header(format!("no string at position {i}")))
+    };
+    if kind == FRAME_PUSH && meta.version == PROTOBUF_VERSION {
+        return Ok(Frame::ProtobufTwin { event: text(2)? });
+    }
+    let json = &tail[12..];
+    let body = if json.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(json)?
     };
     match kind {
         FRAME_RPC => Ok(Frame::Rpc {
@@ -219,23 +226,14 @@ mod tests {
 
     #[test]
     fn decodes_push() {
-        let mut bytes = vec![FRAME_PUSH];
-        let header = Mp::Array(vec![
-            Mp::from("1130000000000001"),
-            Mp::from("messenger-prod"),
-            Mp::from("delivery"),
-            Mp::from("transit-0001"),
-        ]);
-        rmpv::encode::write_value(&mut bytes, &header).unwrap();
-        write_meta(
-            &mut bytes,
+        let bytes = encode_push(
             Meta {
                 version: 5,
                 aux: 0x8686_c84a,
                 reserved: 0,
             },
+            br#"{"ClientMessage":{"Typing":{"ChatId":"0/0/abc"}}}"#,
         );
-        bytes.extend_from_slice(br#"{"ClientMessage":{"Typing":{"ChatId":"0/0/abc"}}}"#);
         match decode(&bytes).unwrap() {
             Frame::Push {
                 service,
@@ -251,6 +249,23 @@ mod tests {
             }
             other => panic!("expected a push, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn recognises_a_protobuf_twin() {
+        let meta = Meta {
+            version: PROTOBUF_VERSION,
+            aux: 1,
+            reserved: 0,
+        };
+        // Protobuf: field 1, length 3, "abc"; not JSON.
+        let bytes = encode_push(meta, &[0x0a, 0x03, b'a', b'b', b'c']);
+        assert_eq!(
+            decode(&bytes).unwrap(),
+            Frame::ProtobufTwin {
+                event: "delivery".into()
+            }
+        );
     }
 
     #[test]

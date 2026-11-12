@@ -1,0 +1,195 @@
+/* ── Sidebar ────────────────────────────────────────────────────── */
+
+.sidebar {
+  width: var(--sidebar-w);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--sidebar-top), var(--sidebar-bottom));
+  color: var(--sidebar-text);
+}
+
+.sb-header {
+  height: 49px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 0 16px;
+}
+
+/* A long organization name is truncated; the buttons on the right stay in place. */
+.ws-name {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  margin-left: -6px;
+  border-radius: 6px;
+  color: var(--chrome-strong);
+  font-size: 18px;
+  font-weight: 900;
+}
+.ws-name:hover { background: var(--sidebar-hover); }
+.ws-name > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ws-name > svg { flex: none; }
+
+.sb-scroll { flex: 1; overflow-y: auto; padding: 4px 0 12px; }
+.sb-scroll::-webkit-scrollbar { width: 8px; }
+.sb-scroll::-webkit-scrollbar-thumb { background: rgba(var(--chrome-ink), 0.15); border-radius: 4px; }
+
+.sb-find { flex: none; padding: 4px 16px 6px; }
+.sb-find.hidden { display: none; }
+.sb-find-field {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 0 10px;
+  border: 1px solid rgba(var(--chrome-ink), 0.22);
+  border-radius: 8px;
+  background: rgba(var(--chrome-ink), 0.06);
+  color: rgba(var(--chrome-ink), 0.7);
+  cursor: text;
+}
+.sb-find-field:hover { border-color: rgba(var(--chrome-ink), 0.35); }
+.sb-find-field:focus-within { border-color: rgba(var(--chrome-ink), 0.55); background: rgba(var(--chrome-ink), 0.1); }
+.sb-find-field > svg { flex: none; }
+.sb-find-field input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; color: var(--chrome-strong); font: inherit; font-size: 14px; }
+.sb-find-field input::placeholder { color: rgba(var(--chrome-ink), 0.6); }
+/* A round "×" filled with the ink colour, as in Slack; the cross is cut out in the sidebar colour. */
+.sb-find-clear { flex: none; width: 18px; height: 18px; margin-right: 4px; display: grid; place-items: center; border-radius: 50%; background: rgba(var(--chrome-ink), 0.7); color: var(--sidebar-bottom); }
+.sb-find-clear svg { stroke-width: 3; }
+.sb-find-clear:hover { background: var(--chrome-strong); }
+.sb-find-empty { padding: 8px 24px; color: rgba(var(--chrome-ink), 0.6); font-size: 14px; }
+
+.sb-quick { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid rgba(var(--chrome-ink), 0.08); }
+
+.sb-section { margin-bottom: 10px; }
+
+.sb-section-title {
+  position: relative;
+  height: 28px;
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 0 20px;
+  border-radius: 6px;
+  color: rgba(var(--chrome-ink), 0.72);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-align: left;
+}
+.sb-section-head:hover .sb-section-title,
+.sb-section-head.menu-open .sb-section-title { background: var(--sidebar-hover); color: var(--chrome-strong); }
+/* Room for "+" and "⋮" only while they show, so that a long name is not cut short for nothing. */
+.sb-section-head:hover .sb-section-title,
+.sb-section-head.menu-open .sb-section-title,
+.sb-section-head:focus-within .sb-section-title { padding-right: 64px; }
+.sb-section-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* An icon-less title starts where a section icon would; its caret sits in the gap on the left. */
+.sb-section-slot { position: absolute; left: 2px; top: 6px; width: 16px; height: 16px; display: grid; place-items: center; }
+.sb-section-slot > * { grid-area: 1 / 1; }
+/* A section with an icon reads like a chat row, a step to the left of its chats. */
+.sb-section-title.with-icon { padding-left: 16px; color: inherit; font-size: 15px; font-weight: 500; letter-spacing: 0; }
+.sb-section-title.with-icon .sb-section-slot { position: static; flex: none; width: 20px; height: 20px; }
+.sb-section-icon { display: grid; place-items: center; line-height: 1; opacity: 0.85; transition: opacity 0.12s; }
+.sb-section-icon.emoji { font-size: 15px; opacity: 1; }
+.sb-section-head:hover .sb-section-icon,
+.sb-section-title:focus-visible .sb-section-icon { opacity: 0; }
+/* The caret: hidden; on hover it appears pointing right and turns down over an expanded section. */
+.caret { display: grid; place-items: center; opacity: 0; transform: rotate(-90deg); transition: opacity 0.12s, transform 0.18s ease-out; }
+.sb-section-head:hover .caret,
+.sb-section-title:focus-visible .caret { opacity: 1; }
+.sb-section-head:hover .caret:not(.collapsed),
+.sb-section-title:focus-visible .caret:not(.collapsed) { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .caret { transition: opacity 0.12s; }
+}
+
+.sb-section-head { position: relative; }
+.sb-section-tools {
+  position: absolute;
+  top: 2px;
+  right: 12px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+.sb-section-head:hover .sb-section-tools,
+.sb-section-head.menu-open .sb-section-tools,
+.sb-section-tools:focus-within { opacity: 1; }
+.sb-section-tool {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: rgba(var(--chrome-ink), 0.75);
+}
+.sb-section-tool:hover { background: rgba(var(--chrome-ink), 0.12); color: var(--chrome-strong); }
+
+
+.sb-row {
+  height: 28px;
+  width: calc(100% - 16px);
+  margin: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 16px;
+  border-radius: 6px;
+  text-align: left;
+  white-space: nowrap;
+}
+/* Chats sit a little to the right of their section header, as in Slack, so the headers stand out. */
+.sb-section .sb-row { padding-left: 26px; }
+.sb-row:hover { background: var(--sidebar-hover); }
+.sb-row.ctx:not(.selected) { background: var(--sidebar-hover); }
+.sb-row.selected { background: var(--sidebar-selected); color: #fff; }
+.sb-row.unread { color: var(--chrome-strong); font-weight: 900; }
+.sb-row.muted { opacity: 0.55; }
+.window.chat-dragging { cursor: grabbing; user-select: none; }
+.window.chat-dragging .sb-row:hover:not(.selected) { background: transparent; }
+.sb-row.dragging { opacity: 0.4; }
+.sb-row.drop-before { box-shadow: 0 -2px 0 var(--accent-blue); }
+.sb-row.drop-after { box-shadow: 0 2px 0 var(--accent-blue); }
+.section-emoji-btn { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; color: var(--text-muted); }
+.section-emoji-btn:hover { background: var(--bg-hover); color: var(--text); }
+.section-emoji { font-size: 18px; line-height: 1; }
+.section-emoji-clear { flex: none; }
+.sb-section.drop-into { border-radius: 6px; box-shadow: inset 0 0 0 2px var(--accent-blue); }
+
+.sb-icon { width: 20px; display: grid; place-items: center; flex: none; opacity: 0.85; }
+.sb-icon.face { opacity: 1; }
+/* The emoji a group name starts with (`⚠️|Test`), in place of `#`. */
+.chat-emoji { display: inline-grid; place-items: center; line-height: 1; }
+.sb-icon:has(> .chat-emoji) { opacity: 1; }
+.sb-icon.add {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: rgba(var(--chrome-ink), 0.1);
+}
+.sb-name { overflow: hidden; text-overflow: ellipsis; }
+.sb-you { color: rgba(var(--chrome-ink), 0.55); font-weight: 400; }
+.sb-add { color: rgba(var(--chrome-ink), 0.75); }
+
+.badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--badge);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}

@@ -1,0 +1,436 @@
+/* ── Main column ────────────────────────────────────────────────── */
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.ch-header {
+  flex: none;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.ch-title-row {
+  height: 49px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px 0 16px;
+}
+
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+.icon-btn:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
+/* The header "⋮" while its menu is open. */
+.ch-more.open { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
+
+.ch-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 900;
+}
+.ch-title:hover { background: rgba(255, 255, 255, 0.08); }
+.ch-kind { display: grid; place-items: center; color: var(--text); }
+
+.ch-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+
+.ch-members {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.ch-members:hover { background: rgba(255, 255, 255, 0.06); }
+
+.huddle-btn {
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.huddle-btn:hover { background: rgba(255, 255, 255, 0.06); }
+/* In this chat's call: green, like the active huddle toggle in Slack. */
+.huddle-btn.active { border-color: var(--online); background: var(--online); color: #fff; }
+.huddle-btn.active:hover { background: #239a69; }
+/* A call is going on in the chat: "Join" in green outline. */
+.huddle-btn.live { border-color: var(--online); color: var(--online); }
+
+.ch-tabs { height: 37px; display: flex; align-items: stretch; gap: 4px; padding: 0 12px; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-bottom: 2px solid transparent;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.tab:hover { color: var(--text-strong); }
+.tab.active { color: var(--text-strong); border-bottom-color: var(--text-strong); }
+
+/* ── Feed ───────────────────────────────────────────────────────── */
+
+/* The feed keeps its place itself (MessageList): no scroll anchoring of the engine on top of it. */
+.messages { flex: 1; overflow-y: auto; overflow-anchor: none; padding-bottom: 12px; }
+.messages::-webkit-scrollbar, .tp-scroll::-webkit-scrollbar { width: 10px; }
+.messages::-webkit-scrollbar-thumb, .tp-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 5px;
+  border: 2px solid var(--bg);
+}
+
+.intro { padding: 64px 20px 16px; }
+.intro-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-strong);
+  font-size: 28px;
+  font-weight: 900;
+}
+.intro p { margin: 6px 0 0; color: var(--text-muted); }
+
+.day-divider {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  justify-content: center;
+  margin: 8px 0 4px;
+  pointer-events: none;
+}
+.day-divider::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  border-top: 1px solid var(--border-soft);
+}
+.day-pill {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 12px 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg);
+  font-size: 13px;
+  font-weight: 700;
+  pointer-events: auto;
+}
+
+.msg { position: relative; padding: 8px 20px; }
+.msg.grouped { padding-top: 2px; padding-bottom: 2px; }
+.msg:hover { background: var(--bg-hover); }
+.msg.mention-me { background: var(--mention-bg); box-shadow: inset 2px 0 0 var(--mention-bar); }
+.msg.important { background: var(--important-bg); }
+
+.important-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px 48px;
+  font-size: 13px;
+  color: var(--online);
+}
+
+/* "A call started / ended" line in the feed, like Slack's huddle message. */
+.msg.call-note { display: flex; align-items: center; gap: 8px; }
+/* The size and place of an author's avatar, as in Slack. */
+.call-note-icon {
+  width: 40px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center start;
+}
+.call-note-badge {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--online);
+  color: #fff;
+}
+.call-note.ended .call-note-badge { background: var(--bg-hover); color: var(--text-muted); }
+.call-note-body { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.call-note-title { color: var(--text-strong); font-weight: 700; }
+.call-note.missed .call-note-badge { background: rgba(224, 30, 90, 0.16); color: var(--badge); }
+.call-note.missed .call-note-title { color: var(--badge); }
+.call-note-sep, .call-note-meta { color: var(--text-muted); font-size: 13px; }
+/* A note about the chat (created, people added or removed): the call line's look, muted. */
+.chat-note-text { color: var(--text-muted); }
+.chat-note-text .msg-author { color: var(--text); font-weight: 700; }
+.call-join { flex: none; display: flex; align-items: center; gap: 6px; border-color: var(--online); color: var(--online); }
+
+.msg-row { display: flex; gap: 8px; }
+.msg-gutter { width: 40px; flex: none; padding-top: 4px; }
+.msg.grouped .msg-gutter { padding-top: 0; }
+
+.msg-hover-time {
+  display: block;
+  width: 40px;
+  text-align: right;
+  padding-right: 4px;
+  font-size: 12px;
+  line-height: 22px;
+  color: var(--text-muted);
+  visibility: hidden;
+}
+.msg:hover .msg-hover-time { visibility: visible; }
+.msg-hover-time:hover, .msg-time:hover { text-decoration: underline; }
+
+.msg-content { flex: 1; min-width: 0; }
+.msg-head { display: flex; align-items: baseline; gap: 8px; }
+.msg-author { color: var(--text-strong); font-weight: 900; }
+.msg-author:hover { text-decoration: underline; cursor: pointer; }
+.msg-time { font-size: 12px; color: var(--text-muted); }
+.app-tag {
+  padding: 0 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-text b { color: var(--text-strong); font-weight: 900; }
+.msg-text code {
+  padding: 1px 3px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--code-text);
+  font: 12px var(--mono);
+}
+.msg-link { color: var(--link); text-decoration: none; }
+.msg-link:hover { text-decoration: underline; }
+/* Code block, as in Slack: full width, monospace, with a border. */
+.code-block {
+  margin: 4px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-block);
+  font: 12px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.mention {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--mention-chip);
+  color: var(--link);
+  cursor: pointer;
+}
+.mention.me { background: var(--mention-chip-me); color: #f2c744; }
+.mention.group { font-weight: 700; }
+.mention.person:hover { text-decoration: underline; }
+.edited { margin-left: 4px; font-family: var(--font); font-size: 13px; color: var(--text-muted); }
+
+.reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.reaction {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid transparent;
+  font-size: 12px;
+}
+.reaction:hover { border-color: rgba(255, 255, 255, 0.3); }
+.reaction.mine { background: rgba(29, 155, 209, 0.2); border-color: var(--accent-blue); }
+.reaction .emoji { font-size: 15px; line-height: 1; }
+.reaction .count { font-weight: 700; color: var(--text); }
+.reaction.add { padding: 0 6px; color: var(--text-muted); visibility: hidden; }
+.msg:hover .reaction.add { visibility: visible; }
+
+.thread-summary {
+  width: min(600px, 100%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 13px;
+}
+.thread-summary:hover { background: var(--bg); border-color: var(--border); }
+.thread-faces { display: flex; gap: 4px; flex: none; }
+.thread-count { color: var(--link); font-weight: 700; white-space: nowrap; flex: none; }
+.thread-last, .thread-open { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-last { color: var(--text-muted); }
+.thread-open { display: none; color: var(--text-muted); }
+.thread-summary .icon { margin-left: auto; visibility: hidden; color: var(--text-muted); }
+.thread-summary:hover .thread-last { display: none; }
+.thread-summary:hover .thread-open { display: inline; }
+.thread-summary:hover .icon { visibility: visible; }
+
+.msg-actions {
+  position: absolute;
+  top: -16px;
+  right: 18px;
+  z-index: 3;
+  display: none;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.msg:hover .msg-actions { display: flex; }
+.msg-actions button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.msg-actions button:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
+
+/* ── Composer ───────────────────────────────────────────────────── */
+
+.composer-wrap { flex: none; padding: 0 20px 6px; }
+.composer-wrap.in-thread { padding: 0 16px 6px; }
+
+.composer {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+.composer:focus-within, .inline-edit-box:focus-within { border-color: #6c6e72; }
+
+.composer-toolbar,
+.composer-bottom {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+}
+
+.fmt, .cb {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.fmt:hover, .cb:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
+.cb.round { border-radius: 50%; background: rgba(255, 255, 255, 0.08); }
+
+.sep { width: 1px; height: 20px; margin: 0 4px; background: var(--border); }
+.spacer { flex: 1; }
+
+.composer .editor {
+  display: block;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+  width: 100%;
+  min-height: 22px;
+  max-height: 40vh;
+  padding: 4px 12px;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font: 15px/1.46668 var(--font);
+}
+.editor-box { position: relative; }
+.editor-placeholder {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  padding: 4px 12px;
+  color: var(--text-muted);
+  font: 15px/1.46668 var(--font);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.send-group { display: flex; border-radius: 4px; overflow: hidden; background: var(--accent-green); color: #fff; }
+.send-group.empty { background: none; color: var(--text-muted); }
+.send { width: 32px; height: 28px; display: grid; place-items: center; }
+.send-group:not(.empty) button:hover { background: var(--accent-green-hover); }
+
+/* ── Thread panel ───────────────────────────────────────────────── */
+
+/* A window too narrow for both: the thread or profile takes the chat's place. */
+.card.pane-full .main, .card.pane-full .pane-resizer { display: none; }
+.card.pane-full .thread-pane { flex: 1; width: auto; min-width: 0; border-left: 0; }
+
+.thread-pane {
+  width: var(--pane-w, var(--thread-w));
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border-left: 1px solid var(--border-soft);
+}
+.tp-header {
+  height: 49px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-raised);
+}
+.tp-title { color: var(--text-strong); font-size: 18px; font-weight: 900; line-height: 1.2; }
+.tp-sub { font-size: 13px; color: var(--text-muted); line-height: 1.2; }
+.tp-scroll { flex: 1; overflow-y: auto; padding: 8px 0; }
+.tp-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 16px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.tp-divider::after { content: ""; flex: 1; border-top: 1px solid var(--border-soft); }
+.thread-pane .msg { padding-left: 16px; padding-right: 16px; }
+.thread-pane .msg-actions { right: 12px; }

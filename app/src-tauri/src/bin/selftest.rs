@@ -10,14 +10,11 @@
 //! `-- --dump [list | <chat id>]` prints the raw chat list or the latest page of a chat (read-only).
 //! `-- --buckets` prints the synced settings, `get_buckets` (read-only).
 
-#[allow(dead_code)]
-#[path = "../store.rs"]
-mod store;
-
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use mostik_app::store;
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
 use mostik_yandex::web::WebClient;
@@ -25,8 +22,6 @@ use mostik_yandex::wire::{self, HistoryRequest, PushRequest, request_id};
 use mostik_yandex::xiva_client::{Incoming, XivaClient};
 use serde_json::{Value, json};
 
-const UA: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15";
 const TEST_CHAT_NAME: &str = "test";
 const SETTLE: Duration = Duration::from_millis(800);
 
@@ -93,7 +88,7 @@ async fn main() {
 
 async fn run() -> Res<()> {
     let jar = store::load().ok_or("no saved session: sign in with Mostik first")?;
-    let ua = identity::user_agent(UA);
+    let ua = identity::user_agent(identity::BROWSER_UA);
     let mut web = WebClient::new(jar, ua.clone()).map_err(|e| e.to_string())?;
     let page = web.load_page().await.map_err(|e| e.to_string())?;
     if let Some(i) = std::env::args().position(|a| a == "--chat-info") {
@@ -106,10 +101,7 @@ async fn run() -> Res<()> {
         return Ok(());
     }
     if std::env::args().any(|a| a == "--buckets") {
-        let v = web
-            .rpc("get_buckets", json!({ "version": 0 }))
-            .await
-            .map_err(|e| e.to_string())?;
+        let v = web.buckets().await.map_err(|e| e.to_string())?;
         println!("{v}");
         return Ok(());
     }
@@ -119,18 +111,9 @@ async fn run() -> Res<()> {
     let listen = std::env::args().any(|a| a == "--listen");
     let xiva = XivaClient::connect(web.jar(), &ua, &page.puid, move |inc| {
         if listen {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis());
+            let now = mostik_yandex::clock::now_ms();
             match &inc {
                 Incoming::Push { event, body } => println!("{}", json!({ "t": now, "event": event, "body": body })),
-                Incoming::Undecoded { event, version, body } => {
-                    let hex: String = body.iter().map(|b| format!("{b:02x}")).collect();
-                    println!(
-                        "{}",
-                        json!({ "t": now, "event": event, "version": version, "hex": hex })
-                    )
-                }
                 Incoming::Text(t) => println!("{}", json!({ "t": now, "text": t })),
                 Incoming::Closed => println!("{}", json!({ "t": now, "closed": true })),
             }

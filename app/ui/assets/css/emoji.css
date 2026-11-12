@@ -1,0 +1,174 @@
+/* ── Emoji picker, as in Slack ──────────────────────────────────── */
+.ep-backdrop { position: fixed; inset: 0; z-index: 40; }
+.emoji-picker {
+  position: fixed;
+  z-index: 41;
+  width: 352px;
+  height: 420px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-popover);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+.ep-search { padding: 12px 12px 8px; }
+.ep-search .text-input { height: 32px; }
+.ep-tabs { display: flex; gap: 2px; padding: 0 8px 6px; border-bottom: 1px solid var(--border-soft); }
+.ep-tabs button { width: 32px; height: 28px; border-radius: 4px; font-size: 16px; filter: grayscale(1); opacity: 0.75; }
+.ep-tabs button:hover { background: var(--bg-hover); filter: none; opacity: 1; }
+.ep-body { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
+.ep-sec {
+  position: sticky;
+  top: 0;
+  padding: 8px 4px 4px;
+  background: var(--bg-popover);
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+.ep-grid { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); }
+.ep-cell { height: 36px; border-radius: 4px; font-size: 22px; line-height: 1; overflow: hidden; white-space: nowrap; }
+.ep-multi { font-size: 13px; letter-spacing: -1px; }
+.ep-cell:hover { background: var(--bg-hover); }
+.ep-empty { padding: 24px 8px; color: var(--text-muted); text-align: center; }
+.ep-foot { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 14px; border-top: 1px solid var(--border-soft); }
+.ep-big { font-size: 28px; line-height: 1; }
+.ep-name { color: var(--text-strong); font-weight: 700; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ep-name.muted { color: var(--text-muted); font-weight: 400; }
+/* “:code” autocomplete in the composer. */
+.emoji-suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  z-index: 8;
+  margin-bottom: 6px;
+  padding: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-popover);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.emoji-suggest button { width: 100%; display: flex; align-items: center; gap: 10px; padding: 4px 16px; text-align: left; }
+.emoji-suggest button .glyph {
+  width: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+.emoji-suggest button.active, .emoji-suggest button:hover { background: var(--highlight); color: #fff; }
+.emoji-suggest button .name { font-weight: 700; white-space: nowrap; }
+.emoji-suggest button .hint { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.emoji-suggest button.active .hint, .emoji-suggest button:hover .hint { color: rgba(255, 255, 255, 0.8); }
+
+/* Forwarded message, like a shared message in Slack. */
+.fwd { margin: 4px 0; padding: 2px 0 2px 12px; border-left: 4px solid var(--border); }
+.fwd-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.fwd-head b { color: var(--text-strong); font-weight: 900; }
+.fwd-footer { margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+.fwd-footer .link { color: var(--text-muted); }
+.fwd-footer .link:hover { color: var(--link); text-decoration: underline; }
+/* Reply: the original above the reply's text, and the bar above the field while replying. */
+.reply-ref {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: min(100%, 560px);
+  margin: 2px 0 4px;
+  padding: 2px 10px;
+  border-left: 3px solid var(--link);
+  border-radius: 0 4px 4px 0;
+  background: rgba(29, 155, 209, 0.08);
+  text-align: left;
+  font-size: 13px;
+  line-height: 18px;
+}
+.reply-ref:hover { background: rgba(29, 155, 209, 0.16); }
+.reply-author { color: var(--link); font-weight: 700; }
+.reply-line { max-width: 100%; overflow: hidden; color: var(--text-muted); white-space: nowrap; text-overflow: ellipsis; }
+.reply-ref.quoted .reply-line { font-style: italic; }
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 6px 0;
+  padding: 4px 4px 4px 10px;
+  border-left: 3px solid var(--link);
+  border-radius: 4px;
+  background: rgba(29, 155, 209, 0.08);
+  color: var(--link);
+  font-size: 13px;
+  line-height: 18px;
+}
+.reply-bar-body { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.reply-bar .reply-line { color: var(--text); }
+.pinned-label { color: var(--accent-orange); }
+.picker-results.inline { position: static; box-shadow: none; margin-top: 4px; }
+.forward-modal .area { margin-top: 12px; min-height: 60px; }
+.forward-modal .fwd { margin-top: 12px; }
+.pins-list { padding: 12px 0; }
+.pin-card { margin: 0 20px 12px; padding-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.pin-card > .link { margin-left: 72px; font-size: 13px; }
+.menu-head { display: flex; align-items: center; gap: 10px; padding: 8px 16px; }
+.menu-head b { color: var(--text-strong); font-size: 15px; }
+/* In menus: no rail spacing under the tile, or it sits higher than the name next to it. */
+.ws-tile.small { width: 28px; height: 28px; margin-bottom: 0; font-size: 13px; border-radius: 6px; flex: none; }
+.ws-name.active { background: var(--sidebar-hover); }
+.popover.menu button:disabled { opacity: 0.5; cursor: default; background: none; color: inherit; }
+/* In-place message editing, as in Slack. */
+.inline-edit { margin: 4px 0; scroll-margin: 16px 0; }
+.inline-edit-box { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-input); overflow: hidden; }
+.inline-edit .editor { display: block; width: 100%; min-height: 22px; max-height: 300px; overflow-y: auto; padding: 8px 10px; border: 0; background: transparent; color: inherit; font: inherit; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+.inline-edit-box .composer-toolbar { padding: 2px 6px; background: var(--bg-raised); border-top: 1px solid var(--border-soft); }
+.inline-edit-actions { display: flex; gap: 8px; padding: 8px 0 2px; }
+.inline-edit-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
+.msg.editing .msg-head { display: none; }
+/* Markup in a message field shows as it will look; markers are hidden but stay in the text. */
+.editor .mk { display: none; }
+.editor .f-bold { font-weight: 700; color: var(--text-strong); }
+.editor .f-italic { font-style: italic; }
+.editor .f-strike { text-decoration: line-through; }
+.editor .f-underline { text-decoration: underline; }
+.editor .f-code, .editor .f-code-block { font-family: var(--mono); font-size: 0.9em; }
+.editor .f-code { padding: 1px 3px; border-radius: 3px; background: var(--border-soft); color: var(--code-text); }
+.editor .f-link { color: var(--link); }
+/* A code block, as in Slack: a grey monospace block, like the one in a message. */
+.editor .f-code-block {
+  display: block;
+  margin: 4px 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-block);
+  line-height: 1.5;
+}
+.btn.small { height: 28px; padding: 0 12px; font-size: 13px; }
+/* “Mentions” (Activity). */
+.act-tabs { display: flex; gap: 4px; padding: 4px 12px 8px; flex-wrap: wrap; }
+.act-tab { padding: 3px 10px; border-radius: 12px; border: 1px solid rgba(var(--chrome-ink), 0.2); font-size: 13px; color: rgba(var(--chrome-ink), 0.7); }
+.act-tab.active { background: var(--sidebar-selected); border-color: transparent; color: #fff; }
+.act-what { font-size: 12px; color: rgba(var(--chrome-ink), 0.6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-row .dm-name { font-weight: 700; }
+.empty-state.small { padding: 24px 16px; }
+.rail-badge { position: absolute; top: -6px; right: -10px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #cd2553; color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; }
+/* “Browse channels”. */
+.browse-modal { width: min(640px, 92vw); }
+/* As in Slack: the title, "Create a channel" and "×" in one row, the search field below it. */
+.browse-modal header { gap: 8px; margin-bottom: 16px; }
+.browse-modal header .btn { margin-left: auto; height: 32px; padding: 0 12px; font-size: 14px; }
+.browse-list { margin-top: 12px; max-height: 60vh; overflow-y: auto; }
+.browse-row { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--border); }
+.browse-icon { width: 20px; display: grid; place-items: center; color: var(--text-muted); }
+.browse-row .joined { color: var(--online); }
+/* "Threads": followed threads, new replies first. */
+.thread-row { align-items: flex-start; }
+.thread-row.selected { background: var(--bg-hover); }
+.thread-row.unread .dm-name { font-weight: 900; }
+.thread-where { font-size: 13px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Three lines by height: WebKit's line-clamp moves a link from the cut-off text to after the ellipsis. */
+.thread-text { display: block; color: var(--text); line-height: 22px; max-height: 66px; overflow: hidden; }
+.thread-meta { display: flex; gap: 10px; margin-top: 2px; font-size: 13px; color: var(--text-muted); }
+.thread-new { color: var(--badge); font-weight: 700; }

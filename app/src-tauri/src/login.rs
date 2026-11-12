@@ -19,9 +19,10 @@ const RETURN_HOST: &str = "telemost.360.yandex.ru";
 
 static NEXT_WINDOW: AtomicU32 = AtomicU32::new(1);
 
-/// The way through the login window, rewritten to `probe-login.json` on every step: page
-/// addresses without the query (it may carry tokens), load errors and the cookie names on
-/// return, never their values. Sign-in problems on other machines are read from it.
+/// The way through the login window, rewritten to `probe-login.json` on every step when the
+/// diagnostics are on (`MOSTIK_PROBE=1`, see [`crate::backend::probing`]): page addresses
+/// without the query (it may carry tokens), load errors and the cookie names on return, never
+/// their values. Sign-in problems on other machines are read from it.
 #[derive(Clone)]
 struct Trace {
     app: AppHandle,
@@ -39,6 +40,9 @@ impl Trace {
     }
 
     fn note(&self, step: Value) {
+        if !crate::backend::probing() {
+            return;
+        }
         if let Ok(mut steps) = self.steps.lock() {
             steps.push(step);
             crate::backend::write_probe(&self.app, "probe-login.json", &Value::Array(steps.clone()));

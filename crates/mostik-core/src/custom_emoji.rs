@@ -41,14 +41,18 @@ pub fn service_alias(org: u64) -> Option<String> {
 
 /// First reaction type of custom emoji ("M" in the high byte), far from Telemost's own types:
 /// `1000xx`–`1001xx` and Unicode code points.
-pub const REACTION_BASE: u64 = 0x4D00_0000;
+const REACTION_BASE: u64 = 0x4D00_0000;
 /// How many reaction types custom emoji take: one per message number of the service chat.
-pub const REACTION_SPAN: u64 = 0x0100_0000;
+const REACTION_SPAN: u64 = 0x0100_0000;
 /// Longest emoji name.
-pub const MAX_NAME: usize = 40;
+const MAX_NAME: usize = 40;
 /// Largest image accepted from the chat: a bigger one is skipped. Mostik itself posts at most
 /// [`MAX_UPLOAD`], but a person may post by hand.
 pub const MAX_BYTES: u64 = 512 * 1024;
+/// The most emoji of one service chat, names taken by an earlier one included: every client
+/// downloads them all, so a flood of messages there cannot fill everyone's disk. The earliest
+/// ones count.
+pub const MAX_EMOJI: usize = 1000;
 /// Largest image Mostik posts, like Slack's limit for custom emoji.
 pub const MAX_UPLOAD: usize = 128 * 1024;
 /// Side of the square a still image is scaled down into before posting.
@@ -154,7 +158,7 @@ pub fn name_from_file(file: &str) -> String {
 }
 
 /// The emoji name in a caption `:name:`.
-pub fn caption_name(text: &str) -> Option<&str> {
+fn caption_name(text: &str) -> Option<&str> {
     let name = text.trim().strip_prefix(':')?.strip_suffix(':')?;
     valid_name(name).then_some(name)
 }
@@ -178,6 +182,7 @@ pub fn build(chat_id: &ChatId, organizations: &[u64], messages: &[Message]) -> E
         .collect();
     defs.sort_by_key(|(m, _)| (m.seq_no, m.ts));
     defs.dedup_by_key(|(m, _)| m.seq_no);
+    defs.truncate(MAX_EMOJI);
     let mut set = EmojiSet::empty(chat_id.clone(), organizations.to_vec());
     for (m, name) in defs {
         let emoji = CustomEmoji {
@@ -273,7 +278,22 @@ mod tests {
                 .collect(),
             forwarded: vec![],
             call: None,
+            system: None,
+            reads: None,
         }
+    }
+
+    #[test]
+    fn a_set_holds_the_earliest_max_emoji() {
+        let chat = ChatId("0/0/s".into());
+        let last = MAX_EMOJI as u64 + 5;
+        let messages: Vec<Message> = (1..=last)
+            .rev()
+            .map(|seq| msg(seq, "a", &format!(":e{seq}:"), 1))
+            .collect();
+        let set = build(&chat, &[], &messages);
+        assert_eq!(set.emoji.len(), MAX_EMOJI);
+        assert_eq!(set.emoji.last().map(|e| e.kind), Some(REACTION_BASE + MAX_EMOJI as u64));
     }
 
     #[test]

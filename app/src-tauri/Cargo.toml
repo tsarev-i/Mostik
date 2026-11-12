@@ -12,8 +12,8 @@ default-run = "mostik"
 name = "mostik"
 path = "src/main.rs"
 
-# Live write self-test for development, kept out of the release bundles.
-# No tests of its own: the store.rs tests it includes already run with the main binary.
+# Live write self-test for development, kept out of the release bundles. It shares the session
+# store with the app through the library (src/lib.rs).
 [[bin]]
 name = "mostik-selftest"
 path = "src/bin/selftest.rs"
@@ -29,8 +29,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 futures-util = "0.3"
 imagesize = "0.13"
-# Custom emoji: still images are scaled down to 128 px and posted as PNG.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Custom emoji: still images are scaled down to 128 px and posted as PNG; a GIF goes as is, undecoded.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "windows-native", "apple-native"] }
 mime_guess = "2"
 mostik-core.workspace = true
@@ -47,7 +47,7 @@ tauri-plugin-notification = "2"
 # and rustls then panics without a process default. reqwest is shared with mostik-yandex, so the
 # updater uses the same rustls setup.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["system-proxy"] }
-tokio = { version = "1", features = ["fs", "macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Session cookies of the call window straight into WebView2 (see call.rs). Same versions as wry uses.

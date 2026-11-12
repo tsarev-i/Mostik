@@ -32,6 +32,11 @@ pub enum SidebarFilter {
     All,
 }
 
+impl SidebarFilter {
+    /// The choices in the order the menus list them.
+    pub const ALL: [Self; 4] = [Self::Active, Self::Unreads, Self::Mentions, Self::All];
+}
+
 /// Conversation order in the sidebar sections: "Sort conversations by" in Slack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SidebarSort {
@@ -40,6 +45,11 @@ pub enum SidebarSort {
     Recency,
     /// The order the user dragged the chats into; sections never reordered stay by recency.
     Custom,
+}
+
+impl SidebarSort {
+    /// The choices in the order the menus list them.
+    pub const ALL: [Self; 3] = [Self::Alphabetical, Self::Recency, Self::Custom];
 }
 
 /// Sidebar themes in the picker's order: Mostik's own first (the first one is the default), then the classic ones.
@@ -61,6 +71,8 @@ pub struct Settings {
     pub inline_media: bool,
     pub clock24: bool,
     pub mark_read_on_open: bool,
+    /// Show who read the user's own messages; the read markers Mostik sends do not depend on it.
+    pub show_read_receipts: bool,
     pub enter_sends: bool,
     /// UI zoom in percent, like "Accessibility → Zoom" in Slack.
     pub zoom: u32,
@@ -84,6 +96,7 @@ impl Default for Settings {
             inline_media: true,
             clock24: true,
             mark_read_on_open: true,
+            show_read_receipts: true,
             enter_sends: true,
             zoom: 100,
             sidebar_filter: SidebarFilter::Active,
@@ -108,20 +121,10 @@ pub fn zoom_step(current: u32, up: bool) -> u32 {
 
 const KEY: &str = "mostik.settings";
 
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
-}
-
 impl Settings {
     pub fn load() -> Self {
-        let mut s: Self = storage()
-            .and_then(|s| s.get_item(KEY).ok().flatten())
-            .and_then(|v| serde_json::from_str(&v).ok())
-            .unwrap_or_default();
-        // Themes an older version offered: Twilight took Aubergine's place, the others fall back to the default.
-        if s.theme == "aubergine" {
-            s.theme = "twilight".to_owned();
-        }
+        let mut s: Self = crate::storage::load(KEY).unwrap_or_default();
+        // A theme an older version offered falls back to the default.
         if !THEMES.contains(&s.theme.as_str()) {
             s.theme = Self::default().theme;
         }
@@ -133,9 +136,7 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        if let (Some(s), Ok(v)) = (storage(), serde_json::to_string(self)) {
-            let _ = s.set_item(KEY, &v);
-        }
+        crate::storage::save(KEY, self);
     }
 
     /// The effective mode, resolving "same as system".

@@ -6,8 +6,11 @@ Reference screenshots are kept locally in `docs/design/reference/` and never go 
 
 Slack's name, logo and icons are not used. The icons are our own in the Lucide style (ISC).
 The app icon is `docs/design/app-icon.png` (source: `app-icon.svg`, a suspension bridge whose cable draws the letter
-"М"). Tauri icons are generated with `cargo tauri icon docs/design/app-icon.png -o app/src-tauri/icons`
-(remove the `android` and `ios` directories afterwards).
+"М"). Tauri icons are generated with `cargo tauri icon docs/design/app-icon.png -o app/src-tauri/icons`;
+keep only what `tauri.conf.json` lists (`32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.png`, `icon.icns`,
+`icon.ico`) and remove the rest: the `android` and `ios` directories, `64x64.png` and the Microsoft Store
+logos (`Square*Logo.png`, `StoreLogo.png`). The login screen logo `app/ui/assets/app-icon.png` is a 192 px copy:
+`magick docs/design/app-icon.png -resize 192x192 -strip app/ui/assets/app-icon.png`.
 
 ## Layout
 
@@ -41,7 +44,7 @@ gradient window background.
 | Workspace tile | `#A9A9AC` | the rail |
 
 The other tokens (badge `#E01E5A`, online `#2BAC76`, mention highlight and so on) are
-the `:root` variables in `app/ui/assets/app.css`.
+the `:root` variables in `app/ui/assets/css/base.css`.
 
 The rail and sidebar rows above are Slack's Aubergine; Mostik no longer has that theme.
 
@@ -72,12 +75,18 @@ until then Noto Sans is used.
   start of the text, × and Escape cancel it); the sent reply shows the original above its text, and a
   click on it scrolls to the original.
 - The day separator is a centred pill that sticks to the top of the feed.
+- Read receipts, in the spirit of Slack: the time of a message underlines on hover and a second
+  later its tip gives the date and time, "Nov 10th at 10:26:52 PM", with "(read)" after it for an
+  own message someone has read (when and by how many is left out). None in "Notes", channels and
+  threads. Mostik sends no `ReadMarker`: Telemost counts reads from `SeenMarker`.
+- Changes of a chat are muted lines in its feed, like a call line: who created it, added or removed
+  people, joined or left (Telemost's `ChatCreatedInfo`, `ParticipantsChangedDiff`, `UserAction`).
 - A collapsed sidebar section still shows chats with unread messages; the open chat hides with the rest.
 - Sidebar section headers have no caret, as in Slack: on hover it shows in place of the section icon
   (the star of "Starred", the hash of "Channels", the speech bubbles of "Direct messages", a folder's
   emoji) or left of an icon-less title, and turns down over an expanded section. A section with an
-  icon lines up with the chat rows; icon-less ones ("Meeting chats", folders without an emoji) are
-  smaller muted headers.
+  icon reads like a chat row; icon-less ones ("Meeting chats", folders without an emoji) are smaller
+  muted headers. Chats sit a little to the right of their header, as in Slack.
 - A section header shows "+" and "⋮" on hover: "+" creates a channel in "Channels" and in one's own
   sections (the channel goes into that section), a message in "Direct messages"; "⋮" (or a right
   click) opens the section menu as in Slack: what the section makes, managing it, filter and sort
@@ -114,4 +123,28 @@ until then Noto Sans is used.
   `/j/<id>`), without the messenger and the Yandex 360 bar. Leaving the meeting closes the window, and a
   leftover "In meeting" status is cleared. WebKitGTK has no WebRTC, so on Linux the window is an
   installed Chromium-based browser in app mode driven over a DevTools pipe (`call.rs`, `cdp.rs`); on Windows
-  it is a WebView2 window.
+  it is a WebView2 window. On macOS, and on Linux without such a browser, the call opens in the default
+  browser instead, with no call window or sidebar call line.
+- A call is one line in its chat, as a huddle is in Slack: who started it, how many are in it now
+  (`StateSync` `meeting_updated`) and "Join"; once over, how long it lasted (`DurationSeconds` of a direct
+  call, the time since the start for a group one). A group call started outside a chat gets a temporary
+  chat of its own (`0/58/…`, "Групповой звонок 01.02 в 10:00") whose creation starts its first call; these
+  chats are meeting chats.
+
+## Connection
+
+- HTTP requests and the Xiva socket share one rustls setup with the platform verifier, so both trust
+  what the system trusts (a corporate root included), and both take the system proxy (`HTTPS_PROXY`,
+  `ALL_PROXY`, `NO_PROXY`, else the OS settings). The socket goes through an HTTP proxy with `CONNECT`;
+  a SOCKS or HTTPS proxy gets an error that names it.
+- Every network step has a time limit: an API call 20 s, a step of loading the page 30 s, opening the
+  socket 20 s, an update check a minute, a file transfer a minute plus its size at 32 KB/s; 30 s without
+  data fails a transfer.
+- Files are read piece by piece and dropped once over their limit: an image for the UI 50 MB, a custom
+  emoji 512 KB. A saved attachment goes to disk as it arrives. A service chat gives at most 1000 custom
+  emoji (the earliest), and their images keep at most 64 MB on disk; images of deleted emoji are removed.
+- Some `delivery` pushes come in protobuf (metadata version 4). Each is a twin of a JSON push of the same
+  event (same server timestamp and author, checked on an hour of live traffic), so they are skipped unread.
+- A panic in the push handler closes the connection like a network error, and the reconnection starts
+  afresh. Reconnection pauses are 2, 4 … 60 s, each stretched by up to a half at random; a connection
+  that closed while it was being set up is not kept.

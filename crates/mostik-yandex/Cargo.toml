@@ -17,6 +17,14 @@ rmpv = "1"
 bytes = "1"
 reqwest = { version = "0.13", features = ["multipart"] }
 cookie = "0.18"
-tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# Already in the tree through reqwest and url.
+percent-encoding = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "io-util"] }
+# No TLS of its own: the socket gets the same rustls setup and proxy as reqwest (see net.rs).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# The versions and features reqwest already uses, so the tree gains no crate and no ring provider.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+rustls-platform-verifier = "0.7"
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

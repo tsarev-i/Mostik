@@ -3,11 +3,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::StatusCode;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE, USER_AGENT};
 use serde_json::Value;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use crate::endpoints::{API_URL, CSRF_URL, WEB_ORIGIN};
+use crate::endpoints::{API_URL, CSRF_URL, FILES_HOST, WEB_ORIGIN};
 use crate::rpc::{FORM_FIELD, RpcRequest};
 use crate::session::CookieJar;
 
@@ -27,13 +29,23 @@ pub enum WebError {
     Unavailable { method: String, status: u16 },
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Net(#[from] crate::net::NetError),
+    /// The file is larger than the caller takes.
+    #[error("the file is larger than {} KB", .0 / 1024)]
+    TooLarge(u64),
+    /// A download got no data for [`STALL_TIMEOUT`].
+    #[error("the download stalled")]
+    Stalled,
+    #[error("could not write the file: {0}")]
+    Write(#[from] std::io::Error),
 }
 
 impl WebError {
     /// Whether trying again later may help: a timeout, no connection or a 5xx answer.
     pub fn is_transient(&self) -> bool {
         match self {
-            WebError::Unavailable { .. } => true,
+            WebError::Unavailable { .. } | WebError::Stalled => true,
             WebError::Http(e) => e.is_timeout() || e.is_connect(),
             _ => false,
         }
@@ -42,6 +54,27 @@ impl WebError {
 
 /// How long one API call may take before it counts as failed.
 const RPC_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long opening a connection may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long one step of loading the page may take.
+const PAGE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a file transfer may wait for the response or for the next piece of the file.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The slowest transfer still waited for, in bytes per second (see [`transfer_timeout`]).
+const SLOWEST_TRANSFER: u64 = 32 * 1024;
+
+/// The longest time limit of a transfer.
+const MAX_TRANSFER_TIME: Duration = Duration::from_secs(2 * 3600);
+
+/// The time limit of a transfer of `bytes`: a minute plus the time it takes at 32 KB/s, at most
+/// two hours. A transfer that stops altogether fails sooner, after [`STALL_TIMEOUT`].
+pub fn transfer_timeout(bytes: u64) -> Duration {
+    Duration::from_secs(60 + bytes / SLOWEST_TRANSFER).min(MAX_TRANSFER_TIME)
+}
 
 /// Pauses before the repeats of a reading call that failed for a transient reason.
 const READ_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
@@ -74,7 +107,7 @@ fn find_param(html: &str, key: &str) -> Option<String> {
 }
 
 /// Reads the user parameters from the web client page.
-pub fn parse_page_params(html: &str) -> Result<PageParams, WebError> {
+fn parse_page_params(html: &str) -> Result<PageParams, WebError> {
     let logged_in = find_param(html, "loggedIn").as_deref() == Some("true");
     let puid = find_param(html, "puid")
         .filter(|p| !p.is_empty() && p != "null")
@@ -87,7 +120,7 @@ pub fn parse_page_params(html: &str) -> Result<PageParams, WebError> {
 }
 
 /// Extracts the CSRF token from the `/csrf-token/` response; accepts several layouts.
-pub fn parse_csrf(body: &str) -> Option<String> {
+fn parse_csrf(body: &str) -> Option<String> {
     if let Ok(v) = serde_json::from_str::<Value>(body) {
         for key in ["token", "csrf_token", "csrf", "csrfToken"] {
             if let Some(t) = v.get(key).and_then(Value::as_str) {
@@ -122,13 +155,22 @@ pub struct WebClient {
 const PAGE_REDIRECTS: usize = 8;
 
 impl WebClient {
+    /// Both clients share the TLS setup of the socket ([`crate::net`]). Every request has a time
+    /// limit: an API call or the token [`RPC_TIMEOUT`], a page step [`PAGE_TIMEOUT`], a file one
+    /// that grows with its size ([`transfer_timeout`]).
     pub fn new(jar: CookieJar, user_agent: String) -> Result<Self, WebError> {
+        let tls = crate::net::http_tls()?;
         let http = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls.clone())
             .redirect(reqwest::redirect::Policy::limited(5))
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(RPC_TIMEOUT)
             .build()?;
         let page_http = reqwest::Client::builder()
+            .tls_backend_preconfigured(tls)
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(PAGE_TIMEOUT)
             .build()?;
         Ok(Self {
             http,
@@ -156,10 +198,6 @@ impl WebClient {
 
     pub fn jar(&self) -> &CookieJar {
         &self.jar
-    }
-
-    pub fn user_agent(&self) -> &str {
-        &self.user_agent
     }
 
     fn headers(&self, host: &str) -> HeaderMap {
@@ -220,7 +258,7 @@ impl WebClient {
     }
 
     /// CSRF token for write requests; fetched once and cached until the server rejects it.
-    pub async fn csrf_token(&self) -> Result<String, WebError> {
+    async fn csrf_token(&self) -> Result<String, WebError> {
         if let Some(t) = self.csrf.lock().ok().and_then(|c| c.clone()) {
             return Ok(t);
         }
@@ -251,20 +289,49 @@ impl WebClient {
         }
     }
 
-    /// File or preview from the Messenger storage: `file_shortterm/<Id2>[?size=…]`.
-    /// Returns the content and its `Content-Type`.
-    pub async fn fetch_file(&self, file_id: &str, size: Option<&str>) -> Result<(Vec<u8>, String), WebError> {
-        let mut url = format!("https://{}/file_shortterm/{file_id}", crate::endpoints::FILES_HOST);
-        if let Some(size) = size {
-            url.push_str("?size=");
-            url.push_str(size);
+    /// A file or preview of the Messenger storage, whole, with its `Content-Type`. A file larger
+    /// than `limit` bytes is refused.
+    pub async fn fetch_file(
+        &self,
+        file_id: &str,
+        size: Option<&str>,
+        limit: u64,
+    ) -> Result<(Vec<u8>, String), WebError> {
+        self.fetch(&file_url(file_id, size), limit, STALL_TIMEOUT).await
+    }
+
+    /// Writes a file of the Messenger storage into `out` as it arrives, whatever its size.
+    /// Returns the number of bytes written.
+    pub async fn download(&self, file_id: &str, out: &mut (impl AsyncWrite + Unpin)) -> Result<u64, WebError> {
+        let mut download = self.open(&file_url(file_id, None), u64::MAX, STALL_TIMEOUT).await?;
+        while let Some(chunk) = download.next().await? {
+            out.write_all(&chunk).await?;
         }
-        let resp = self
+        out.flush().await?;
+        Ok(download.got)
+    }
+
+    /// [`WebClient::fetch_file`] from `url`, with the given wait for data.
+    async fn fetch(&self, url: &str, limit: u64, stall: Duration) -> Result<(Vec<u8>, String), WebError> {
+        let mut download = self.open(url, limit, stall).await?;
+        let mut bytes = Vec::with_capacity(download.expected as usize);
+        while let Some(chunk) = download.next().await? {
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok((bytes, download.kind))
+    }
+
+    /// Requests a file; refuses it at once when its `Content-Length` is over `limit`.
+    async fn open(&self, url: &str, limit: u64, stall: Duration) -> Result<Download, WebError> {
+        let request = self
             .http
             .get(url)
-            .headers(self.headers(crate::endpoints::FILES_HOST))
-            .send()
-            .await?;
+            .headers(self.headers(FILES_HOST))
+            .timeout(transfer_timeout(limit))
+            .send();
+        let resp = tokio::time::timeout(stall, request)
+            .await
+            .map_err(|_| WebError::Stalled)??;
         let status = resp.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Err(WebError::Unauthorized);
@@ -272,17 +339,29 @@ impl WebClient {
         if !status.is_success() {
             return Err(WebError::BadResponse(format!("file: HTTP {status}")));
         }
+        let expected = resp.content_length().unwrap_or(0);
+        if expected > limit {
+            return Err(WebError::TooLarge(limit));
+        }
         let kind = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_owned();
-        Ok((resp.bytes().await?.to_vec(), kind))
+        Ok(Download {
+            resp,
+            kind,
+            expected,
+            limit,
+            got: 0,
+            stall,
+        })
     }
 
     /// File upload: `POST media_upload/{chatId}/{messageId}/{filename}`, the body is the file bytes.
-    /// `message_id` is the UUID of the future message (also its `PayloadId`). Returns `data.data` of the response.
+    /// `message_id` is the UUID of the future message (also its `PayloadId`). Returns the `file_id`
+    /// of the uploaded file (`Id2` in [`crate::wire::file_info`]).
     pub async fn upload_file(
         &mut self,
         chat_id: &str,
@@ -290,44 +369,33 @@ impl WebClient {
         filename: &str,
         content_type: &str,
         bytes: Vec<u8>,
-    ) -> Result<Value, WebError> {
+    ) -> Result<String, WebError> {
         // Like `encodeURI` in the web client: the chat ID goes in with its slashes as is,
         // only the file name is encoded (and a `/` in it is escaped so it cannot break the path).
-        let enc = |s: &str| -> String {
-            s.bytes()
-                .map(|b| match b {
-                    b'A'..=b'Z'
-                    | b'a'..=b'z'
-                    | b'0'..=b'9'
-                    | b'-'
-                    | b'_'
-                    | b'.'
-                    | b'~'
-                    | b'('
-                    | b')'
-                    | b'!'
-                    | b'\'' => (b as char).to_string(),
-                    _ => format!("%{b:02X}"),
-                })
-                .collect()
-        };
         let url = format!(
             "https://{}/media_upload/{chat_id}/{message_id}/{}",
-            crate::endpoints::FILES_HOST,
-            enc(filename)
+            FILES_HOST,
+            encode_uri_component(filename)
         );
         let bytes = bytes::Bytes::from(bytes);
         let mut retried = false;
         let (status, body) = loop {
             let csrf = self.csrf_token().await?;
-            let mut headers = self.headers(crate::endpoints::FILES_HOST);
+            let mut headers = self.headers(FILES_HOST);
             if let Ok(v) = HeaderValue::from_str(&csrf) {
                 headers.insert("X-CSRF-TOKEN", v);
             }
             if let Ok(v) = HeaderValue::from_str(content_type) {
                 headers.insert(reqwest::header::CONTENT_TYPE, v);
             }
-            let resp = self.http.post(&url).headers(headers).body(bytes.clone()).send().await?;
+            let resp = self
+                .http
+                .post(&url)
+                .headers(headers)
+                .body(bytes.clone())
+                .timeout(transfer_timeout(bytes.len() as u64))
+                .send()
+                .await?;
             let status = resp.status();
             let body = resp.text().await?;
             if crate::diag::traffic_logging() {
@@ -355,7 +423,18 @@ impl WebClient {
                 v.pointer("/data/code").and_then(Value::as_str).unwrap_or("")
             )));
         }
-        Ok(v.get("data").cloned().unwrap_or(v))
+        v.get("data")
+            .unwrap_or(&v)
+            .get("file_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| WebError::BadResponse("Telemost did not return file_id".into()))
+    }
+
+    /// All the synced settings (`get_buckets` from version 0); [`crate::convert::bucket`] finds
+    /// one of them.
+    pub async fn buckets(&mut self) -> Result<Value, WebError> {
+        self.rpc("get_buckets", serde_json::json!({ "version": 0 })).await
     }
 
     /// `POST /api/` call in the web client format. Returns the whole response JSON. A reading
@@ -434,6 +513,68 @@ impl WebClient {
     }
 }
 
+/// What a URI component keeps as it is: letters, digits and `-_.~()!'`, as `encodeURIComponent`
+/// does but for `*`.
+const URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b'!')
+    .remove(b'\'');
+
+/// `s` percent-encoded as one URI component: nothing in it can end or split the URL around it.
+pub fn encode_uri_component(s: &str) -> String {
+    utf8_percent_encode(s, URI_COMPONENT).to_string()
+}
+
+/// `s` with its `%XX` escapes decoded. A broken escape stays as it is, and bytes that are not
+/// UTF-8 become U+FFFD.
+pub fn percent_decode(s: &str) -> String {
+    percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
+}
+
+/// Address of a file or preview of the Messenger storage: `file_shortterm/<Id2>[?size=…]`.
+fn file_url(file_id: &str, size: Option<&str>) -> String {
+    let mut url = format!("https://{FILES_HOST}/file_shortterm/{file_id}");
+    if let Some(size) = size {
+        url.push_str("?size=");
+        url.push_str(size);
+    }
+    url
+}
+
+/// A file download in progress, read piece by piece so that a file over its limit is dropped
+/// as soon as it gets there and a stalled one fails instead of waiting forever.
+struct Download {
+    resp: reqwest::Response,
+    /// `Content-Type` of the file.
+    kind: String,
+    /// `Content-Length`, 0 when unknown.
+    expected: u64,
+    limit: u64,
+    got: u64,
+    stall: Duration,
+}
+
+impl Download {
+    /// The next piece of the file, `None` after the last one.
+    async fn next(&mut self) -> Result<Option<bytes::Bytes>, WebError> {
+        let chunk = tokio::time::timeout(self.stall, self.resp.chunk())
+            .await
+            .map_err(|_| WebError::Stalled)??;
+        if let Some(chunk) = &chunk {
+            self.got += chunk.len() as u64;
+            if self.got > self.limit {
+                return Err(WebError::TooLarge(self.limit));
+            }
+        }
+        Ok(chunk)
+    }
+}
+
 /// Whether a response says the CSRF token was not accepted.
 fn csrf_rejected(status: StatusCode, body: Option<&Value>) -> bool {
     status == StatusCode::FORBIDDEN
@@ -490,6 +631,101 @@ mod tests {
             parse_page_params("<html></html>"),
             Err(WebError::MissingParam("puid"))
         ));
+    }
+
+    /// Answers one request on a local port with `parts`, a moment apart, then keeps the
+    /// connection open for `hang`. Returns the address to ask.
+    async fn serve_once(parts: Vec<Vec<u8>>, hang: Duration) -> String {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = s.read(&mut request).await;
+            for part in parts {
+                let _ = s.write_all(&part).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            tokio::time::sleep(hang).await;
+        });
+        url
+    }
+
+    fn client() -> WebClient {
+        WebClient::new(CookieJar::default(), "Mostik/test".into()).unwrap()
+    }
+
+    /// A chunked answer of `pieces` pieces of 40 bytes.
+    fn chunked(pieces: usize) -> Vec<Vec<u8>> {
+        let mut parts =
+            vec![b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec()];
+        for _ in 0..pieces {
+            parts.push([b"28\r\n".as_slice(), &[b'x'; 40], b"\r\n"].concat());
+        }
+        parts.push(b"0\r\n\r\n".to_vec());
+        parts
+    }
+
+    #[tokio::test]
+    async fn a_file_over_its_limit_is_refused() {
+        let second = Duration::from_secs(1);
+        let declared = vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n".to_vec(),
+            vec![b'x'; 100],
+        ];
+        let url = serve_once(declared, Duration::ZERO).await;
+        assert!(matches!(
+            client().fetch(&url, 50, second).await,
+            Err(WebError::TooLarge(50))
+        ));
+        // Without a length the download stops once it passes the limit.
+        let url = serve_once(chunked(2), Duration::ZERO).await;
+        assert!(matches!(
+            client().fetch(&url, 50, second).await,
+            Err(WebError::TooLarge(50))
+        ));
+        let url = serve_once(chunked(2), Duration::ZERO).await;
+        let (bytes, kind) = client().fetch(&url, 80, second).await.unwrap();
+        assert_eq!((bytes.len(), kind.as_str()), (80, "image/png"));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_download_fails() {
+        let short = Duration::from_millis(300);
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n12345".to_vec();
+        let url = serve_once(vec![head], Duration::from_secs(10)).await;
+        assert!(matches!(client().fetch(&url, 100, short).await, Err(WebError::Stalled)));
+        let url = serve_once(vec![], Duration::from_secs(10)).await;
+        assert!(matches!(client().fetch(&url, 100, short).await, Err(WebError::Stalled)));
+    }
+
+    #[test]
+    fn transfer_time_grows_with_the_size() {
+        assert_eq!(transfer_timeout(0), Duration::from_secs(60));
+        assert_eq!(transfer_timeout(60 * SLOWEST_TRANSFER), Duration::from_secs(120));
+        assert_eq!(transfer_timeout(u64::MAX), MAX_TRANSFER_TIME);
+    }
+
+    #[test]
+    fn percent_coding() {
+        assert_eq!(
+            encode_uri_component("Отчёт (1)!.pdf"),
+            "%D0%9E%D1%82%D1%87%D1%91%D1%82%20(1)!.pdf"
+        );
+        assert_eq!(encode_uri_component("a/b?c#d&e*f'~"), "a%2Fb%3Fc%23d%26e%2Af'~");
+        assert_eq!(
+            encode_uri_component("<b>a b\n#&</b>"),
+            "%3Cb%3Ea%20b%0A%23%26%3C%2Fb%3E"
+        );
+        assert_eq!(percent_decode("disk%2Fabc-1"), "disk/abc-1");
+        assert_eq!(percent_decode("%D1%84%D0%B0%D0%B9%D0%BB"), "файл");
+        assert_eq!(percent_decode("bad%2"), "bad%2");
+        assert_eq!(percent_decode("%zz%+5"), "%zz%+5");
+        assert_eq!(percent_decode("%FF"), "\u{FFFD}");
+        assert_eq!(percent_decode("plain"), "plain");
+        let name = "Отчёт за май (итог) #2 100%.docx";
+        assert_eq!(percent_decode(&encode_uri_component(name)), name);
     }
 
     #[test]

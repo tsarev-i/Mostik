@@ -12,6 +12,20 @@ pub struct UserId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChatId(pub String);
 
+impl ChatId {
+    /// A chat of Telemost meetings: namespaces 22 and 32 (`namespace_aliases.telemost` in
+    /// config.json) and the group call chats of namespace 58.
+    pub fn is_meeting(&self) -> bool {
+        ["0/22/", "0/32/"].iter().any(|ns| self.0.starts_with(ns)) || self.is_group_call()
+    }
+
+    /// The chat Telemost makes for a group call started outside any chat, named like
+    /// "Групповой звонок 01.02 в 10:00": namespace 58, `0/58/<uuid>`.
+    pub fn is_group_call(&self) -> bool {
+        self.0.starts_with("0/58/")
+    }
+}
+
 /// Coarse presence shown as the dot on an avatar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Presence {
@@ -63,6 +77,21 @@ pub struct PresenceInfo {
     pub status: Option<CustomStatus>,
 }
 
+/// Notifications paused on every device of the user: Telemost's "Do not disturb".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pause {
+    /// Until when (µs); `None` means until turned back on.
+    pub until: Option<Timestamp>,
+}
+
+impl Pause {
+    /// Whether notifications are still paused at `now` (µs): Telemost does not say when a pause
+    /// ends by itself.
+    pub fn active_at(&self, now: Timestamp) -> bool {
+        self.until.is_none_or(|until| now < until)
+    }
+}
+
 /// Custom status: an emoji and a short text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomStatus {
@@ -94,6 +123,21 @@ pub struct User {
 pub const UNKNOWN_USER: &str = "Unknown user";
 
 impl User {
+    /// A person known only by id and name: offline, with no title, status or photo. What else is
+    /// known goes in with struct update syntax.
+    pub fn named(id: UserId, display_name: impl Into<String>) -> Self {
+        Self {
+            id,
+            display_name: display_name.into(),
+            title: None,
+            presence: Presence::Offline,
+            status: None,
+            availability: Availability::default(),
+            is_robot: false,
+            avatar: None,
+        }
+    }
+
     /// Whether the name is a real one and not a stand-in: empty, the GUID or [`UNKNOWN_USER`].
     /// A stand-in gives way to the first real name that comes.
     pub fn has_name(&self) -> bool {
@@ -135,6 +179,10 @@ pub struct Chat {
     /// Organizations the chat belongs to (`ChatInfo.OrganizationIds`); empty for direct chats.
     #[serde(default)]
     pub organizations: Vec<u64>,
+    /// How far the others have read the chat (`LastSeenTsMcs`): the peer of a direct chat, the
+    /// furthest reader of a group.
+    #[serde(default)]
+    pub peer_seen_ts: Timestamp,
 }
 
 /// User's organization: a "workspace" in Slack terms.
@@ -197,6 +245,28 @@ pub struct Message {
     /// Not a text message but Telemost's note that a call in the chat started or ended.
     #[serde(default)]
     pub call: Option<CallNote>,
+    /// Not a text message but Telemost's note about the chat itself: created, people added or
+    /// removed, someone joined or left.
+    #[serde(default)]
+    pub system: Option<SystemNote>,
+    /// Who read the message: only the user's own messages have it, and only when Telemost sent
+    /// it (`ShowReadsCount`); `None` is "not known", not "nobody".
+    #[serde(default)]
+    pub reads: Option<Reads>,
+}
+
+/// Who read one of the user's own messages, as far as Telemost says (`ReadsCount`,
+/// `RecentUserReads`, `SeenByPartnerMcs`); see [`crate::receipts`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reads {
+    /// How many people have read it.
+    pub count: u32,
+    /// The latest readers, at most three, newest first.
+    #[serde(default)]
+    pub recent: Vec<UserId>,
+    /// A direct chat: when the peer read it, rounded down to the minute.
+    #[serde(default)]
+    pub peer_seen: Option<Timestamp>,
 }
 
 impl Message {
@@ -204,6 +274,12 @@ impl Message {
     /// sequence number, must not count as unread and must survive reloading the chat history.
     pub fn is_ringing(&self) -> bool {
         matches!(self.call, Some(CallNote::Ringing { .. }))
+    }
+
+    /// A note of Telemost (a call, a change of the chat) rather than a message someone wrote: it
+    /// has no text, menu or replies.
+    pub fn is_note(&self) -> bool {
+        self.call.is_some() || self.system.is_some()
     }
 
     /// The message this one replies to, with the quoted fragment if there is one.
@@ -219,18 +295,20 @@ impl Message {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CallNote {
-    Started {
-        url: String,
-    },
+    /// The call started. `url` is empty when Telemost does not say: the first call of a group
+    /// call chat starts with the chat itself, and nothing in it has the link until the call ends.
+    Started { url: String },
     /// Someone is calling the user in a direct chat; it ends with `Ended` like a started call.
-    Ringing {
-        url: String,
-    },
+    Ringing { url: String },
     Ended {
         url: String,
         /// Why a direct call ended; group calls do not say.
         #[serde(default)]
         reason: Option<CallEndReason>,
+        /// How long the call lasted, in seconds: `DurationSeconds` of a direct call. Group calls
+        /// do not say; the UI fills it in from the meeting's start when it saw the call end.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seconds: Option<u64>,
     },
 }
 
@@ -241,6 +319,50 @@ impl CallNote {
             CallNote::Started { url } | CallNote::Ringing { url } | CallNote::Ended { url, .. } => url,
         }
     }
+}
+
+/// How long a call lasted, in seconds, from its end note: Telemost's own count for a direct call,
+/// else the time since `start`, the call's start note or its meeting's creation.
+pub fn call_seconds(end: &Message, start: Option<Timestamp>) -> Option<u64> {
+    match &end.call {
+        Some(CallNote::Ended {
+            seconds: Some(seconds), ..
+        }) => Some(*seconds),
+        Some(CallNote::Ended { .. }) => start
+            .filter(|start| *start < end.ts)
+            .map(|start| (end.ts - start) / 1_000_000),
+        _ => None,
+    }
+}
+
+/// A call in a chat as Telemost reports it in `StateSync` `meeting_updated`: on every change while
+/// it goes on (people join or leave) and once more when it ends, right before its end note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Meeting {
+    pub chat_id: ChatId,
+    /// The meeting link, as in the chat's call notes.
+    pub url: String,
+    /// When the meeting was created (`create_timestamp`): the start of a group call even when its
+    /// start note is not loaded or there is none.
+    pub started: Timestamp,
+    /// How many people are in the call (`participants_count`).
+    pub participants: u32,
+    /// The call is over: `status` 2 (0 is "nobody joined yet", 1 "going on").
+    pub ended: bool,
+}
+
+/// A change of the chat, as Telemost notes it in the chat; the message author is who made it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SystemNote {
+    /// The chat was created with this name.
+    Created { name: String },
+    /// People were added to the chat or removed from it.
+    Members { added: Vec<UserId>, removed: Vec<UserId> },
+    /// The author joined the chat.
+    Joined,
+    /// The author left the chat.
+    Left,
 }
 
 /// Why a direct call ended: Telemost's `MeetingEndedReason`.
@@ -368,6 +490,9 @@ pub struct Snapshot {
     /// Telemost chat folders listing their chats by hand, of every organization.
     #[serde(default)]
     pub folders: Vec<ChatFolder>,
+    /// Notifications are paused ("Do not disturb").
+    #[serde(default)]
+    pub paused: Option<Pause>,
 }
 
 /// A Telemost chat folder (the `folders` bucket) that lists its chats by hand; Mostik shows it as
@@ -385,6 +510,32 @@ pub struct ChatFolder {
 impl Snapshot {
     pub fn user(&self, id: &UserId) -> Option<&User> {
         self.users.iter().find(|u| &u.id == id)
+    }
+
+    /// The unread mark for the app icon and how many unread direct messages and mentions are
+    /// behind a red one. A chat that notifies about mentions only counts only its mentions, one
+    /// that notifies about nothing counts nothing, as in the chat's own notifications.
+    pub fn unread_badge(&self) -> (UnreadBadge, u32) {
+        let mut badge = UnreadBadge::None;
+        let mut count = 0;
+        for ch in &self.chats {
+            let level = ch.notify_level();
+            if level == NotifyLevel::Nothing || ch.kind == ChatKind::Notes {
+                continue;
+            }
+            // Every unread message of a direct chat is for the user, mentioned or not.
+            let urgent = match ch.kind {
+                ChatKind::Direct { .. } if level == NotifyLevel::All => ch.unread.max(ch.mentions),
+                _ => ch.mentions,
+            };
+            if urgent > 0 {
+                badge = UnreadBadge::Mention;
+                count += urgent;
+            } else if level == NotifyLevel::All && ch.unread > 0 && badge == UnreadBadge::None {
+                badge = UnreadBadge::Unread;
+            }
+        }
+        (badge, count)
     }
 
     pub fn chat(&self, id: &ChatId) -> Option<&Chat> {
@@ -555,7 +706,50 @@ impl NotifyLevel {
     }
 }
 
+/// The unread mark on the app icon, as in Slack: none, a dot for unread messages, or a red mark
+/// for unread direct messages and mentions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnreadBadge {
+    #[default]
+    None,
+    /// Unread messages in chats that notify about everything.
+    Unread,
+    /// An unread direct message or mention.
+    Mention,
+}
+
 impl Chat {
+    /// A chat with no name, members, messages or settings yet. What is known goes in with struct
+    /// update syntax.
+    pub fn new(id: ChatId, kind: ChatKind) -> Self {
+        Self {
+            id,
+            kind,
+            name: String::new(),
+            description: None,
+            member_count: 0,
+            unread: 0,
+            mentions: 0,
+            muted: false,
+            mute_mentions: false,
+            last_ts: 0,
+            pinned: None,
+            organizations: vec![],
+            peer_seen_ts: 0,
+        }
+    }
+
+    /// The Telemost sidebar section the chat belongs to by its kind: `dms`, `meetings` or
+    /// `channels`.
+    pub fn home_section(&self) -> &'static str {
+        match self.kind {
+            ChatKind::Direct { .. } | ChatKind::Notes => "dms",
+            _ if self.id.is_meeting() => "meetings",
+            _ => "channels",
+        }
+    }
+
     pub fn notify_level(&self) -> NotifyLevel {
         NotifyLevel::from_flags(self.muted, self.mute_mentions)
     }
@@ -612,14 +806,14 @@ pub fn chat_title(snapshot: &Snapshot, chat: &Chat) -> String {
 }
 
 /// Slack shows consecutive messages from one author within 5 minutes without an avatar.
-pub const GROUPING_WINDOW_MCS: Timestamp = 5 * 60 * 1_000_000;
+const GROUPING_WINDOW_MCS: Timestamp = 5 * 60 * 1_000_000;
 
 /// Whether `next` continues the visual group started by `prev`.
-/// Call notes stand apart and never join a group.
+/// Notes of calls and chat changes stand apart and never join a group.
 pub fn continues_group(prev: Option<&Message>, next: &Message) -> bool {
     match prev {
-        Some(_) if next.call.is_some() => false,
-        Some(p) if p.call.is_some() => false,
+        Some(_) if next.is_note() => false,
+        Some(p) if p.is_note() => false,
         Some(p) => p.author == next.author && next.ts.saturating_sub(p.ts) < GROUPING_WINDOW_MCS,
         None => false,
     }
@@ -648,6 +842,75 @@ mod chat_icon_tests {
 mod tests {
     use super::*;
 
+    fn snapshot(chats: Vec<Chat>) -> Snapshot {
+        Snapshot {
+            me: UserId("me".into()),
+            organization: String::new(),
+            organization_avatar: None,
+            organizations: vec![],
+            users: vec![],
+            chats,
+            sections: vec![],
+            messages: vec![],
+            folders: vec![],
+            paused: None,
+        }
+    }
+
+    fn chat(kind: ChatKind, unread: u32, mentions: u32, level: NotifyLevel) -> Chat {
+        let mut ch = Chat {
+            unread,
+            mentions,
+            ..Chat::new(ChatId("c".into()), kind)
+        };
+        ch.set_notify_level(level);
+        ch
+    }
+
+    #[test]
+    fn unread_badge_follows_notification_levels() {
+        let group = ChatKind::Group { public: false };
+        let direct = ChatKind::Direct {
+            peer: UserId("u2".into()),
+        };
+        let badge = |chats: Vec<Chat>| snapshot(chats).unread_badge();
+        assert_eq!(badge(vec![]), (UnreadBadge::None, 0));
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 0, NotifyLevel::All)]),
+            (UnreadBadge::Unread, 0)
+        );
+        // A muted chat shows only its mentions; one set to nothing shows nothing.
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 0, NotifyLevel::Mentions)]),
+            (UnreadBadge::None, 0)
+        );
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 1, NotifyLevel::Mentions)]),
+            (UnreadBadge::Mention, 1)
+        );
+        assert_eq!(
+            badge(vec![chat(group.clone(), 3, 1, NotifyLevel::Nothing)]),
+            (UnreadBadge::None, 0)
+        );
+        // Every unread direct message counts; a mention outranks plain unread messages.
+        assert_eq!(
+            badge(vec![chat(direct.clone(), 2, 0, NotifyLevel::All)]),
+            (UnreadBadge::Mention, 2)
+        );
+        assert_eq!(
+            badge(vec![
+                chat(group.clone(), 5, 0, NotifyLevel::All),
+                chat(direct, 2, 0, NotifyLevel::All),
+                chat(group, 4, 1, NotifyLevel::All),
+            ]),
+            (UnreadBadge::Mention, 3)
+        );
+        assert_eq!(
+            badge(vec![chat(ChatKind::Notes, 1, 0, NotifyLevel::All)]),
+            (UnreadBadge::None, 0)
+        );
+    }
+
     fn msg(author: &str, ts: Timestamp) -> Message {
         Message {
             chat_id: ChatId("c".into()),
@@ -663,6 +926,8 @@ mod tests {
             attachments: vec![],
             forwarded: vec![],
             call: None,
+            system: None,
+            reads: None,
         }
     }
 
@@ -698,6 +963,34 @@ mod tests {
     }
 
     #[test]
+    fn meeting_chats_by_namespace() {
+        let id = |s: &str| ChatId(s.into());
+        assert!(id("0/22/a").is_meeting() && id("0/32/a").is_meeting());
+        assert!(id("0/58/a").is_meeting() && id("0/58/a").is_group_call());
+        assert!(!id("0/22/a").is_group_call());
+        assert!(!id("0/0/a").is_meeting() && !id("100/58/a_1").is_group_call());
+    }
+
+    #[test]
+    fn call_lengths() {
+        let end = |seconds| Message {
+            call: Some(CallNote::Ended {
+                url: "u".into(),
+                reason: None,
+                seconds,
+            }),
+            ..msg("u1", 100_000_000)
+        };
+        // Telemost's own count wins over the start.
+        assert_eq!(call_seconds(&end(Some(42)), Some(1_000_000)), Some(42));
+        assert_eq!(call_seconds(&end(None), Some(40_000_000)), Some(60));
+        assert_eq!(call_seconds(&end(None), None), None);
+        // A start after the end is someone else's call.
+        assert_eq!(call_seconds(&end(None), Some(200_000_000)), None);
+        assert_eq!(call_seconds(&msg("u1", 100_000_000), Some(1)), None);
+    }
+
+    #[test]
     fn active_calls_follow_the_latest_note() {
         let note = |chat: &str, ts, started: bool| Message {
             chat_id: ChatId(chat.into()),
@@ -709,6 +1002,7 @@ mod tests {
                 CallNote::Ended {
                     url: format!("u-{chat}"),
                     reason: None,
+                    seconds: None,
                 }
             }),
             ..msg("u1", ts)
@@ -730,6 +1024,7 @@ mod tests {
             chats: vec![],
             sections: vec![],
             folders: vec![],
+            paused: None,
         };
         let active: Vec<_> = snap.active_calls().into_iter().map(|(c, u)| (c.0, u)).collect();
         assert_eq!(active, [("a".into(), "u-a".into()), ("c".into(), "u-c".into())]);
@@ -752,7 +1047,11 @@ mod tests {
 
     #[test]
     fn mock_snapshot_is_consistent() {
-        let s = crate::mock::demo();
+        let now: Timestamp = 1_794_300_000 * 1_000_000;
+        let s = crate::mock::demo(now);
+        // Seen from `now`, the newest message is five minutes old.
+        let newest = s.messages.iter().map(|m| m.ts).max();
+        assert_eq!(newest, Some(now - 5 * 60 * 1_000_000));
         for m in &s.messages {
             assert!(s.chat(&m.chat_id).is_some(), "message in an unknown chat");
             assert!(s.user(&m.author).is_some(), "unknown author");

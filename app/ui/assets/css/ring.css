@@ -1,0 +1,74 @@
+/* ── Incoming call dialog (inside the main window, like the preferences) ── */
+
+/* Above the other dialogs and the emoji picker: a ringing call comes first. */
+.modal-backdrop.ring-backdrop { z-index: 50; }
+.modal.ring-modal { width: min(400px, calc(100vw - 32px)); user-select: none; }
+.ring-caller { display: flex; align-items: center; gap: 14px; min-width: 0; margin: 20px 0 24px; }
+.ring-face { position: relative; flex: none; }
+.ring-face::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 12px;
+  border: 2px solid var(--online);
+  animation: ring-pulse 1.5s ease-out infinite;
+}
+@keyframes ring-pulse {
+  from { opacity: 0.9; transform: scale(0.96); }
+  to { opacity: 0; transform: scale(1.18); }
+}
+.ring-text { min-width: 0; }
+.ring-name {
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 900;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ring-sub { color: var(--text-muted); font-size: 14px; }
+.ring-actions { display: flex; gap: 10px; }
+.ring-btn {
+  flex: 1;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 700;
+}
+.ring-btn.decline { background: var(--badge); }
+.ring-btn.decline:hover:not(:disabled) { background: var(--badge-hover); }
+.ring-btn.accept { background: var(--accent-green); }
+.ring-btn.accept:hover:not(:disabled) { background: var(--accent-green-hover); }
+
+/* Custom emoji: in texts as tall as a line of text, as in Slack. */
+.custom-emoji { display: inline-block; width: auto; height: 1.375em; max-width: 4em; margin: 0 1px; vertical-align: -0.3em; object-fit: contain; }
+.reaction .custom-emoji { height: 16px; margin: 0; vertical-align: middle; }
+.emoji-suggest button .glyph .custom-emoji { height: 20px; margin: 0; vertical-align: middle; }
+.ep-img { width: 26px; height: 26px; object-fit: contain; vertical-align: middle; }
+.ep-tab-img { width: 18px; height: 18px; object-fit: contain; vertical-align: middle; }
+.ep-big-img { width: 32px; height: 32px; object-fit: contain; }
+.ep-add { margin-left: auto; flex: none; }
+.ep-foot .ep-name { min-width: 0; }
+.ep-foot .btn.small { flex: none; }
+.modal.add-emoji p.muted { margin: 6px 0 0; }
+.add-emoji-upload { display: flex; align-items: center; gap: 16px; }
+.add-emoji-upload p.muted { margin: 0 0 8px; }
+.add-emoji-preview {
+  flex: none; width: 72px; height: 72px; display: grid; place-items: center; border-radius: 8px;
+  border: 1px dashed var(--border); background: var(--bg-input);
+}
+.add-emoji-preview img { max-width: 64px; max-height: 64px; object-fit: contain; }
+.emoji-list { margin-top: 16px; border-top: 1px solid var(--border-soft); }
+.emoji-row { display: flex; align-items: center; gap: 12px; padding: 8px 4px; border-bottom: 1px solid var(--border-soft); }
+.emoji-preview { width: 32px; height: 32px; flex: none; object-fit: contain; }
+.emoji-label { display: flex; flex-direction: column; min-width: 0; }
+.emoji-code { font-weight: 700; overflow-wrap: anywhere; }
+.emoji-author { font-size: 12px; color: var(--text-muted); }
+.emoji-taken { font-size: 12px; color: var(--badge); }
+.emoji-name-input { width: 220px; height: 28px; }
+.emoji-actions { display: flex; gap: 6px; margin-left: auto; flex: none; }
+.dialog-error { margin: 12px 0 0; color: var(--badge); font-size: 13px; }

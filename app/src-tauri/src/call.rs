@@ -4,20 +4,22 @@
 //! The WebKitGTK builds of Linux distributions do not (`RTCPeerConnection` is missing), so on
 //! Linux Mostik starts an installed Chromium-based browser in app mode: a window without tabs
 //! or an address bar, with a throwaway profile, driven over a DevTools pipe (`cdp.rs`). The
-//! session cookies are put into that profile, so the user does not sign in again, and the
-//! profile is deleted when the window closes. Without such a browser the call opens in the
-//! default browser, as before.
+//! session cookies are put into that profile, so the user does not sign in again. The profile
+//! lives in memory (`$XDG_RUNTIME_DIR`; on disk only on a system without one) and is deleted when
+//! the call ends, at sign-out and when Mostik exits. On Windows the call window is a private
+//! WebView2 window, whose cookies never reach the disk. On macOS, and on Linux without such a
+//! browser, the call opens in the default browser.
 //!
 //! One call at a time, as in Slack. The UI learns about the current call from [`CALL_EVENT`]
 //! and shows it at the bottom of the sidebar.
 
-// Elsewhere (macOS) calls open in the default browser, so the window and end-of-call helpers
-// are used only by the Linux and Windows `imp` (and by the tests).
-#![cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+// Elsewhere (macOS) calls open in the default browser: the window and end-of-call helpers,
+// used only by the Linux and Windows `imp`, are left out there.
 
 use std::future::Future;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::time::{Duration, Instant};
 
 use mostik_yandex::session::CookieJar;
@@ -35,7 +37,9 @@ pub const BUSY: &str = "another call is already open, leave it first";
 const MEETING_HOSTS: [&str; 2] = ["telemost.360.yandex.ru", "telemost.yandex.ru"];
 
 /// Initial size of the call window: compact, like the Slack huddle window.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const WIDTH: f64 = 960.0;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const HEIGHT: f64 = 680.0;
 
 /// What the UI shows about the current call.
@@ -51,6 +55,7 @@ pub struct CallInfo {
 struct Active {
     info: CallInfo,
     url: String,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     generation: u64,
     handle: imp::Handle,
 }
@@ -61,9 +66,8 @@ pub struct CallState {
     /// Held while a window is being opened, so that two clicks do not open two windows.
     opening: Mutex<()>,
     active: StdMutex<Option<Active>>,
+    /// Calls opened so far, in the window or in the default browser: the latest call's number.
     generation: AtomicU64,
-    /// Calls opened so far, in the window or in the default browser.
-    opens: AtomicU64,
 }
 
 fn is_meeting_host(u: &Url) -> bool {
@@ -85,27 +89,32 @@ pub fn is_meeting_url(url: &str) -> bool {
 /// Cookie domain as it reaches the call window: a domain cookie (`.yandex.ru`), so that
 /// `Session_id` of `yandex.ru` also goes to `telemost.360.yandex.ru`. The jar keeps the domain
 /// without the dot, and the HTTP client matches subdomains too.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn cookie_domain(domain: &str) -> String {
     format!(".{}", domain.trim_start_matches('.'))
 }
 
 /// A `__Host-` cookie must stay on its own host: browsers refuse it with a `Domain`.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn host_only(name: &str) -> bool {
     name.starts_with("__Host-")
 }
 
 /// How long the meeting page must be open before leaving it counts as the end of the call.
 /// Redirects right after the load (language, sign-in, the server's own routing) are not "Leave".
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const ARM_AFTER: Duration = Duration::from_secs(5);
 
 /// Watches the call window's navigations for the end of the call, the same way on Linux (CDP
 /// events) and Windows (`on_navigation`).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Default)]
 struct EndWatch {
     /// When the window first reached the meeting page.
     meeting_since: Option<Instant>,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl EndWatch {
     /// Whether the window going to `url` at `now` ends the call. `same_document` marks the page
     /// changing its own address (the single-page app's routing) rather than loading a new one.
@@ -129,16 +138,14 @@ impl EndWatch {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn is_yandex(u: &Url) -> bool {
-    u.host_str().is_some_and(|h| {
-        ["yandex.ru", "yandex.com", "yandex.net"]
-            .iter()
-            .any(|d| h == *d || h.ends_with(&format!(".{d}")))
-    })
+    u.host_str().is_some_and(mostik_yandex::endpoints::is_yandex_host)
 }
 
 /// Yandex ID and other sign-in pages: `passport.yandex.ru` and its regional twins, `id.`,
 /// `oauth.`, `sso.` and `auth.` hosts.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn is_sign_in(u: &Url) -> bool {
     u.host_str().is_some_and(|h| {
         h.contains(".passport.")
@@ -188,7 +195,6 @@ where
 /// The opening itself; the caller holds `CallState::opening` and has seen no open call.
 async fn open_locked(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar) -> Result<(), String> {
     let state = app.state::<CallState>();
-    state.opens.fetch_add(1, Ordering::SeqCst);
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let title = window_title(app, &info.label);
     let english = crate::backend::text(app, "ru", "en") == "en";
@@ -203,6 +209,7 @@ async fn open_locked(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar
                 *a = Some(Active {
                     info: info.clone(),
                     url: url.to_owned(),
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
                     generation,
                     handle,
                 });
@@ -217,7 +224,7 @@ async fn open_locked(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar
 /// Calls opened so far (in the window or in the default browser): a status clean-up scheduled
 /// before a newer call must leave that call's status alone.
 pub fn opens(app: &AppHandle) -> u64 {
-    app.state::<CallState>().opens.load(Ordering::SeqCst)
+    app.state::<CallState>().generation.load(Ordering::SeqCst)
 }
 
 /// Brings the call window to the front.
@@ -225,6 +232,17 @@ pub async fn focus(app: &AppHandle) {
     if let Some((_, handle)) = current(app) {
         imp::focus(app, &handle).await;
     }
+}
+
+/// Ends the call at once and removes what it left on disk, the browser profile with the session
+/// cookies: at sign-out and when Mostik exits. Returns when that is done.
+pub fn shutdown(app: &AppHandle) {
+    let active = app.state::<CallState>().active.lock().ok().and_then(|mut a| a.take());
+    if let Some(active) = active {
+        imp::shutdown(app, &active.handle);
+        let _ = app.emit(CALL_EVENT, None::<CallInfo>);
+    }
+    imp::cleanup(app);
 }
 
 /// Leaves the call: closes its window.
@@ -270,6 +288,7 @@ fn current(app: &AppHandle) -> Option<(Current, imp::Handle)> {
 }
 
 /// The window of call `generation` has closed: forget the call, unless a newer one replaced it.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn ended(app: &AppHandle, generation: u64) {
     let state = app.state::<CallState>();
     let Ok(mut active) = state.active.lock() else { return };
@@ -282,6 +301,7 @@ fn ended(app: &AppHandle, generation: u64) {
 }
 
 /// Where the page script sends the window once the call is over; the window then closes.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const ENDED_URL: &str = "about:blank#mostik-call-ended";
 
 /// The meeting page for the call window. On `telemost.360.yandex.ru` the `/j/<id>` link opens the
@@ -313,6 +333,7 @@ pub fn meeting_page(url: &str, english: bool) -> String {
 /// has shown something, has no WebRTC connection left and stays blank for two seconds, it goes
 /// to [`ENDED_URL`] and the window closes. While any connection is open the window stays, even
 /// if the page hides all its controls.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn page_script(title: &str) -> String {
     let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
     let ended = serde_json::to_string(ENDED_URL).unwrap_or_default();
@@ -380,11 +401,11 @@ fn window_title(app: &AppHandle, label: &str) -> String {
 mod imp {
     use std::io::pipe;
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Stdio};
-    use std::sync::Arc;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use mostik_yandex::session::CookieJar;
@@ -416,6 +437,10 @@ mod imp {
 
     const PROFILE_PREFIX: &str = "call-browser-";
 
+    /// A snap browser can write only to its own directories: `snap.<name>` in the runtime
+    /// directory, `~/snap/<name>/common` at home.
+    const SNAP_RUNTIME_PREFIX: &str = "snap.";
+
     /// Start page of the app window: empty and dark, until the "connecting" page replaces it.
     const START_PAGE: &str = "data:text/html,%3Cmeta%20name=color-scheme%20content=dark%3E";
 
@@ -423,6 +448,40 @@ mod imp {
     pub struct Handle {
         cdp: Arc<Cdp>,
         target: String,
+        browser: Arc<Browser>,
+    }
+
+    /// The browser process of a call and its profile. Whoever comes first, the browser exiting
+    /// or [`shutdown`], stops the one and deletes the other.
+    struct Browser {
+        child: Mutex<Option<Child>>,
+        profile: PathBuf,
+    }
+
+    impl Browser {
+        /// The browser has closed the pipe, or Mostik is done with it. Its helper processes
+        /// (network, storage, GPU) may still write to the profile for a moment, so the whole
+        /// process group goes first, then the profile.
+        fn dispose(&self) {
+            if let Some(mut child) = self.child.lock().ok().and_then(|mut c| c.take()) {
+                // Before `wait`: until the leader is reaped its pid, and so the group id, cannot be
+                // reused, so the signal cannot reach an unrelated group.
+                // SAFETY: plain syscall; the group was created for this browser by `process_group(0)`.
+                unsafe {
+                    libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                }
+                let _ = child.wait();
+            }
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(200));
+                match std::fs::remove_dir_all(&self.profile) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => continue,
+                    _ if self.profile.exists() => continue,
+                    _ => return,
+                }
+            }
+            eprintln!("call: could not remove {}", self.profile.display());
+        }
     }
 
     pub async fn launch(
@@ -450,16 +509,24 @@ mod imp {
             }
         };
         eprintln!("call: started {}", browser.display());
-        let app2 = app.clone();
+        let process = Arc::new(Browser {
+            child: Mutex::new(Some(child)),
+            profile,
+        });
+        let (app2, exited) = (app.clone(), process.clone());
         let (cdp, events) = Cdp::start(cdp.0, cdp.1, move || {
             super::ended(&app2, generation);
-            dispose(child, &profile);
+            exited.dispose();
         });
         let loading = loading_page(app, title);
         match prepare(&cdp, url, title, &loading, jar).await {
             Ok(target) => {
                 tauri::async_runtime::spawn(close_when_left(cdp.clone(), events, target.clone()));
-                Ok(Some(Handle { cdp, target }))
+                Ok(Some(Handle {
+                    cdp,
+                    target,
+                    browser: process,
+                }))
             }
             Err(e) => {
                 let _ = cdp.send("Browser.close", json!({}), None).await;
@@ -486,6 +553,10 @@ mod imp {
         !h.cdp.is_closed()
     }
 
+    pub fn shutdown(_app: &AppHandle, h: &Handle) {
+        h.browser.dispose();
+    }
+
     /// Removes call profiles left by Mostik processes that are gone (a crash, a killed process).
     /// Profiles of another running Mostik are its own business; this process has no call open
     /// when it calls this, so its own leftovers go too.
@@ -505,7 +576,8 @@ mod imp {
         }
     }
 
-    /// Where call profiles live: the app cache, and `~/snap/<name>/common` for snap browsers.
+    /// Where call profiles live (see `profile_dir`), and where earlier versions kept them: the
+    /// app cache and `~/snap/<name>/common`.
     fn profile_parents(app: &AppHandle) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = app.path().app_cache_dir().into_iter().collect();
         if let Some(snaps) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("snap"))
@@ -513,34 +585,30 @@ mod imp {
         {
             dirs.extend(entries.flatten().map(|e| e.path().join("common")));
         }
+        if let Some(runtime) = runtime_dir() {
+            dirs.push(runtime.join(&app.config().identifier));
+            if let Ok(entries) = std::fs::read_dir(&runtime) {
+                dirs.extend(
+                    entries
+                        .flatten()
+                        .filter(|e| e.file_name().to_string_lossy().starts_with(SNAP_RUNTIME_PREFIX))
+                        .map(|e| e.path().join(&app.config().identifier)),
+                );
+            }
+        }
         dirs
+    }
+
+    /// `$XDG_RUNTIME_DIR`: the user's own directory in memory (a tmpfs), gone at logout.
+    fn runtime_dir() -> Option<PathBuf> {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute() && d.is_dir())
     }
 
     /// The Mostik process a profile directory (`call-browser-<pid>-<n>`) belongs to.
     pub(super) fn profile_owner(name: &str) -> Option<u32> {
         name.strip_prefix(PROFILE_PREFIX)?.split_once('-')?.0.parse().ok()
-    }
-
-    /// The browser has closed the pipe: it is exiting. Its helper processes (network, storage,
-    /// GPU) may still write to the profile for a moment, so the whole process group goes first,
-    /// then the profile.
-    fn dispose(mut child: std::process::Child, profile: &Path) {
-        // Before `wait`: until the leader is reaped its pid, and so the group id, cannot be reused,
-        // so the signal cannot reach an unrelated group.
-        // SAFETY: plain syscall; the group was created for this browser by `process_group(0)`.
-        unsafe {
-            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
-        }
-        let _ = child.wait();
-        for _ in 0..5 {
-            std::thread::sleep(Duration::from_millis(200));
-            match std::fs::remove_dir_all(profile) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => continue,
-                _ if profile.exists() => continue,
-                _ => return,
-            }
-        }
-        eprintln!("call: could not remove {}", profile.display());
     }
 
     /// The "connecting" page, cookies, camera and microphone, the window title, then the meeting.
@@ -659,7 +727,8 @@ mod imp {
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-sync",
-                // The profile is thrown away: no reason to ask KWallet or GNOME Keyring for a key.
+                // The profile lives in memory and goes with the call: no reason to ask KWallet or
+                // GNOME Keyring for a key, which may prompt the user.
                 "--password-store=basic",
                 // No "Translate this page?" over the call.
                 "--disable-features=Translate",
@@ -708,22 +777,33 @@ mod imp {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     }
 
-    /// A fresh profile directory, readable only by the user. A snap browser can write only to
-    /// its own directory under `~/snap`, so its profile lives there.
+    /// A fresh profile directory, readable only by the user. The session cookies end up in it
+    /// (see `cookies`), so it lives in `$XDG_RUNTIME_DIR`, in memory, where even a profile left
+    /// by a crash or a power cut does not stay: under `snap.<name>` there for a snap browser,
+    /// which may write nowhere else. Without a runtime directory it falls back to the app cache
+    /// (`~/snap/<name>/common` for a snap browser); `cleanup` removes leftovers in any case.
     fn profile_dir(app: &AppHandle, browser: &Path, generation: u64) -> Result<PathBuf, String> {
         // The pid keeps two running Mostik processes (a release and a dev build) apart.
         let name = format!("{PROFILE_PREFIX}{}-{generation}", std::process::id());
-        let dir = match snap_name(browser).zip(std::env::var_os("HOME")) {
-            Some((snap, home)) => PathBuf::from(home).join("snap").join(snap).join("common").join(name),
-            None => app
+        let id = &app.config().identifier;
+        let parent = match (runtime_dir(), snap_name(browser)) {
+            (Some(runtime), Some(snap)) => runtime.join(format!("{SNAP_RUNTIME_PREFIX}{snap}")).join(id),
+            (Some(runtime), None) => runtime.join(id),
+            (None, Some(snap)) => std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join("snap").join(snap).join("common"))
+                .ok_or("no home directory")?,
+            (None, None) => app
                 .path()
                 .app_cache_dir()
-                .map_err(|e| format!("no cache directory: {e}"))?
-                .join(name),
+                .map_err(|e| format!("no cache directory: {e}"))?,
         };
+        let dir = parent.join(name);
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
         Ok(dir)
     }
 
@@ -737,8 +817,11 @@ mod imp {
         (name == "chromium-browser" && Path::new("/snap/bin/chromium").exists()).then(|| "chromium".to_owned())
     }
 
-    /// Session cookies in the `Storage.setCookies` format. Without an expiry they stay in memory
-    /// and are never written to the profile. The jar keeps domains without the leading dot
+    /// Session cookies in the `Storage.setCookies` format. They have no expiry, but Chromium
+    /// writes such cookies to the profile's cookie database all the same (a desktop profile
+    /// persists session cookies and drops them at its next start), and with
+    /// `--password-store=basic` their values are encrypted with a key known to everyone: the
+    /// profile itself must not outlive the call (see `profile_dir`). The jar keeps domains without the leading dot
     /// (`yandex.ru`), and the HTTP client matches them with subdomains, so here they are domain
     /// cookies too: `Session_id` of `yandex.ru` must reach `telemost.360.yandex.ru`. Yandex sets
     /// its session cookies with `SameSite=None`, and so do we.
@@ -791,7 +874,10 @@ b{{color:#f8f8f8;font-size:17px}}
 <b>{connecting}</b>"##,
             title = html_escape(title),
         );
-        format!("data:text/html;charset=utf-8,{}", percent_encode(&html))
+        format!(
+            "data:text/html;charset=utf-8,{}",
+            mostik_yandex::web::encode_uri_component(&html)
+        )
     }
 
     fn html_escape(s: &str) -> String {
@@ -799,18 +885,6 @@ b{{color:#f8f8f8;font-size:17px}}
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
-    }
-
-    fn percent_encode(s: &str) -> String {
-        let mut out = String::with_capacity(s.len() * 3);
-        for b in s.bytes() {
-            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-                out.push(b as char);
-            } else {
-                out.push_str(&format!("%{b:02X}"));
-            }
-        }
-        out
     }
 
     #[cfg(test)]
@@ -870,7 +944,6 @@ b{{color:#f8f8f8;font-size:17px}}
             let ev = |method: &str, params: Value| Event {
                 method: method.into(),
                 params,
-                session: Some("S".into()),
             };
             let nav = ev(
                 "Page.frameNavigated",
@@ -899,12 +972,6 @@ b{{color:#f8f8f8;font-size:17px}}
                 Some("https://telemost.yandex.ru/j/1")
             );
             assert_eq!(main_frame_url(&ev("Page.loadEventFired", json!({})), "T"), None);
-        }
-
-        #[test]
-        fn loading_page_is_a_single_data_url() {
-            let s = percent_encode("<b>a b\n#&</b>");
-            assert_eq!(s, "%3Cb%3Ea%20b%0A%23%26%3C%2Fb%3E");
         }
 
         /// Drives a real browser in headless mode: the pipe, cookies and permissions work, and
@@ -1038,7 +1105,7 @@ mod imp {
     use std::sync::Mutex;
 
     use mostik_yandex::session::CookieJar;
-    use tauri::webview::Color;
+    use tauri::webview::{Color, PermissionKind, PermissionResponse};
     use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
     use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE, ICoreWebView2_2};
     use windows_core::{HSTRING, Interface};
@@ -1050,7 +1117,8 @@ mod imp {
         label: String,
     }
 
-    /// A WebView2 window: Chromium inside, so WebRTC works as in the browser.
+    /// A private WebView2 window: Chromium inside, so WebRTC works as in the browser, and a
+    /// profile of its own in memory, so the session cookies never reach the disk.
     pub async fn launch(
         app: &AppHandle,
         url: &str,
@@ -1067,6 +1135,18 @@ mod imp {
         let watch = Mutex::new(super::EndWatch::default());
         let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(blank))
             .title(title)
+            .incognito(true)
+            // The user has asked for the call, so the meeting page gets the camera and the
+            // microphone without another prompt, as on Linux.
+            .on_permission_request(|webview, kind| {
+                let meeting = webview
+                    .url()
+                    .is_ok_and(|u| u.scheme() == "https" && super::is_meeting_host(&u));
+                match kind {
+                    PermissionKind::Microphone | PermissionKind::Camera if meeting => PermissionResponse::Allow,
+                    _ => PermissionResponse::Default,
+                }
+            })
             .initialization_script(super::page_script(title))
             // The end of the call, as on Linux (`EndWatch`). Routing inside the page does not
             // come here; on the bare meeting page the page script covers it with `ENDED_URL`.
@@ -1160,9 +1240,7 @@ mod imp {
 
     pub async fn focus(app: &AppHandle, h: &Handle) {
         if let Some(w) = app.get_webview_window(&h.label) {
-            let _ = w.unminimize();
-            let _ = w.show();
-            let _ = w.set_focus();
+            crate::webview::raise(&w);
         }
     }
 
@@ -1174,6 +1252,11 @@ mod imp {
 
     pub fn alive(app: &AppHandle, h: &Handle) -> bool {
         app.get_webview_window(&h.label).is_some()
+    }
+
+    /// The private profile leaves nothing on disk: closing the window is enough.
+    pub fn shutdown(app: &AppHandle, h: &Handle) {
+        close(app, h);
     }
 
     pub fn cleanup(_app: &AppHandle) {}
@@ -1206,6 +1289,8 @@ mod imp {
         false
     }
 
+    pub fn shutdown(_app: &AppHandle, _h: &Handle) {}
+
     pub fn cleanup(_app: &AppHandle) {}
 }
 
@@ -1228,6 +1313,7 @@ mod tests {
         assert!(!is_meeting_url("https://telemost.360.yandex.ru/private-join/"));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn what_ends_the_call() {
         let t0 = Instant::now();
