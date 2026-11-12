@@ -10,22 +10,14 @@ pub type Hidden = HashMap<ChatId, Timestamp>;
 
 const KEY: &str = "mostik.hidden";
 
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
-}
-
 pub fn load() -> Hidden {
-    storage()
-        .and_then(|s| s.get_item(KEY).ok().flatten())
-        .and_then(|v| serde_json::from_str::<Vec<(ChatId, Timestamp)>>(&v).ok())
+    crate::storage::load::<Vec<(ChatId, Timestamp)>>(KEY)
         .map(|v| v.into_iter().collect())
         .unwrap_or_default()
 }
 
 pub fn save(hidden: &Hidden) {
-    if let (Some(s), Ok(v)) = (storage(), serde_json::to_string(&hidden.iter().collect::<Vec<_>>())) {
-        let _ = s.set_item(KEY, &v);
-    }
+    crate::storage::save(KEY, &hidden.iter().collect::<Vec<_>>());
 }
 
 /// Whether the chat, hidden when its last message was at `at`, has something new to show again.
@@ -45,19 +37,12 @@ mod tests {
 
     fn chat(last_ts: Timestamp, muted: bool, mentions: u32) -> Chat {
         Chat {
-            id: ChatId("c".into()),
-            kind: ChatKind::Group { public: true },
             name: "general".into(),
-            description: None,
             member_count: 2,
-            unread: 0,
             mentions,
             muted,
-            mute_mentions: false,
             last_ts,
-            peer_seen_ts: 0,
-            pinned: None,
-            organizations: vec![],
+            ..Chat::new(ChatId("c".into()), ChatKind::Group { public: true })
         }
     }
 

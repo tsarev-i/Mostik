@@ -26,16 +26,8 @@ const PREFIX: &str = "folder:";
 
 /// Sections kept by an earlier Mostik in `localStorage`; the key is cleared, they move to Telemost.
 pub fn take_local() -> Folders {
-    let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else {
-        return vec![];
-    };
-    let list = s
-        .get_item(LOCAL_KEY)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default();
-    let _ = s.remove_item(LOCAL_KEY);
+    let list = crate::storage::load(LOCAL_KEY).unwrap_or_default();
+    crate::storage::remove(LOCAL_KEY);
     list
 }
 
@@ -294,19 +286,8 @@ mod tests {
             ]
         );
         let chat = |id: &str| Chat {
-            id: ChatId(id.into()),
-            kind: ChatKind::Group { public: false },
-            name: String::new(),
-            description: None,
             member_count: 3,
-            unread: 0,
-            mentions: 0,
-            muted: false,
-            mute_mentions: false,
-            last_ts: 0,
-            peer_seen_ts: 0,
-            pinned: None,
-            organizations: vec![],
+            ..Chat::new(ChatId(id.into()), ChatKind::Group { public: false })
         };
         assert_eq!(home_section(&chat("0/58/g1")), "meetings");
         assert_eq!(shown_section(&chat("0/58/g1"), true), GROUP_CALLS);

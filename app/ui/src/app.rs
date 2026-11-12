@@ -12,7 +12,7 @@ use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
 use crate::modal::Modal;
 use crate::settings::{ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES};
-use crate::{bridge, folders, hidden, ops, order, time};
+use crate::{bridge, folders, hidden, ops, order, storage, time};
 
 /// Window state shared by all components.
 #[derive(Clone, Copy)]
@@ -288,25 +288,22 @@ const THREAD_MIN: f64 = 320.0;
 const MAIN_MIN: f64 = 380.0;
 
 fn stored_width(key: &str, default: f64) -> f64 {
-    window()
-        .local_storage()
-        .ok()
-        .flatten()
-        .and_then(|s| s.get_item(key).ok().flatten())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    storage::get(key).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn store_width(key: &str, value: f64) {
-    if let Some(s) = window().local_storage().ok().flatten() {
-        let _ = s.set_item(key, &format!("{value:.0}"));
-    }
+    storage::set(key, &format!("{value:.0}"));
+}
+
+/// The language and clock format of the strings and times built from now on.
+fn set_locale(lang: Lang, clock24: bool) {
+    crate::i18n::set_current(lang);
+    time::configure(lang, clock24);
 }
 
 /// Language, time format, theme and colour mode go onto the document root.
 fn apply_settings(st: &Settings) {
-    crate::i18n::set_current(st.lang);
-    time::configure(st.lang, st.clock24);
+    set_locale(st.lang, st.clock24);
     if let Some(root) = document().document_element() {
         let _ = root.set_attribute("lang", st.lang.code());
         let _ = root.set_attribute("data-mode", if st.dark() { "dark" } else { "light" });
@@ -357,23 +354,13 @@ impl ViewMode {
 const DRAFTS_KEY: &str = "mostik.drafts";
 
 fn load_drafts() -> std::collections::HashMap<ChatId, String> {
-    window()
-        .local_storage()
-        .ok()
-        .flatten()
-        .and_then(|s| s.get_item(DRAFTS_KEY).ok().flatten())
-        .and_then(|v| serde_json::from_str::<Vec<(ChatId, String)>>(&v).ok())
+    storage::load::<Vec<(ChatId, String)>>(DRAFTS_KEY)
         .map(|v| v.into_iter().collect())
         .unwrap_or_default()
 }
 
 fn save_drafts(d: &std::collections::HashMap<ChatId, String>) {
-    if let (Some(s), Ok(v)) = (
-        window().local_storage().ok().flatten(),
-        serde_json::to_string(&d.iter().collect::<Vec<_>>()),
-    ) {
-        let _ = s.set_item(DRAFTS_KEY, &v);
-    }
+    storage::save(DRAFTS_KEY, &d.iter().collect::<Vec<_>>());
 }
 
 #[derive(Clone, PartialEq)]
@@ -406,14 +393,7 @@ fn empty_snapshot() -> Snapshot {
 pub fn App() -> impl IntoView {
     let live = bridge::available();
     let snap = RwSignal::new(empty_snapshot());
-    let org = RwSignal::new(
-        window()
-            .local_storage()
-            .ok()
-            .flatten()
-            .and_then(|s| s.get_item(ORG_KEY).ok().flatten())
-            .and_then(|v| v.parse().ok()),
-    );
+    let org = RwSignal::new(storage::get(ORG_KEY).and_then(|v| v.parse().ok()));
     let folder_list = Memo::new(move |_| {
         let chosen = org.get();
         snap.with(|s| {
@@ -810,8 +790,7 @@ pub fn App() -> impl IntoView {
         {move || {
             // Language and time format before building the view: effects run only after rendering.
             let (lang, clock24) = lang_clock.get();
-            crate::i18n::set_current(lang);
-            time::configure(lang, clock24);
+            set_locale(lang, clock24);
             let phase = c.phase.get();
             match phase {
             Phase::Ready => view! { <Workspace/> }.into_any(),
@@ -1187,56 +1166,51 @@ fn radio_item(
     }
 }
 
-fn filter_submenu(c: Ctx) -> impl IntoView {
-    let label = |f: SidebarFilter| match f {
-        SidebarFilter::Active => tr().f_active,
-        SidebarFilter::Unreads => tr().f_unreads,
-        SidebarFilter::Mentions => tr().f_mentions,
-        SidebarFilter::All => tr().f_all,
-    };
-    let item = move |f: SidebarFilter| {
-        radio_item(
-            c,
-            label(f),
-            move |s| s.sidebar_filter == f,
-            move |s| s.sidebar_filter = f,
-        )
-    };
-    let items = move || {
-        view! {
-            {item(SidebarFilter::Active)}
-            {item(SidebarFilter::Unreads)}
-            {item(SidebarFilter::Mentions)}
-            {item(SidebarFilter::All)}
-        }
+/// "Filter conversations by" as menu items.
+fn filter_items(c: Ctx) -> AnyView {
+    SidebarFilter::ALL
+        .into_iter()
+        .map(|f| {
+            radio_item(
+                c,
+                tr().sidebar_filter(f),
+                move |s| s.sidebar_filter == f,
+                move |s| s.sidebar_filter = f,
+            )
+        })
+        .collect_view()
         .into_any()
-    };
+}
+
+/// "Sort conversations by" as menu items.
+fn sort_items(c: Ctx) -> AnyView {
+    SidebarSort::ALL
+        .into_iter()
+        .map(|o| {
+            radio_item(
+                c,
+                tr().sidebar_sort(o),
+                move |s| s.sidebar_sort == o,
+                move |s| s.sidebar_sort = o,
+            )
+        })
+        .collect_view()
+        .into_any()
+}
+
+fn filter_submenu(c: Ctx) -> impl IntoView {
     choice_submenu(
         tr().filter,
-        Signal::derive(move || label(c.settings.with(|s| s.sidebar_filter))),
-        items,
+        Signal::derive(move || tr().sidebar_filter(c.settings.with(|s| s.sidebar_filter))),
+        move || filter_items(c),
     )
 }
 
 fn sort_submenu(c: Ctx) -> impl IntoView {
-    let label = |o: SidebarSort| match o {
-        SidebarSort::Alphabetical => tr().s_az,
-        SidebarSort::Recency => tr().s_recency,
-        SidebarSort::Custom => tr().s_custom,
-    };
-    let item = move |o: SidebarSort| radio_item(c, label(o), move |s| s.sidebar_sort == o, move |s| s.sidebar_sort = o);
-    let items = move || {
-        view! {
-            {item(SidebarSort::Alphabetical)}
-            {item(SidebarSort::Recency)}
-            {item(SidebarSort::Custom)}
-        }
-        .into_any()
-    };
     choice_submenu(
         tr().sort,
-        Signal::derive(move || label(c.settings.with(|s| s.sidebar_sort))),
-        items,
+        Signal::derive(move || tr().sidebar_sort(c.settings.with(|s| s.sidebar_sort))),
+        move || sort_items(c),
     )
 }
 
@@ -1352,9 +1326,7 @@ fn organization_menu_items(c: Ctx) -> impl IntoView {
                 <button class="menu-radio" on:click=move |_| {
                     close_menus(c);
                     c.org.set(Some(id));
-                    if let Some(st) = window().local_storage().ok().flatten() {
-                        let _ = st.set_item(ORG_KEY, &id.to_string());
-                    }
+                    storage::set(ORG_KEY, &id.to_string());
                 }>
                     <span class="menu-tick">{if checked { "✓" } else { "" }}</span>{o.name}
                 </button>
@@ -1370,24 +1342,6 @@ fn sidebar_menu_items(c: Ctx) -> impl IntoView {
         close_menus(c);
         c.settings.update(f);
     };
-    let filter_item = move |value: SidebarFilter, label: &'static str| {
-        let on = move || c.settings.with(|s| s.sidebar_filter == value);
-        view! {
-            <button class="menu-radio" on:click=move |_| { close_menus(c); c.settings.update(|s| s.sidebar_filter = value); }>
-                <span class="menu-tick">{move || on().then(|| view! { <Icon icon=I::Check size=14/> })}</span>
-                <span>{label}</span>
-            </button>
-        }
-    };
-    let sort_item = move |value: SidebarSort, label: &'static str| {
-        let on = move || c.settings.with(|s| s.sidebar_sort == value);
-        view! {
-            <button class="menu-radio" on:click=move |_| { close_menus(c); c.settings.update(|s| s.sidebar_sort = value); }>
-                <span class="menu-tick">{move || on().then(|| view! { <Icon icon=I::Check size=14/> })}</span>
-                <span>{label}</span>
-            </button>
-        }
-    };
     view! {
         <div class="me-sub" on:mouseenter=move |_| sub_open.set(true) on:mouseleave=move |_| sub_open.set(false)>
             <button class="me-sub-btn" on:click=move |_| sub_open.set(true)>
@@ -1396,15 +1350,10 @@ fn sidebar_menu_items(c: Ctx) -> impl IntoView {
             <Show when=move || sub_open.get()>
                 <div class="me-submenu">
                     <div class="menu-label">{tr().filter_by}</div>
-                    {filter_item(SidebarFilter::Active, tr().f_active)}
-                    {filter_item(SidebarFilter::Unreads, tr().f_unreads)}
-                    {filter_item(SidebarFilter::Mentions, tr().f_mentions)}
-                    {filter_item(SidebarFilter::All, tr().f_all)}
+                    {filter_items(c)}
                     <div class="menu-sep"></div>
                     <div class="menu-label">{tr().sort_by}</div>
-                    {sort_item(SidebarSort::Alphabetical, tr().s_az)}
-                    {sort_item(SidebarSort::Recency, tr().s_recency)}
-                    {sort_item(SidebarSort::Custom, tr().s_custom)}
+                    {sort_items(c)}
                 </div>
             </Show>
         </div>
@@ -1654,7 +1603,7 @@ fn TopBar() -> impl IntoView {
                 <button class="tb-btn" title=tr().back disabled=move || !can_back() on:click=move |_| ops::navigate(c, true)><Icon icon=I::ArrowLeft/></button>
                 <button class="tb-btn" title=tr().forward disabled=move || !can_forward() on:click=move |_| ops::navigate(c, false)><Icon icon=I::ArrowRight/></button>
                 <div class="history-wrap">
-                    <button class=move || if history_open.get() { "tb-btn active" } else { "tb-btn" } title=tr().history
+                    <button class="tb-btn" class:active=move || history_open.get() title=tr().history
                         on:click=move |_| history_open.update(|v| *v = !*v)><Icon icon=I::Clock/></button>
                     <Show when=move || history_open.get()>
                         <HistoryMenu on_close=Callback::new(move |_| history_open.set(false))/>
@@ -1941,7 +1890,7 @@ fn Rail() -> impl IntoView {
     let me = move || c.snap.with(|s| s.user(&s.me).cloned());
     let item = move |icon: I, label: &'static str, mode: ViewMode| {
         view! {
-            <button class=move || if c.view.get() == mode || (mode == ViewMode::Home && c.view.get().is_home_page()) { "rail-item active" } else { "rail-item" }
+            <button class="rail-item" class:active=move || c.view.get() == mode || (mode == ViewMode::Home && c.view.get().is_home_page())
                 on:click=move |_| c.view.set(mode)>
                 <span class="rail-icon"><Icon icon=icon size=20/>
                     {(mode == ViewMode::Activity).then_some(move || {
@@ -2182,13 +2131,18 @@ pub(crate) fn Avatar(user: User, #[prop(default = 36)] size: u32, #[prop(optiona
     }
 }
 
-/// Face of a chat: the peer in a direct chat, you in the chat with yourself.
-fn chat_face(s: &Snapshot, ch: &Chat) -> Option<User> {
+/// The person a chat is with: the peer in a direct chat, you in the chat with yourself.
+fn chat_person<'a>(s: &'a Snapshot, ch: &Chat) -> Option<&'a User> {
     match &ch.kind {
-        ChatKind::Direct { peer } => s.user(peer).cloned(),
-        ChatKind::Notes => s.user(&s.me).cloned(),
+        ChatKind::Direct { peer } => s.user(peer),
+        ChatKind::Notes => s.user(&s.me),
         _ => None,
     }
+}
+
+/// Face of a chat: see [`chat_person`].
+fn chat_face(s: &Snapshot, ch: &Chat) -> Option<User> {
+    chat_person(s, ch).cloned()
 }
 
 /// Chat name for the UI: your own name for the chat with yourself.
@@ -2467,7 +2421,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
             let (filter, hide_muted) = c.settings.with(|s| (s.sidebar_filter, s.hide_muted));
             let query = c.sb_query.with(|q| q.trim().to_owned());
             let current = chat_in_pane(c);
-            let now = (js_sys::Date::now() * 1000.0) as Timestamp;
+            let now = ops::now_mcs();
             c.snap.with(|s| {
                 section_order(c, s, &section_id, &chats)
                     .iter()
@@ -2867,18 +2821,8 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
         let id = id.clone();
         Memo::new(move |_| {
             c.snap.with(|s| {
-                s.chat(&id).map(|ch| {
-                    let face = match &ch.kind {
-                        ChatKind::Direct { peer } => s.user(peer).cloned(),
-                        ChatKind::Notes => s.user(&s.me).cloned(),
-                        _ => None,
-                    };
-                    let title = match (&ch.kind, &face) {
-                        (ChatKind::Notes, Some(me)) => me.display_name.clone(),
-                        _ => chat_title(s, ch),
-                    };
-                    (ch.clone(), title, face)
-                })
+                s.chat(&id)
+                    .map(|ch| (ch.clone(), display_title(s, ch), chat_face(s, ch)))
             })
         })
     };
@@ -2987,11 +2931,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
             let live = c.active_calls.with(|a| a.contains_key(&ch.id));
             // A call in a direct chat shows once: the person's "In meeting" is that very call.
             let face_status = c.snap.with(|s| {
-                let user = match &ch.kind {
-                    ChatKind::Direct { peer } => s.user(peer),
-                    ChatKind::Notes => s.user(&s.me),
-                    _ => None,
-                }?;
+                let user = chat_person(s, &ch)?;
                 let in_this_call = live && user.status.as_ref().is_some_and(|st| st.in_meeting);
                 if in_this_call { None } else { status_badge(user) }
             });
@@ -3105,12 +3045,12 @@ fn ChannelHeader() -> impl IntoView {
                 </div>
             </div>
             <nav class="ch-tabs">
-                <button class=move || if c.pins_tab.get() { "tab" } else { "tab active" } on:click=move |_| c.pins_tab.set(false)>
+                <button class="tab" class:active=move || !c.pins_tab.get() on:click=move |_| c.pins_tab.set(false)>
                     <Icon icon=I::Chat size=14/><span>{tr().tab_messages}</span>
                 </button>
                 // Like the "Pins" tab in Slack: only if the chat has a pinned message.
                 {move || info.get().and_then(|(ch, _, _)| ch.pinned).map(|_| view! {
-                    <button class=move || if c.pins_tab.get() { "tab active" } else { "tab" } on:click=move |_| c.pins_tab.set(true)>
+                    <button class="tab" class:active=move || c.pins_tab.get() on:click=move |_| c.pins_tab.set(true)>
                         <Icon icon=I::Pin size=14/><span>{tr().tab_pins}</span>
                     </button>
                 })}
@@ -3326,7 +3266,7 @@ fn InlineEditor(msg: Message) -> impl IntoView {
             spawn_local(async move {
                 match ops::edit(c, m, t).await {
                     Ok(()) => c.editing.set(None),
-                    Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_not_sent))),
+                    Err(e) => ops::failed(c, tr().err_not_sent, e),
                 }
                 // Saved, the editor closes and its signals go.
                 busy.try_set(false);
@@ -4287,16 +4227,7 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
         .map(|u| u.display_name.clone())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| f.author_name.clone());
-    let face = author.unwrap_or(User {
-        id: f.author.clone(),
-        display_name: name.clone(),
-        title: None,
-        presence: Presence::Offline,
-        status: None,
-        availability: Default::default(),
-        is_robot: false,
-        avatar: None,
-    });
+    let face = author.unwrap_or_else(|| User::named(f.author.clone(), name.clone()));
     let ts = f.ts;
     let footer = chat.map(|(id, title, kind)| {
         let prefix = if matches!(kind, ChatKind::Group { .. } | ChatKind::Broadcast) {
@@ -4320,6 +4251,18 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
             <Attachments list=f.attachments.clone()/>
             {footer}
         </div>
+    }
+}
+
+/// A message in one line of a list: its text without markup, else the text of the message it
+/// forwards (`↪ …`), else 📎 for attachments alone.
+fn message_preview(s: &Snapshot, m: &Message) -> String {
+    let text = s.plain(&m.text);
+    match m.forwarded.first() {
+        _ if !text.is_empty() => text,
+        Some(f) => format!("↪ {}", s.plain(&f.text)),
+        None if !m.attachments.is_empty() => "📎".to_owned(),
+        None => text,
     }
 }
 
@@ -4473,7 +4416,7 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
                     spawn_local(async move {
                         match bridge::save_file(&id, &name).await {
                             Ok(path) => c.notice.set(Some(format!("{}: {path}", tr().saved_to))),
-                            Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_download))),
+                            Err(e) => ops::failed(c, tr().err_download, e),
                         }
                     });
                 };
@@ -4945,7 +4888,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         set_draft.set(String::new());
                     }
                 }
-                Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_not_sent))),
+                Err(e) => ops::failed(c, tr().err_not_sent, e),
             }
         });
     };
@@ -5153,7 +5096,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                                 }.into_any(),
                             };
                             view! {
-                                <button class=move || if suggest_sel.get() == i { "active" } else { "" }
+                                <button class:active=move || suggest_sel.get() == i
                                     on:mousedown=move |e| { e.prevent_default(); accept_suggestion(i); }>
                                     {row}
                                 </button>
@@ -5326,7 +5269,7 @@ fn PeoplePicker(
                         Ok(list) => {
                             results.try_set(list);
                         }
-                        Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_search))),
+                        Err(e) => ops::failed(c, tr().err_search, e),
                     }
                 });
             },
@@ -5343,7 +5286,7 @@ fn PeoplePicker(
                 (!list.is_empty()).then(|| view! {
                     <div class="picker-results">
                         {list.into_iter().map(|p| {
-                            let face = User { id: p.id.clone(), display_name: p.display_name.clone(), title: None, presence: Presence::Offline, status: None, availability: Default::default(), is_robot: false, avatar: p.avatar.clone() };
+                            let face = profile_face(&p);
                             let picked = p.clone();
                             view! {
                                 <button class="picker-row" on:click=move |_| { on_pick.run(picked.clone()); query.set(String::new()); results.set(vec![]); }>
@@ -5362,16 +5305,12 @@ fn PeoplePicker(
     }
 }
 
+/// A person from the directory, for an avatar.
 fn profile_face(p: &UserProfile) -> User {
     User {
-        id: p.id.clone(),
-        display_name: p.display_name.clone(),
         title: p.position.clone(),
-        presence: Presence::Offline,
-        status: None,
-        availability: Default::default(),
-        is_robot: false,
         avatar: p.avatar.clone(),
+        ..User::named(p.id.clone(), p.display_name.clone())
     }
 }
 
@@ -5439,18 +5378,11 @@ fn BrowseChannelsDialog() -> impl IntoView {
                 match bridge::join_chat(&id.0).await {
                     Ok(chat) => {
                         let cid = chat.id.clone();
-                        c.snap.update(|s| {
-                            if s.chat(&cid).is_none() {
-                                s.chats.push(chat);
-                                if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == "channels") {
-                                    sec.chats.insert(0, cid.clone());
-                                }
-                            }
-                        });
+                        c.snap.update(|s| ops::add_channel(s, chat));
                         close();
                         ops::open_chat(c, cid);
                     }
-                    Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_join))),
+                    Err(e) => ops::failed(c, tr().err_join, e),
                 }
                 busy.try_set(false);
             });
@@ -5564,7 +5496,7 @@ fn ForwardDialog(msg: Message) -> impl IntoView {
                     c.notice.set(Some(tr().forwarded_notice.into()));
                     close();
                 }
-                Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_forward))),
+                Err(e) => ops::failed(c, tr().err_forward, e),
             }
             busy.try_set(false);
         });
@@ -5670,17 +5602,7 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
             match bridge::create_channel(&n, &d, members, public).await {
                 Ok(chat) => {
                     let id = chat.id.clone();
-                    // The push about the new chat may have added it already.
-                    c.snap.update(|s| {
-                        s.chats.retain(|ch| ch.id != id);
-                        s.chats.push(chat);
-                        for sec in &mut s.sections {
-                            sec.chats.retain(|x| x != &id);
-                        }
-                        if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == "channels") {
-                            sec.chats.insert(0, id.clone());
-                        }
-                    });
+                    c.snap.update(|s| ops::add_channel(s, chat));
                     if let Some(folder) = folder {
                         ops::change_folders(c, |f| folders::move_chat(f, &id, Some(&folder), None));
                     }
@@ -5688,7 +5610,7 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
                     c.view.set(ViewMode::Home);
                     ops::open_chat(c, id);
                 }
-                Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_create_channel))),
+                Err(e) => ops::failed(c, tr().err_create_channel, e),
             }
             busy.try_set(false);
         });
@@ -5823,7 +5745,7 @@ fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
                 let (n, d) = if c.live {
                     match bridge::update_chat(&id.0, &n, &d).await {
                         Ok(saved) => (saved.name, saved.description),
-                        Err(e) => return c.error.set(Some(format!("{}: {e}", tr().err_update_chat))),
+                        Err(e) => return ops::failed(c, tr().err_update_chat, e),
                     }
                 } else {
                     (n, d)
@@ -5856,7 +5778,7 @@ fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
             spawn_local(async move {
                 match bridge::change_members(&id.0, guids.into_iter().map(|g| g.0).collect(), add).await {
                     Ok(()) => load(),
-                    Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_members))),
+                    Err(e) => ops::failed(c, tr().err_members, e),
                 }
             });
         }
@@ -5879,8 +5801,8 @@ fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
                 <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
             </header>
             <nav class="ch-tabs modal-tabs">
-                <button class=move || if tab.get() == DetailsTab::About { "tab active" } else { "tab" } on:click=move |_| tab.set(DetailsTab::About)>{tr().about_channel}</button>
-                <button class=move || if tab.get() == DetailsTab::Members { "tab active" } else { "tab" } on:click=move |_| tab.set(DetailsTab::Members)>
+                <button class="tab" class:active=move || tab.get() == DetailsTab::About on:click=move |_| tab.set(DetailsTab::About)>{tr().about_channel}</button>
+                <button class="tab" class:active=move || tab.get() == DetailsTab::Members on:click=move |_| tab.set(DetailsTab::Members)>
                     {move || format!("{} {}", tr().members_tab, members.with(Vec::len))}
                 </button>
             </nav>
@@ -6055,8 +5977,7 @@ fn DmList() -> impl IntoView {
                         let who = c.snap.with(|s| s.user(&m.author).map(|u| u.display_name.clone())).unwrap_or_default();
                         return format!("{who} {text}");
                     }
-                    let text = c.snap.with(|s| s.plain(&m.text));
-                    let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", c.snap.with(|s| s.plain(&m.forwarded[0].text))) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
+                    let text = c.snap.with(|s| message_preview(s, m));
                     if m.author == me && ch.kind != ChatKind::Notes { format!("{}: {text}", tr().you_label) } else { text }
                 }).unwrap_or_default();
                 let when = last.as_ref().map(|m| time::short_date(m.ts)).unwrap_or_default();
@@ -6186,7 +6107,7 @@ fn ActivityList() -> impl IntoView {
     });
     let tab_btn = move |t: ActivityTab, label: &'static str| {
         view! {
-            <button class=move || if tab.get() == t { "act-tab active" } else { "act-tab" } on:click=move |_| tab.set(t)>{label}</button>
+            <button class="act-tab" class:active=move || tab.get() == t on:click=move |_| tab.set(t)>{label}</button>
         }
     };
     view! {
@@ -6369,11 +6290,11 @@ fn DraftsView() -> impl IntoView {
         <header class="ch-header">
             <div class="ch-title-row"><div class="ch-title"><span class="ch-kind"><Icon icon=I::Send size=18/></span><span>{tr().drafts_and_sent}</span></div></div>
             <nav class="ch-tabs">
-                <button class=move || if tab.get() == DraftsTab::Drafts { "tab active" } else { "tab" } on:click=move |_| tab.set(DraftsTab::Drafts)>
+                <button class="tab" class:active=move || tab.get() == DraftsTab::Drafts on:click=move |_| tab.set(DraftsTab::Drafts)>
                     <Icon icon=I::Compose size=14/><span>{tr().drafts}</span>
                     {move || { let n = drafts.with(Vec::len); (n > 0).then(|| view! { <span class="tab-count">{n}</span> }) }}
                 </button>
-                <button class=move || if tab.get() == DraftsTab::Sent { "tab active" } else { "tab" } on:click=move |_| tab.set(DraftsTab::Sent)>
+                <button class="tab" class:active=move || tab.get() == DraftsTab::Sent on:click=move |_| tab.set(DraftsTab::Sent)>
                     <Icon icon=I::Send size=14/><span>{tr().sent}</span>
                 </button>
             </nav>
@@ -6412,8 +6333,7 @@ fn DraftsView() -> impl IntoView {
                     }
                     list.into_iter().map(|(m, title)| {
                         let id = m.chat_id.clone();
-                        let text = c.snap.with(|s| s.plain(&m.text));
-                        let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", c.snap.with(|s| s.plain(&m.forwarded[0].text))) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
+                        let text = c.snap.with(|s| message_preview(s, &m));
                         view! {
                             <div class="draft-row" on:click=move |_| go(id.clone())>
                                 <span class="dm-body">
@@ -6656,7 +6576,7 @@ fn PreferencesDialog() -> impl IntoView {
             <div class="prefs-body">
                 <nav class="prefs-nav">
                     {tabs.into_iter().map(|(id, icon, label)| view! {
-                        <button class=move || if tab.get() == id { "active" } else { "" } on:click=move |_| tab.set(id)>
+                        <button class:active=move || tab.get() == id on:click=move |_| tab.set(id)>
                             <Icon icon=icon size=16/><span>{label}</span>
                         </button>
                     }).collect_view()}
@@ -6841,15 +6761,12 @@ fn PrefHome() -> impl IntoView {
     let ss = |s: &mut Settings, v| s.sidebar_sort = v;
     view! {
         <h3>{tr().filter_by}</h3>
-        {radio(c, "sb-filter", tr().f_active, SidebarFilter::Active, gf, sf)}
-        <p class="pref-hint">{tr().p_active_hint}</p>
-        {radio(c, "sb-filter", tr().f_unreads, SidebarFilter::Unreads, gf, sf)}
-        {radio(c, "sb-filter", tr().f_mentions, SidebarFilter::Mentions, gf, sf)}
-        {radio(c, "sb-filter", tr().f_all, SidebarFilter::All, gf, sf)}
+        {SidebarFilter::ALL.into_iter().map(|f| view! {
+            {radio(c, "sb-filter", tr().sidebar_filter(f), f, gf, sf)}
+            {(f == SidebarFilter::Active).then(|| view! { <p class="pref-hint">{tr().p_active_hint}</p> })}
+        }).collect_view()}
         <h3 class="pref-h">{tr().sort_by}</h3>
-        {radio(c, "sb-sort", tr().s_az, SidebarSort::Alphabetical, gs, ss)}
-        {radio(c, "sb-sort", tr().s_recency, SidebarSort::Recency, gs, ss)}
-        {radio(c, "sb-sort", tr().s_custom, SidebarSort::Custom, gs, ss)}
+        {SidebarSort::ALL.into_iter().map(|o| radio(c, "sb-sort", tr().sidebar_sort(o), o, gs, ss)).collect_view()}
         <h3 class="pref-h">{tr().p_muted}</h3>
         {checkbox(c, tr().hide_muted, |s| s.hide_muted, |s, v| s.hide_muted = v)}
         <h3 class="pref-h">{tr().p_sections}</h3>
@@ -7186,17 +7103,7 @@ fn ProfilePane() -> impl IntoView {
                         .filter(|n| !n.is_empty())
                         .or_else(|| user.as_ref().map(|u| u.display_name.clone()))
                         .unwrap_or_else(|| tr().user.to_owned());
-                    let fallback = User {
-                        id: id.clone(),
-                        display_name: name.clone(),
-                        title: None,
-                        presence: Presence::Offline,
-                        status: None,
-                        availability: Default::default(),
-                        is_robot: false,
-                        avatar: None,
-                    };
-                    let base = user.clone().unwrap_or(fallback);
+                    let base = user.clone().unwrap_or_else(|| User::named(id.clone(), name.clone()));
                     let face = User { avatar: base.avatar.clone().or_else(|| profile.as_ref().and_then(|p| p.avatar.clone())), ..base };
                     let title = profile.as_ref().and_then(|p| p.position.clone()).or_else(|| user.as_ref().and_then(|u| u.title.clone()));
                     let department = profile.as_ref().and_then(|p| p.department.clone());

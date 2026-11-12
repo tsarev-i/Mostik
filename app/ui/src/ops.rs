@@ -8,12 +8,19 @@ use crate::app::{Ctx, Phase};
 use crate::bridge::{self, LiveEvent};
 use crate::i18n::tr;
 
+/// Shows an error in the error bar and the console.
 fn report(c: Ctx, e: String) {
     leptos::logging::warn!("{e}");
     c.error.set(Some(e));
 }
 
-fn now_mcs() -> Timestamp {
+/// Shows "`what`: `e`" in the error bar and the console: the action `what` failed with `e`.
+pub fn failed(c: Ctx, what: &str, e: impl std::fmt::Display) {
+    report(c, format!("{what}: {e}"));
+}
+
+/// Now, in the microseconds of message times.
+pub fn now_mcs() -> Timestamp {
     (js_sys::Date::now() * 1000.0) as Timestamp
 }
 
@@ -174,6 +181,21 @@ fn sort_sections(s: &mut Snapshot) {
         if sec.id != "starred" {
             sec.chats.sort_by(|a, b| key.get(b).cmp(&key.get(a)));
         }
+    }
+}
+
+/// A channel the user has just joined or created goes on top of "Channels". The push about it
+/// may have brought it a moment earlier, without messages and so at the bottom: this one takes
+/// its place.
+pub fn add_channel(s: &mut Snapshot, chat: Chat) {
+    let id = chat.id.clone();
+    s.chats.retain(|ch| ch.id != id);
+    s.chats.push(chat);
+    for sec in &mut s.sections {
+        sec.chats.retain(|x| x != &id);
+    }
+    if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == "channels") {
+        sec.chats.insert(0, id);
     }
 }
 
@@ -449,7 +471,7 @@ pub fn change_folders(c: Ctx, change: impl FnOnce(&mut crate::folders::Folders))
     spawn_local(async move {
         if let Err(e) = bridge::save_chat_folders(&org, &mine).await {
             put(&before);
-            report(c, format!("{}: {e}", tr().err_settings));
+            failed(c, tr().err_settings, e);
         }
     });
 }
@@ -680,7 +702,7 @@ async fn load_latest(c: Ctx, id: &ChatId) {
                 mark_read(c, id.clone());
             }
         }
-        Err(e) => report(c, format!("{}: {e}", tr().err_history)),
+        Err(e) => failed(c, tr().err_history, e),
     }
 }
 
@@ -761,7 +783,7 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
             };
             match bridge::history(&chat2.0, Some(before), None).await {
                 Ok(page) => add_older_page(c, &chat2, before, page),
-                Err(e) => return report(c, format!("{}: {e}", tr().err_older)),
+                Err(e) => return failed(c, tr().err_older, e),
             }
             pages += 1;
         }
@@ -813,7 +835,7 @@ pub fn load_older(c: Ctx) -> bool {
                 fill_screen(c, id);
                 return;
             }
-            Err(e) => report(c, format!("{}: {e}", tr().err_older)),
+            Err(e) => failed(c, tr().err_older, e),
         }
         c.loading_older.set(false);
     });
@@ -878,7 +900,7 @@ fn load_thread(c: Ctx, id: ChatId, parent: Timestamp) {
                     read_thread(c, id, parent);
                 }
             }
-            Err(e) => report(c, format!("{}: {e}", tr().err_thread)),
+            Err(e) => failed(c, tr().err_thread, e),
         }
     });
 }
@@ -1233,7 +1255,7 @@ pub fn delete(c: Ctx, m: Message) {
         if c.live
             && let Err(e) = bridge::delete_message(&m).await
         {
-            return report(c, format!("{}: {e}", tr().err_delete));
+            return failed(c, tr().err_delete, e);
         }
         remove(c, &m.chat_id, m.ts, m.thread_parent);
     });
@@ -1248,7 +1270,7 @@ pub fn toggle_reaction(c: Ctx, m: &Message, kind: u64) {
         if c.live
             && let Err(e) = bridge::set_reaction(&m, kind, add).await
         {
-            return report(c, format!("{}: {e}", tr().err_reaction));
+            return failed(c, tr().err_reaction, e);
         }
         // The resulting reactions arrive as a push; update locally right away so as not to wait.
         c.snap.update(|s| {
@@ -1296,7 +1318,7 @@ pub fn toggle_important(c: Ctx, m: &Message) {
         if c.live
             && let Err(e) = bridge::set_important(&m, flag).await
         {
-            return report(c, format!("{}: {e}", tr().err_important));
+            return failed(c, tr().err_important, e);
         }
         c.snap.update(|s| {
             if let Some(msg) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
@@ -1361,7 +1383,7 @@ pub fn start_call(c: Ctx, chat: ChatId) {
     spawn_local(async move {
         if let Err(e) = bridge::start_call(&chat.0, &label, url.as_deref()).await {
             c.notice.set(None);
-            report(c, format!("{}: {e}", tr().err_call));
+            failed(c, tr().err_call, e);
         }
     });
 }
@@ -1370,7 +1392,7 @@ pub fn start_call(c: Ctx, chat: ChatId) {
 pub fn focus_call(c: Ctx) {
     spawn_local(async move {
         if let Err(e) = bridge::focus_call().await {
-            report(c, format!("{}: {e}", tr().err_call));
+            failed(c, tr().err_call, e);
         }
     });
 }
@@ -1379,7 +1401,7 @@ pub fn focus_call(c: Ctx) {
 pub fn leave_call(c: Ctx) {
     spawn_local(async move {
         if let Err(e) = bridge::leave_call().await {
-            report(c, format!("{}: {e}", tr().err_call));
+            failed(c, tr().err_call, e);
         }
     });
 }
@@ -1404,7 +1426,7 @@ pub fn call_user(c: Ctx, user: UserId) {
     spawn_local(async move {
         match bridge::open_dm(&user.0).await {
             Ok(chat) => start_call(c, chat.id),
-            Err(e) => report(c, format!("{}: {e}", tr().err_open_dm)),
+            Err(e) => failed(c, tr().err_open_dm, e),
         }
     });
 }
@@ -1461,7 +1483,7 @@ pub fn set_notify_level(c: Ctx, id: ChatId, level: NotifyLevel) {
         if c.live
             && let Err(e) = bridge::set_notify_level(&id.0, level).await
         {
-            return report(c, format!("{}: {e}", tr().err_settings));
+            return failed(c, tr().err_settings, e);
         }
         c.snap.update(|s| {
             if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == id) {
@@ -1487,7 +1509,7 @@ pub fn toggle_star(c: Ctx, id: ChatId) {
         let list: Vec<ChatId> = if c.live {
             match bridge::set_starred(&id.0, starred).await {
                 Ok(list) => list.into_iter().map(ChatId).collect(),
-                Err(e) => return report(c, format!("{}: {e}", tr().err_settings)),
+                Err(e) => return failed(c, tr().err_settings, e),
             }
         } else {
             let mut list = c.snap.with_untracked(|s| {
@@ -1551,7 +1573,7 @@ pub fn mark_unread(c: Ctx, m: &Message) {
         if c.live
             && let Err(e) = bridge::mark_unread(&m.chat_id.0, m.ts, m.seq_no).await
         {
-            return report(c, format!("{}: {e}", tr().err_settings));
+            return failed(c, tr().err_settings, e);
         }
         c.snap.update(|s| {
             let n = s
@@ -1576,7 +1598,7 @@ pub fn pin_message(c: Ctx, m: &Message, pin: bool) {
         if c.live
             && let Err(e) = bridge::pin_message(&m.chat_id.0, ts).await
         {
-            return report(c, format!("{}: {e}", tr().err_pin));
+            return failed(c, tr().err_pin, e);
         }
         set_pinned(c, &m.chat_id, ts);
     });
@@ -1717,7 +1739,7 @@ pub fn sign_out(c: Ctx) {
     c.phase.set(Phase::Loading(tr().signing_out));
     spawn_local(async move {
         let problem = bridge::logout().await.err();
-        if let Some(storage) = window().local_storage().ok().flatten() {
+        if let Some(storage) = crate::storage::local() {
             let keys: Vec<String> = (0..storage.length().unwrap_or(0))
                 .filter_map(|i| storage.key(i).ok().flatten())
                 .filter(|k| k.starts_with("mostik.") && !DEVICE_KEYS.contains(&k.as_str()))
@@ -1866,7 +1888,7 @@ pub fn open_profile(c: Ctx, user: UserId) {
             Ok(p) => c.profiles.update(|m| {
                 m.insert(user, p);
             }),
-            Err(e) => report(c, format!("{}: {e}", tr().err_profile)),
+            Err(e) => failed(c, tr().err_profile, e),
         }
     });
 }
@@ -1877,7 +1899,7 @@ pub fn leave_chat(c: Ctx, id: ChatId) {
         if c.live
             && let Err(e) = bridge::leave_chat(&id.0).await
         {
-            return report(c, format!("{}: {e}", tr().err_leave));
+            return failed(c, tr().err_leave, e);
         }
         drop_chat(c, &id);
     });
@@ -1941,7 +1963,7 @@ pub fn message_user(c: Ctx, user: UserId) {
                 });
                 open_chat(c, id);
             }
-            Err(e) => report(c, format!("{}: {e}", tr().err_open_dm)),
+            Err(e) => failed(c, tr().err_open_dm, e),
         }
     });
 }
@@ -2103,7 +2125,7 @@ pub fn set_status(c: Ctx, availability: Availability, status: Option<CustomStatu
     spawn_local(async move {
         match bridge::set_status(availability.code(), &emoji, &text, duration).await {
             Ok(()) => apply(c),
-            Err(e) => report(c, format!("{}: {e}", tr().err_status)),
+            Err(e) => failed(c, tr().err_status, e),
         }
     });
 }

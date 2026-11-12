@@ -128,10 +128,7 @@ fn storage_key(source: Source) -> &'static str {
 }
 
 fn load_recent(source: Source) -> Vec<String> {
-    let saved = web_sys::window()
-        .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|s| s.get_item(storage_key(source)).ok().flatten())
-        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok());
+    let saved = crate::storage::load::<Vec<String>>(storage_key(source));
     match (saved, source) {
         (Some(v), _) => v,
         // Before the first pick: the default Telemost set / popular emoji, like Slack's starter set.
@@ -148,12 +145,7 @@ pub fn remember(source: Source, key: &str) {
     list.retain(|k| k != key);
     list.insert(0, key.to_owned());
     list.truncate(RECENT_MAX);
-    if let (Some(s), Ok(v)) = (
-        web_sys::window().and_then(|w| w.local_storage().ok().flatten()),
-        serde_json::to_string(&list),
-    ) {
-        let _ = s.set_item(storage_key(source), &v);
-    }
+    crate::storage::save(storage_key(source), &list);
 }
 
 /// Suggestions for `:code` in the composer, like Slack's emoji autocomplete.

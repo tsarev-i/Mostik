@@ -147,18 +147,13 @@ fn ordinal(n: u32) -> &'static str {
 
 /// "today at 10:41" (and the Russian equivalent).
 pub fn relative(ts: Timestamp) -> String {
-    let lang = format().0;
-    let day = match (which_day(ts), lang) {
-        (Day::Today, Lang::Ru) => "сегодня".to_owned(),
-        (Day::Yesterday, Lang::Ru) => "вчера".to_owned(),
-        (Day::Today, Lang::En) => "today".to_owned(),
-        (Day::Yesterday, Lang::En) => "yesterday".to_owned(),
-        (Day::Other, _) => day_label(ts),
+    let tr = crate::i18n::for_lang(format().0);
+    let day = match which_day(ts) {
+        Day::Today => tr.today_in_text.to_owned(),
+        Day::Yesterday => tr.yesterday_in_text.to_owned(),
+        Day::Other => day_label(ts),
     };
-    match lang {
-        Lang::Ru => format!("{day} в {}", hm(ts)),
-        Lang::En => format!("{day} at {}", hm(ts)),
-    }
+    tr.day_at(&day, &hm(ts))
 }
 
 /// Short date for lists: the time today, "Yesterday", otherwise "Nov 9" (or the Russian short form).

@@ -10,21 +10,12 @@ pub type ChatOrder = HashMap<String, Vec<ChatId>>;
 
 const KEY: &str = "mostik.chat_order";
 
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
-}
-
 pub fn load() -> ChatOrder {
-    storage()
-        .and_then(|s| s.get_item(KEY).ok().flatten())
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default()
+    crate::storage::load(KEY).unwrap_or_default()
 }
 
 pub fn save(order: &ChatOrder) {
-    if let (Some(s), Ok(v)) = (storage(), serde_json::to_string(order)) {
-        let _ = s.set_item(KEY, &v);
-    }
+    crate::storage::save(KEY, order);
 }
 
 /// Puts `base` into the `saved` order. Chats missing from `saved` (new ones) keep their `base` order

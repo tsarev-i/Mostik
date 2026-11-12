@@ -7,6 +7,8 @@
 use mostik_core::{NotifyLevel, SystemNote, UserId};
 use serde::{Deserialize, Serialize};
 
+use crate::settings::{SidebarFilter, SidebarSort};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Lang {
     #[default]
@@ -173,6 +175,9 @@ pub struct Tr {
     pub intro_channel: &'static str,
     pub today: &'static str,
     pub yesterday: &'static str,
+    /// "today" and "yesterday" inside a sentence: "today at 10:41".
+    pub today_in_text: &'static str,
+    pub yesterday_in_text: &'static str,
     pub edited: &'static str,
     pub important: &'static str,
     pub add_reaction: &'static str,
@@ -567,6 +572,8 @@ pub static RU: Tr = Tr {
     intro_channel: "Это самое начало канала.",
     today: "Сегодня",
     yesterday: "Вчера",
+    today_in_text: "сегодня",
+    yesterday_in_text: "вчера",
     edited: "(изменено)",
     important: "Важное",
     add_reaction: "Добавить реакцию",
@@ -969,6 +976,8 @@ pub static EN: Tr = Tr {
     intro_channel: "This is the very beginning of the channel.",
     today: "Today",
     yesterday: "Yesterday",
+    today_in_text: "today",
+    yesterday_in_text: "yesterday",
     edited: "(edited)",
     important: "Important",
     add_reaction: "Add reaction",
@@ -1296,6 +1305,23 @@ impl Tr {
         }
     }
 
+    pub fn sidebar_filter(&self, filter: SidebarFilter) -> &'static str {
+        match filter {
+            SidebarFilter::Active => self.f_active,
+            SidebarFilter::Unreads => self.f_unreads,
+            SidebarFilter::Mentions => self.f_mentions,
+            SidebarFilter::All => self.f_all,
+        }
+    }
+
+    pub fn sidebar_sort(&self, sort: SidebarSort) -> &'static str {
+        match sort {
+            SidebarSort::Alphabetical => self.s_az,
+            SidebarSort::Recency => self.s_recency,
+            SidebarSort::Custom => self.s_custom,
+        }
+    }
+
     pub fn notify_level(&self, level: NotifyLevel) -> &'static str {
         match level {
             NotifyLevel::All => self.notify_all,
@@ -1331,6 +1357,14 @@ impl Tr {
         match self.lang {
             Lang::Ru => format!("Покинуть канал #{channel}?"),
             Lang::En => format!("Leave #{channel}?"),
+        }
+    }
+
+    /// A moment: `day` ("today", a date) at `time`.
+    pub fn day_at(&self, day: &str, time: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{day} в {time}"),
+            Lang::En => format!("{day} at {time}"),
         }
     }
 
@@ -1382,14 +1416,7 @@ impl Tr {
 
     pub fn members_count(&self, n: u32) -> String {
         match self.lang {
-            Lang::Ru => {
-                let word = match (n % 10, n % 100) {
-                    (1, x) if x != 11 => "участник",
-                    (2..=4, x) if !(12..=14).contains(&x) => "участника",
-                    _ => "участников",
-                };
-                format!("{n} {word}")
-            }
+            Lang::Ru => format!("{n} {}", ru_plural(n, "участник", "участника", "участников")),
             Lang::En => format!("{n} member{}", if n == 1 { "" } else { "s" }),
         }
     }
@@ -1648,6 +1675,8 @@ impl Tr {
     }
 }
 
+/// The Russian word form for `n`: `one` for 1, 21, 101…, `few` for 2–4, 22–24…, `many` for the
+/// rest, 11–14 included.
 fn ru_plural(n: u32, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
     let (m10, m100) = (n % 10, n % 100);
     if m10 == 1 && m100 != 11 {
@@ -1675,6 +1704,22 @@ mod tests {
         assert_eq!(RU.in_call(3), "3 человека в звонке");
         assert_eq!(RU.in_call(5), "5 человек в звонке");
         assert_eq!(EN.in_call(2), "2 in the call");
+        let members = [1, 2, 5, 11, 12, 21, 22, 112].map(|n| RU.members_count(n));
+        assert_eq!(
+            members,
+            [
+                "1 участник",
+                "2 участника",
+                "5 участников",
+                "11 участников",
+                "12 участников",
+                "21 участник",
+                "22 участника",
+                "112 участников"
+            ]
+        );
+        assert_eq!(EN.members_count(1), "1 member");
+        assert_eq!(EN.members_count(21), "21 members");
     }
 
     #[test]
@@ -1715,6 +1760,12 @@ mod tests {
             name: "⚠️|Test".into()
         };
         assert_eq!(EN.chat_note(&created, &me, name), "created #Test");
+    }
+
+    #[test]
+    fn moments() {
+        assert_eq!(RU.day_at(RU.today_in_text, "10:41"), "сегодня в 10:41");
+        assert_eq!(EN.day_at(EN.yesterday_in_text, "9:05 AM"), "yesterday at 9:05 AM");
     }
 
     #[test]
