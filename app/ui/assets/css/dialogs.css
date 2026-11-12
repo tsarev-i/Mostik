@@ -179,6 +179,16 @@
 /* The right-click menu opens at the cursor, above the whole window. */
 .popover.ctx-menu { position: fixed; right: auto; z-index: 50; }
 .ctx-menu.subs-left .me-submenu { left: auto; right: 100%; }
+/* The channel header's "⋮" menu, as in Slack: roomier than the right-click menus. */
+.ctx-menu.header-menu { min-width: 260px; padding: 10px 0; }
+.ctx-menu.header-menu button, .ctx-menu.header-menu .menu-label { padding-left: 24px; padding-right: 24px; }
+.ctx-menu.header-menu .me-submenu { top: -10px; padding: 10px 0; }
+.ctx-menu.header-menu .menu-sep { margin: 8px 0; }
+.me-sub-btn svg { color: var(--text-muted); }
+.me-sub-btn:hover svg { color: inherit; }
+/* "Move to…": the sections with their icons or emoji, as in the sidebar. */
+.me-submenu .menu-label { padding-top: 6px; padding-bottom: 6px; }
+.menu-section-icon { width: 18px; flex: none; display: inline-grid; place-items: center; font-size: 15px; line-height: 1; }
 .popover.menu .menu-icon-item { display: flex; align-items: center; gap: 10px; }
 .menu-value { display: flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 13px; }
 .me-sub-btn:hover .menu-value { color: inherit; }

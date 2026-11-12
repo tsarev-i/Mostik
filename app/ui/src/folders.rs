@@ -78,14 +78,6 @@ pub fn new_id(folders: &Folders, random: u64) -> String {
         .unwrap_or_default()
 }
 
-/// The folder's name with its emoji, for menus.
-pub fn label(f: &Folder) -> String {
-    match &f.emoji {
-        Some(e) => format!("{e} {}", f.name),
-        None => f.name.clone(),
-    }
-}
-
 /// The folder the chat is in.
 pub fn folder_of<'a>(folders: &'a Folders, chat: &ChatId) -> Option<&'a Folder> {
     folders.iter().find(|f| f.chats.contains(chat))

@@ -201,6 +201,18 @@ fn any_found(c: Ctx) -> bool {
     })
 }
 
+/// The icon of a sidebar section, as in Slack: a star for "Starred", a hash for "Channels", speech
+/// bubbles for "Direct messages", people for "Meeting chats"; none for a folder.
+pub(super) fn section_icon(id: &str) -> Option<I> {
+    match id {
+        "starred" => Some(I::Star),
+        "channels" => Some(I::HashSquare),
+        "dms" => Some(I::Messages),
+        "meetings" => Some(I::Users),
+        _ => None,
+    }
+}
+
 /// The current call at the bottom of the sidebar, like the Slack huddle bar: where it is and "Leave".
 #[component]
 fn CallBar() -> impl IntoView {
@@ -298,16 +310,8 @@ fn SidebarSection(section: Section) -> impl IntoView {
         })
     };
     let empty = Memo::new(move |_| visible.with(Vec::is_empty));
-    // The section icon, as in Slack: a star for "Starred", a hash for "Channels", speech bubbles for
-    // "Direct messages", people for "Meeting chats", the emoji of a folder; folders without an emoji
-    // have none.
-    let icon = match section_id.as_str() {
-        "starred" => Some(I::Star),
-        "channels" => Some(I::HashSquare),
-        "dms" => Some(I::Messages),
-        "meetings" => Some(I::Users),
-        _ => None,
-    };
+    // The section icon, as in Slack; a folder has its emoji instead, or nothing.
+    let icon = section_icon(&section_id);
     let emoji = {
         let id = section_id.clone();
         Memo::new(move |_| {

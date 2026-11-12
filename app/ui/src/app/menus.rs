@@ -16,6 +16,7 @@ use crate::{folders, ops, storage};
 use super::avatar::{avatar_url, display_title};
 use super::message::message_menu_items;
 use super::org::{ORG_KEY, current_org, org_avatar, org_name};
+use super::sidebar::section_icon;
 use super::state::{Ctx, CtxMenu, CtxTarget, DetailsTab, FolderEdit, NewChannel, close_menus, ctx};
 
 /// How much room a submenu needs to the right of its menu; with less it opens to the left.
@@ -68,7 +69,7 @@ pub(super) fn ContextMenu(menu: CtxMenu) -> impl IntoView {
         }
     };
     view! {
-        <div class="popover menu ctx-menu" class:subs-left=subs_left node_ref=node
+        <div class="popover menu ctx-menu" class:subs-left=subs_left class:header-menu=end node_ref=node
             style=move || { let (x, y) = pos.get(); format!("left:{x}px;top:{y}px") }
             on:contextmenu=|e| e.prevent_default()>
             {items}
@@ -431,7 +432,9 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
     let (leave_id, star_id, mute_id, read_id, open_id, hide_id) =
         (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
     let notes = kind == ChatKind::Notes;
-    let move_to = (!notes).then(|| move_to_section_items(c, id.clone()));
+    let channel = matches!(kind, ChatKind::Group { .. } | ChatKind::Broadcast);
+    let move_label = if channel { tr().move_channel } else { tr().move_chat };
+    let move_to = (!notes).then(|| move_to_section_items(c, id.clone(), move_label));
     let copy = move |_| {
         close_menus(c);
         let _ = window().navigator().clipboard().write_text(&title);
@@ -454,7 +457,6 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
         }
         .into_any(),
     };
-    let channel = matches!(kind, ChatKind::Group { .. } | ChatKind::Broadcast);
     view! {
         {head}
         <button on:click=copy>{tr().copy_name}</button>
@@ -525,7 +527,7 @@ fn header_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
     view! {
         {submenu(tr().channel_details, details)}
         {submenu(tr().copy_menu, copy)}
-        {move_to_section_items(c, id)}
+        {move_to_section_items(c, id, tr().move_channel)}
         <div class="menu-sep"></div>
         <button class="danger" on:click=move |_| {
             close_menus(c);
@@ -550,57 +552,101 @@ fn submenu(label: &'static str, items: impl Fn() -> AnyView + Clone + Send + Syn
     }
 }
 
-/// "Move to section" submenu of a chat: its own Telemost section, the folders and a new one.
-fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
+/// Where "Move channel" puts a chat.
+#[derive(Clone, PartialEq)]
+enum MoveTo {
+    Starred,
+    /// A folder, or the chat's own Telemost section with `None`.
+    Section(Option<String>),
+}
+
+/// "Move channel" submenu of a chat, as in Slack: under "Move to…" the sidebar sections in their
+/// order with their icons, except the one the chat is in, then a new section. "Starred" stars the
+/// chat, another section takes a starred chat out of "Starred".
+fn move_to_section_items(c: Ctx, id: ChatId, label: &'static str) -> impl IntoView {
     let sub_open = RwSignal::new(false);
     let home = c
         .snap
         .with_untracked(|s| s.chat(&id).map(Chat::home_section))
         .unwrap_or("channels");
-    let (list, current) = c.folders.with_untracked(|f| {
+    let starred = ops::is_starred(c, &id);
+    let (list, filed) = c.folders.with_untracked(|f| {
         (
-            f.iter().map(|f| (f.id.clone(), folders::label(f))).collect::<Vec<_>>(),
+            f.iter()
+                .map(|f| {
+                    (
+                        MoveTo::Section(Some(f.id.clone())),
+                        None,
+                        f.emoji.clone(),
+                        f.name.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
             folders::folder_of(f, &id).map(|f| f.id.clone()),
         )
     });
+    let current = if starred {
+        MoveTo::Starred
+    } else {
+        MoveTo::Section(filed)
+    };
+    // In the sidebar's order: "Starred", the folders, the chat's own Telemost section.
+    let telemost = |to, section: &str| (to, section_icon(section), None, tr().section(section, ""));
+    let targets: Vec<(MoveTo, Option<I>, Option<String>, String)> =
+        std::iter::once(telemost(MoveTo::Starred, "starred"))
+            .chain(list)
+            .chain(std::iter::once(telemost(MoveTo::Section(None), home)))
+            .filter(|(to, ..)| *to != current)
+            .collect();
     let item = {
         let id = id.clone();
-        move |to: Option<String>, label: String| {
-            let on = to == current;
+        move |to: MoveTo, icon: Option<I>, emoji: Option<String>, name: String| {
             let id = id.clone();
             view! {
-                <button class="menu-radio" on:click=move |_| {
+                <button class="menu-icon-item" on:click=move |_| {
                     close_menus(c);
-                    ops::change_folders(c, |f| folders::move_chat(f, &id, to.as_deref(), None));
+                    match &to {
+                        MoveTo::Starred => ops::toggle_star(c, id.clone()),
+                        MoveTo::Section(to) => {
+                            if starred {
+                                ops::toggle_star(c, id.clone());
+                            }
+                            ops::change_folders(c, |f| folders::move_chat(f, &id, to.as_deref(), None));
+                        }
+                    }
                 }>
-                    <span class="menu-tick">{on.then(|| view! { <Icon icon=I::Check size=14/> })}</span>
-                    <span>{label}</span>
+                    <span class="menu-section-icon">
+                        {icon.map(|i| view! { <Icon icon=i size=16/> })}
+                        {emoji}
+                    </span>
+                    <span>{name}</span>
                 </button>
             }
         }
     };
-    let targets: Vec<(Option<String>, String)> = std::iter::once((None, tr().section(home, "")))
-        .chain(list.into_iter().map(|(fid, name)| (Some(fid), name)))
-        .collect();
     let items = move || {
         targets
             .iter()
-            .map(|(to, label)| item(to.clone(), label.clone()))
+            .map(|(to, icon, emoji, name)| item(to.clone(), *icon, emoji.clone(), name.clone()))
             .collect_view()
     };
     view! {
         <div class="me-sub" on:mouseenter=move |_| sub_open.set(true) on:mouseleave=move |_| sub_open.set(false)>
             <button class="me-sub-btn" on:click=move |_| sub_open.set(true)>
-                <span>{tr().move_to_section}</span><Icon icon=I::ChevronRight size=14/>
+                <span>{label}</span><Icon icon=I::ChevronRight size=14/>
             </button>
             <Show when=move || sub_open.get()>
                 <div class="me-submenu">
+                    <div class="menu-label">{tr().move_to}</div>
                     {items.clone()}
                     <div class="menu-sep"></div>
-                    <button on:click={
+                    <button class="menu-icon-item" on:click={
                         let id = id.clone();
                         move |_| { close_menus(c); c.folder_edit.set(Some(FolderEdit::New(Some(id.clone())))); }
-                    }>{tr().new_section_item}</button>
+                    }>
+                        <span class="menu-section-icon"><Icon icon=I::Plus size=16/></span>
+                        <span>{tr().new_section_item}</span>
+                    </button>
                 </div>
             </Show>
         </div>
