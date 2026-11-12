@@ -8,6 +8,7 @@ mod backend;
 mod call;
 #[cfg(target_os = "linux")]
 mod cdp;
+mod downloads;
 mod login;
 mod ring;
 mod sound;

@@ -743,43 +743,24 @@ pub async fn save_file(
 ) -> Result<String, String> {
     let live = live(&state).await?;
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c == '/' || c == '\\' || c.is_control() {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect();
-    let safe = if safe.trim().is_empty() || safe.starts_with('.') {
-        format!("file{safe}")
-    } else {
-        safe
-    };
-    let (stem, ext) = match safe.rsplit_once('.') {
-        Some((s, e)) if !s.is_empty() => (s.to_owned(), format!(".{e}")),
-        _ => (safe.clone(), String::new()),
-    };
-    let mut path = dir.join(&safe);
-    let mut n = 1;
-    while path.exists() {
-        path = dir.join(format!("{stem} ({n}){ext}"));
-        n += 1;
-    }
-    download_to(&live, &file_id, &path).await?;
+    let (path, file) = crate::downloads::create_new(&dir, &crate::downloads::safe_name(&name))
+        .await
+        .map_err(|e| format!("could not save the file: {e}"))?;
+    download_to(&live, &file_id, file, &path).await?;
+    crate::downloads::mark_from_internet(&path);
     let shown = path.display().to_string();
     open_external(&shown)?;
     Ok(shown)
 }
 
-/// Writes an attachment into a new file at `path` as it arrives, whatever its size; a failed
-/// download leaves no file behind.
-async fn download_to(live: &Live, file_id: &str, path: &std::path::Path) -> Result<(), String> {
-    let mut file = tokio::fs::File::create_new(path)
-        .await
-        .map_err(|e| format!("could not save the file: {e}"))?;
+/// Writes an attachment into `file`, just created at `path`, as it arrives, whatever its size;
+/// a failed download leaves no file behind.
+async fn download_to(
+    live: &Live,
+    file_id: &str,
+    mut file: tokio::fs::File,
+    path: &std::path::Path,
+) -> Result<(), String> {
     let downloaded = live.web.download(file_id, &mut file).await;
     drop(file);
     if let Err(e) = downloaded {

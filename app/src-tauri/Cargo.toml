@@ -47,7 +47,7 @@ tauri-plugin-notification = "2"
 # and rustls then panics without a process default. reqwest is shared with mostik-yandex, so the
 # updater uses the same rustls setup.
 tauri-plugin-updater = { version = "2", default-features = false, features = ["system-proxy"] }
-tokio = { version = "1", features = ["fs", "macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Session cookies of the call window straight into WebView2 (see call.rs). Same versions as wry uses.
