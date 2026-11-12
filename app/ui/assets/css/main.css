@@ -66,7 +66,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 10px;
+  padding: 0 12px;
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 13px;
@@ -164,17 +164,19 @@
 
 /* "A call started / ended" line in the feed, like Slack's huddle message. */
 .msg.call-note { display: flex; align-items: center; gap: 8px; }
+/* The size and place of an author's avatar, as in Slack. */
 .call-note-icon {
   width: 40px;
-  height: 32px;
+  height: 36px;
   flex: none;
   display: grid;
-  place-items: center;
+  place-items: center start;
 }
 .call-note-badge {
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
-  padding: 7px;
   border-radius: 8px;
   background: var(--online);
   color: #fff;

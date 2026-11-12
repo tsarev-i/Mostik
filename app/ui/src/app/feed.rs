@@ -78,9 +78,9 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                                 title=title
                                 on:click=move |_| ops::start_call(c, c.current.get_untracked())>
                                 {if live {
-                                    view! { <Icon icon=I::Headphones size=16/> }.into_any()
+                                    view! { <Icon icon=I::Headphones size=20/> }.into_any()
                                 } else {
-                                    view! { <Icon icon=I::Video size=16/> }.into_any()
+                                    view! { <Icon icon=I::Video size=20/> }.into_any()
                                 }}
                                 <span>{if live { tr().call_join } else { tr().call }}</span>
                             </button>
@@ -521,7 +521,7 @@ fn CallRow(msg: Message, end: Option<Message>, live: bool) -> impl IntoView {
     };
     view! {
         <div class="msg call-note" class:ended=!going class:missed=missed data-ts=msg.ts.to_string()>
-            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=icon size=16/></span></span>
+            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=icon size=20/></span></span>
             <div class="call-note-body">
                 <span class="call-note-title">{title}</span>
                 {who.map(|w| view! { <span class="call-note-sep">"·"</span>{w} })}
@@ -569,7 +569,7 @@ fn SystemRow(msg: Message) -> impl IntoView {
     let id = msg.author.clone();
     view! {
         <div class="msg call-note ended" data-ts=msg.ts.to_string()>
-            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=icon size=16/></span></span>
+            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=icon size=20/></span></span>
             <div class="call-note-body">
                 <span class="chat-note-text">
                     <button class="msg-author" on:click=move |_| ops::open_profile(c, id.clone())>{name}</button>
