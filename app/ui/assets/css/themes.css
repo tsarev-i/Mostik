@@ -100,6 +100,7 @@
 :root[data-mode="light"] .me-menu,
 :root[data-mode="light"] .login-card { color: var(--text); }
 :root[data-mode="light"] .icon-btn:hover,
+:root[data-mode="light"] .ch-more.open,
 :root[data-mode="light"] .fmt:hover,
 :root[data-mode="light"] .cb:hover,
 :root[data-mode="light"] .msg-actions button:hover,

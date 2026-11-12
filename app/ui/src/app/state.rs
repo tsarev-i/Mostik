@@ -185,6 +185,8 @@ pub enum CtxTarget {
         quote: Option<String>,
     },
     Chat(ChatId),
+    /// The "⋮" menu in a channel header.
+    ChatHeader(ChatId),
     /// "Sidebar settings" menu at the organization name.
     SidebarPrefs,
     /// A person: right click on an author's name or avatar.

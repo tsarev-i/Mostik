@@ -18,19 +18,26 @@ use super::message::message_menu_items;
 use super::org::{ORG_KEY, current_org, org_avatar, org_name};
 use super::state::{Ctx, CtxMenu, CtxTarget, DetailsTab, FolderEdit, NewChannel, close_menus, ctx};
 
+/// How much room a submenu needs to the right of its menu; with less it opens to the left.
+const SUBMENU_ROOM: f64 = 240.0;
+
 /// Right-click menu. Opens at the cursor and never leaves the window.
 #[component]
 pub(super) fn ContextMenu(menu: CtxMenu) -> impl IntoView {
     let c = ctx();
     let node = NodeRef::<html::Div>::new();
     let pos = RwSignal::new((menu.x, menu.y));
+    // The "⋮" menu of a channel header hangs from the right edge of its button, as in Slack.
+    let end = matches!(menu.target, CtxTarget::ChatHeader(_));
+    // Near the right edge of the window the submenus open to the left.
+    let subs_left = RwSignal::new(false);
     Effect::new(move |_| {
         let Some(el) = node.get() else { return };
         let (w, h) = (el.offset_width() as f64, el.offset_height() as f64);
         let win = window();
         let vw = win.inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
         let vh = win.inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
-        let x = if menu.x + w > vw - 4.0 {
+        let x = if end || menu.x + w > vw - 4.0 {
             (menu.x - w).max(4.0)
         } else {
             menu.x
@@ -41,10 +48,12 @@ pub(super) fn ContextMenu(menu: CtxMenu) -> impl IntoView {
             menu.y
         };
         pos.set((x, y));
+        subs_left.set(vw - (x + w) < SUBMENU_ROOM);
     });
     let items = match menu.target {
         CtxTarget::Message { msg, mine, quote } => message_menu_items(c, *msg, mine, quote).into_any(),
         CtxTarget::Chat(id) => chat_menu_items(c, id).into_any(),
+        CtxTarget::ChatHeader(id) => header_menu_items(c, id).into_any(),
         CtxTarget::SidebarPrefs => sidebar_menu_items(c).into_any(),
         CtxTarget::User(id) => user_menu_items(c, id).into_any(),
         CtxTarget::Section(id) => section_menu_items(c, id).into_any(),
@@ -59,7 +68,7 @@ pub(super) fn ContextMenu(menu: CtxMenu) -> impl IntoView {
         }
     };
     view! {
-        <div class="popover menu ctx-menu" node_ref=node
+        <div class="popover menu ctx-menu" class:subs-left=subs_left node_ref=node
             style=move || { let (x, y) = pos.get(); format!("left:{x}px;top:{y}px") }
             on:contextmenu=|e| e.prevent_default()>
             {items}
@@ -296,6 +305,22 @@ pub(super) fn open_menu_below(c: Ctx, e: &ev::MouseEvent, target: CtxTarget) {
     }));
 }
 
+/// Opens a menu under the clicked element, its right edge at the element's right edge.
+pub(super) fn open_menu_below_end(c: Ctx, e: &ev::MouseEvent, target: CtxTarget) {
+    let Some(el) = e
+        .current_target()
+        .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
+    else {
+        return;
+    };
+    let r = el.get_bounding_client_rect();
+    c.ctx_menu.set(Some(CtxMenu {
+        x: r.right(),
+        y: r.bottom() + 4.0,
+        target,
+    }));
+}
+
 /// Organization menu, like the workspace menu in Slack: name, preferences, sign out.
 fn workspace_menu_items(c: Ctx) -> impl IntoView {
     let name = org_name(c);
@@ -464,6 +489,65 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
         })}
     }
     .into_any()
+}
+
+/// The "⋮" menu of a channel header, after Slack's: the channel details, copying, moving the
+/// channel to another section and leaving it. Slack's summaries, templates, workflows and split
+/// view Mostik does not have.
+fn header_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
+    let Some(title) = c.snap.with_untracked(|s| s.chat(&id).map(|ch| display_title(s, ch))) else {
+        return ().into_any();
+    };
+    // While a call goes on in the channel, its link, like "Copy huddle link" in Slack.
+    let call_link = c.active_calls.with_untracked(|a| a.get(&id).cloned());
+    let details = move || {
+        let tab = move |tab, label| {
+            view! { <button on:click=move |_| { close_menus(c); c.details.set(Some(tab)); }>{label}</button> }
+        };
+        view! { {tab(DetailsTab::About, tr().view_channel_details)}{tab(DetailsTab::Members, tr().members)} }.into_any()
+    };
+    let copy = move || {
+        let item = move |label: &'static str, text: String| {
+            view! {
+                <button on:click=move |_| {
+                    close_menus(c);
+                    let _ = window().navigator().clipboard().write_text(&text);
+                }>{label}</button>
+            }
+        };
+        view! {
+            {item(tr().copy_name, title.clone())}
+            {call_link.clone().map(|link| item(tr().copy_call_link, link))}
+        }
+        .into_any()
+    };
+    let leave_id = id.clone();
+    view! {
+        {submenu(tr().channel_details, details)}
+        {submenu(tr().copy_menu, copy)}
+        {move_to_section_items(c, id)}
+        <div class="menu-sep"></div>
+        <button class="danger" on:click=move |_| {
+            close_menus(c);
+            c.confirm_leave.set(Some(leave_id.clone()));
+        }>{tr().leave_channel}</button>
+    }
+    .into_any()
+}
+
+/// A submenu row: the name, and its items on hover.
+fn submenu(label: &'static str, items: impl Fn() -> AnyView + Clone + Send + Sync + 'static) -> impl IntoView {
+    let open = RwSignal::new(false);
+    view! {
+        <div class="me-sub" on:mouseenter=move |_| open.set(true) on:mouseleave=move |_| open.set(false)>
+            <button class="me-sub-btn" on:click=move |_| open.set(true)>
+                <span>{label}</span><Icon icon=I::ChevronRight size=14/>
+            </button>
+            <Show when=move || open.get()>
+                <div class="me-submenu">{items.clone()}</div>
+            </Show>
+        </div>
+    }
 }
 
 /// "Move to section" submenu of a chat: its own Telemost section, the folders and a new one.

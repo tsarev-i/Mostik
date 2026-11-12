@@ -31,6 +31,8 @@
   color: var(--text-muted);
 }
 .icon-btn:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
+/* The header "⋮" while its menu is open. */
+.ch-more.open { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
 
 .ch-title {
   display: flex;

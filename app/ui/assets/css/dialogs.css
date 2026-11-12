@@ -178,6 +178,7 @@
 .popover.menu button.danger:hover { background: var(--badge); color: #fff; }
 /* The right-click menu opens at the cursor, above the whole window. */
 .popover.ctx-menu { position: fixed; right: auto; z-index: 50; }
+.ctx-menu.subs-left .me-submenu { left: auto; right: 100%; }
 .popover.menu .menu-icon-item { display: flex; align-items: center; gap: 10px; }
 .menu-value { display: flex; align-items: center; gap: 4px; color: var(--text-muted); font-size: 13px; }
 .me-sub-btn:hover .menu-value { color: inherit; }

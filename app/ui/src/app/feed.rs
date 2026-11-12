@@ -11,8 +11,9 @@ use crate::icons::{I, Icon};
 use crate::{ops, time};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_badge};
+use super::menus::open_menu_below_end;
 use super::message::MessageRow;
-use super::state::{Ctx, DetailsTab, ctx};
+use super::state::{Ctx, CtxMenu, CtxTarget, DetailsTab, close_menus, ctx};
 
 #[component]
 pub(super) fn ChannelHeader() -> impl IntoView {
@@ -86,6 +87,23 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                             </button>
                         })
                     }}
+                    // "⋮" with the channel's menu, as in Slack. A second click closes it.
+                    {move || info.get().filter(|(ch, _, _)| !matches!(ch.kind, ChatKind::Direct { .. } | ChatKind::Notes)).map(|(ch, _, _)| {
+                        let open = move || c.ctx_menu.with(|m| matches!(m, Some(CtxMenu { target: CtxTarget::ChatHeader(_), .. })));
+                        view! {
+                            <button class="icon-btn ch-more" class:open=open title=tr().more
+                                on:mousedown=|e| e.stop_propagation()
+                                on:click=move |e| {
+                                    if open() {
+                                        close_menus(c);
+                                    } else {
+                                        open_menu_below_end(c, &e, CtxTarget::ChatHeader(ch.id.clone()));
+                                    }
+                                }>
+                                <Icon icon=I::Kebab size=20/>
+                            </button>
+                        }
+                    })}
                 </div>
             </div>
             <nav class="ch-tabs">
