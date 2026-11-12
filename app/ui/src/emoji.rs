@@ -30,9 +30,36 @@ enum Glyph {
     Image(ce::CustomEmoji),
 }
 
+/// How many pictures a string of emoji draws: a reaction like "4️⃣➕" is two, a ZWJ family or a flag one.
+fn pictures(s: &str) -> usize {
+    let mut count = 0;
+    let (mut joined, mut flag_half) = (false, false);
+    for c in s.chars() {
+        let u = u32::from(c);
+        if c == '\u{200D}' {
+            joined = true;
+            continue;
+        }
+        let modifier = matches!(u, 0xFE0E | 0xFE0F | 0x20E3 | 0x1F3FB..=0x1F3FF | 0xE0020..=0xE007F);
+        if modifier || std::mem::take(&mut joined) {
+            continue;
+        }
+        if (0x1F1E6..=0x1F1FF).contains(&u) {
+            flag_half = !flag_half;
+            if !flag_half {
+                continue;
+            }
+        }
+        count += 1;
+    }
+    count
+}
+
 impl Glyph {
     fn view(&self, class: &'static str) -> AnyView {
         match self {
+            // Two pictures in one cell are drawn smaller so that the cell keeps its width.
+            Glyph::Char(c) if pictures(c) > 1 => view! { <span class="ep-multi">{*c}</span> }.into_any(),
             Glyph::Char(c) => view! { <span>{*c}</span> }.into_any(),
             Glyph::Image(e) => crate::custom::image(e, class).into_any(),
         }
@@ -384,5 +411,16 @@ mod tests {
             crate::i18n::for_lang(crate::i18n::Lang::En).emoji_groups.len(),
             TEXT_TABS.len()
         );
+    }
+
+    #[test]
+    fn counts_drawn_pictures() {
+        assert_eq!(pictures("👍"), 1);
+        assert_eq!(pictures("❤️"), 1);
+        assert_eq!(pictures("👍🏽"), 1);
+        assert_eq!(pictures("👨‍👩‍👧"), 1);
+        assert_eq!(pictures("🇷🇺"), 1);
+        assert_eq!(pictures("4️⃣"), 1);
+        assert_eq!(pictures("4️⃣➕"), 2);
     }
 }

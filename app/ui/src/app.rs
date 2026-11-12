@@ -5952,6 +5952,7 @@ fn StatusDialog() -> impl IntoView {
         (4 * 60 * 60, tr().clear_4h),
         (seconds_until_midnight(), tr().clear_today),
     ];
+    let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     view! {
         <div class="modal-backdrop" on:click=move |_| close()>
             <div class="modal status-modal" on:click=|ev| ev.stop_propagation()>
@@ -5960,8 +5961,14 @@ fn StatusDialog() -> impl IntoView {
                     <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
                 </header>
                 <div class="status-input">
-                    <input class="emoji-input" maxlength="8" placeholder="🙂" prop:value=move || emoji.get()
-                        on:input=move |e| emoji.set(event_target_value(&e))/>
+                    // The emoji is picked, as in Slack: a text field would need the OS emoji input.
+                    <button class="emoji-input" title=tr().section_emoji
+                        on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
+                        {move || match emoji.get() {
+                            e if e.is_empty() => view! { <Icon icon=I::Smile size=20/> }.into_any(),
+                            e => view! { <span>{e}</span> }.into_any(),
+                        }}
+                    </button>
                     <input class="text-input bare" maxlength="100" placeholder=tr().status_placeholder prop:value=move || text.get()
                         on:input=move |e| text.set(event_target_value(&e))/>
                     <Show when=move || !emoji.get().is_empty() || !text.get().is_empty()>
@@ -5970,6 +5977,15 @@ fn StatusDialog() -> impl IntoView {
                         </button>
                     </Show>
                 </div>
+                {move || emoji_at.get().map(|at| view! {
+                    <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 312.0, at.1)
+                        on_close=Callback::new(move |_| emoji_at.set(None))
+                        on_pick=Callback::new(move |glyph: String| {
+                            emoji_at.set(None);
+                            crate::emoji::remember(crate::emoji::Source::Text, &glyph);
+                            emoji.set(glyph);
+                        })/>
+                })}
                 <div class="field-label">{tr().for_your_org}</div>
                 <div class="status-presets">
                     {tr().status_presets.into_iter().map(|(e, t)| view! {
@@ -6231,10 +6247,11 @@ fn PrefHome() -> impl IntoView {
         {radio(c, "sb-filter", tr().f_unreads, SidebarFilter::Unreads, gf, sf)}
         {radio(c, "sb-filter", tr().f_mentions, SidebarFilter::Mentions, gf, sf)}
         {radio(c, "sb-filter", tr().f_all, SidebarFilter::All, gf, sf)}
-        <h3>{tr().sort_by}</h3>
+        <h3 class="pref-h">{tr().sort_by}</h3>
         {radio(c, "sb-sort", tr().s_az, SidebarSort::Alphabetical, gs, ss)}
         {radio(c, "sb-sort", tr().s_recency, SidebarSort::Recency, gs, ss)}
-        <h3>{tr().p_muted}</h3>
+        {radio(c, "sb-sort", tr().s_custom, SidebarSort::Custom, gs, ss)}
+        <h3 class="pref-h">{tr().p_muted}</h3>
         {checkbox(c, tr().hide_muted, |s| s.hide_muted, |s, v| s.hide_muted = v)}
     }
 }

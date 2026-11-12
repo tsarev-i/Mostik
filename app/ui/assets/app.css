@@ -723,8 +723,9 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 13px;
 }
 .thread-summary:hover { background: var(--bg); border-color: var(--border); }
-.thread-faces { display: flex; gap: 4px; }
-.thread-count { color: var(--link); font-weight: 700; }
+.thread-faces { display: flex; gap: 4px; flex: none; }
+.thread-count { color: var(--link); font-weight: 700; white-space: nowrap; flex: none; }
+.thread-last, .thread-open { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-last { color: var(--text-muted); }
 .thread-open { display: none; color: var(--text-muted); }
 .thread-summary .icon { margin-left: auto; visibility: hidden; color: var(--text-muted); }
@@ -1743,7 +1744,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: var(--bg-input);
 }
 .status-input:focus-within { border-color: #1d9bd1; box-shadow: 0 0 0 1px #1d9bd1; }
-.emoji-input { width: 40px; height: 38px; border: 0; background: none; text-align: center; font-size: 20px; outline: none; color: var(--text); }
+.emoji-input { flex: none; display: grid; place-items: center; width: 40px; height: 38px; border: 0; background: none; font-size: 20px; line-height: 1; color: var(--text-muted); border-radius: 6px; }
+.emoji-input:hover { color: var(--text); background: var(--bg-hover); }
 .status-presets { display: flex; flex-direction: column; }
 .status-preset { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 6px; text-align: left; }
 .status-preset:hover { background: var(--bg-hover); }
@@ -1871,8 +1873,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .emoji-picker .ep-sec { background: #1a1d21; }
 :root[data-mode="light"] .emoji-picker .ep-sec { background: #fff; }
-.ep-grid { display: grid; grid-template-columns: repeat(9, 1fr); }
-.ep-cell { height: 36px; border-radius: 4px; font-size: 22px; line-height: 1; }
+.ep-grid { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); }
+.ep-cell { height: 36px; border-radius: 4px; font-size: 22px; line-height: 1; overflow: hidden; white-space: nowrap; }
+.ep-multi { font-size: 13px; letter-spacing: -1px; }
 .ep-cell:hover { background: var(--bg-hover); }
 .ep-empty { padding: 24px 8px; color: var(--text-muted); text-align: center; }
 .ep-foot { display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 14px; border-top: 1px solid var(--border-soft); }
