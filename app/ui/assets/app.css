@@ -1986,7 +1986,8 @@ button.ws-tile { cursor: pointer; }
 .thread-row.selected { background: var(--bg-hover); }
 .thread-row.unread .dm-name { font-weight: 900; }
 .thread-where { font-size: 13px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thread-text { color: var(--text); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+/* Three lines by height: WebKit's line-clamp moves a link from the cut-off text to after the ellipsis. */
+.thread-text { display: block; color: var(--text); line-height: 22px; max-height: 66px; overflow: hidden; }
 .thread-meta { display: flex; gap: 10px; margin-top: 2px; font-size: 13px; color: var(--text-muted); }
 .thread-new { color: var(--badge); font-weight: 700; }
 
