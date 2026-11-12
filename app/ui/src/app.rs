@@ -1769,9 +1769,10 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
         let n = seq.get_untracked() + 1;
         seq.set(n);
         loading.set(true);
+        // The search may close before the timer fires or the answer comes: its signals are gone then.
         set_timeout(
             move || {
-                if seq.get_untracked() != n {
+                if seq.try_get_untracked() != Some(n) {
                     return;
                 }
                 spawn_local(async move {
@@ -1788,7 +1789,7 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     });
                     let found = bridge::search_messages(&q, chats).await;
                     let people = bridge::search_people(&q, None).await;
-                    if seq.get_untracked() != n {
+                    if seq.try_get_untracked() != Some(n) {
                         return;
                     }
                     let mut users = found.as_ref().map(|f| f.users.clone()).unwrap_or_default();
@@ -1803,8 +1804,8 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     if let Err(e) = &found {
                         leptos::logging::warn!("search: {e}");
                     }
-                    remote.set((q, found.map(|f| f.messages).unwrap_or_default(), people));
-                    loading.set(false);
+                    remote.try_set((q, found.map(|f| f.messages).unwrap_or_default(), people));
+                    loading.try_set(false);
                 });
             },
             Duration::from_millis(300),
@@ -3159,12 +3160,15 @@ fn MessageList() -> impl IntoView {
     });
     Effect::new(move |_| {
         messages.track();
+        // The list may be gone by the next frame (another view opened).
         request_animation_frame(move || {
-            let Some(el) = list_ref.get_untracked() else { return };
-            if let Some((height, top)) = anchor.get_untracked() {
+            let Some(el) = list_ref.try_get_untracked().flatten() else {
+                return;
+            };
+            if let Some((height, top)) = anchor.try_get_untracked().flatten() {
                 el.set_scroll_top(el.scroll_height() - height + top);
-                anchor.set(None);
-            } else if stick.get_untracked() {
+                anchor.try_set(None);
+            } else if stick.try_get_untracked() == Some(true) {
                 el.set_scroll_top(el.scroll_height());
             }
         });
@@ -3276,7 +3280,7 @@ fn InlineEditor(msg: Message) -> impl IntoView {
             // The editor is taller than the message: the last message's editor would go under
             // the composer. Once laid out, scroll it fully into view.
             request_animation_frame(move || {
-                if let Some(el) = area.get_untracked() {
+                if let Some(el) = area.try_get_untracked().flatten() {
                     reveal_editor(&el);
                 }
             });
@@ -3305,7 +3309,8 @@ fn InlineEditor(msg: Message) -> impl IntoView {
                     Ok(()) => c.editing.set(None),
                     Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_not_sent))),
                 }
-                busy.set(false);
+                // Saved, the editor closes and its signals go.
+                busy.try_set(false);
             });
         }
     };
@@ -4659,7 +4664,8 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 (_, true) => ops::send_files(c, chat, text, thread_parent).await,
                 (r, false) => ops::send(c, chat, text, thread_parent, r).await,
             };
-            sending.set(false);
+            // The composer may be gone by now (the user left the chat view while files uploaded).
+            sending.try_set(false);
             if result.is_ok() && replied && c.replying.get_untracked() == replying {
                 c.replying.set(None);
             }
@@ -4676,7 +4682,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         });
                     }
                     let same_place = c.current.get_untracked() == chat_for_draft && parent() == thread_parent;
-                    if same_place && unchanged(&draft.get_untracked()) {
+                    if same_place && draft.try_get_untracked().is_some_and(|d| unchanged(&d)) {
                         set_draft.set(String::new());
                     }
                 }
@@ -4852,7 +4858,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         suggestions.set(found);
                     }
                     on:keydown=on_key
-                    on:blur=move |_| set_timeout(move || suggestions.set(vec![]), Duration::from_millis(150))
+                    on:blur=move |_| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
                 ></div>
                 <Show when=move || !suggestions.with(Vec::is_empty)>
                     <div class="emoji-suggest">
@@ -5027,18 +5033,21 @@ fn PeoplePicker(
         let n = seq.get_untracked() + 1;
         seq.set(n);
         let chat = chat_id.clone();
+        // The dialog may close before the timer fires or the answer comes: its signals are gone then.
         set_timeout(
             move || {
-                if seq.get_untracked() != n {
+                if seq.try_get_untracked() != Some(n) {
                     return;
                 }
                 spawn_local(async move {
                     let found = bridge::search_people(&q, chat.as_ref().map(|c| c.0.as_str())).await;
-                    if seq.get_untracked() != n {
+                    if seq.try_get_untracked() != Some(n) {
                         return;
                     }
                     match found {
-                        Ok(list) => results.set(list),
+                        Ok(list) => {
+                            results.try_set(list);
+                        }
                         Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_search))),
                     }
                 });
@@ -5105,10 +5114,12 @@ fn BrowseChannelsDialog() -> impl IntoView {
     if c.live {
         spawn_local(async move {
             match bridge::recommended_chats().await {
-                Ok(list) => recommended.set(list),
+                Ok(list) => {
+                    recommended.try_set(list);
+                }
                 Err(e) => leptos::logging::warn!("recommended chats: {e}"),
             }
-            loading.set(false);
+            loading.try_set(false);
         });
     }
     let matches = move |name: &str, desc: Option<&str>| {
@@ -5163,7 +5174,7 @@ fn BrowseChannelsDialog() -> impl IntoView {
                     }
                     Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_join))),
                 }
-                busy.set(false);
+                busy.try_set(false);
             });
         };
         view! {
@@ -5270,16 +5281,16 @@ fn ForwardDialog(msg: Message) -> impl IntoView {
     let send = move || {
         let Some(to) = target.get_untracked() else { return };
         busy.set(true);
-        let m = msg.clone();
+        let (m, text) = (msg.clone(), text.get_untracked());
         spawn_local(async move {
-            match ops::forward(c, m, to, text.get_untracked()).await {
+            match ops::forward(c, m, to, text).await {
                 Ok(()) => {
                     c.notice.set(Some(tr().forwarded_notice.into()));
                     close();
                 }
                 Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_forward))),
             }
-            busy.set(false);
+            busy.try_set(false);
         });
     };
     let target_title = move || {
@@ -5382,8 +5393,9 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
         busy.set(true);
         let (n, d) = (name.get_untracked().trim().to_owned(), description.get_untracked());
         let members: Vec<String> = people.get_untracked().into_iter().map(|p| p.id.0).collect();
+        let (public, folder) = (public.get_untracked(), folder.get_value());
         spawn_local(async move {
-            match bridge::create_channel(&n, &d, members, public.get_untracked()).await {
+            match bridge::create_channel(&n, &d, members, public).await {
                 Ok(chat) => {
                     let id = chat.id.clone();
                     // The push about the new chat may have added it already.
@@ -5397,7 +5409,7 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
                             sec.chats.insert(0, id.clone());
                         }
                     });
-                    if let Some(folder) = folder.get_value() {
+                    if let Some(folder) = folder {
                         ops::change_folders(c, |f| folders::move_chat(f, &id, Some(&folder), None));
                     }
                     close();
@@ -5406,7 +5418,7 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
                 }
                 Err(e) => c.error.set(Some(format!("{}: {e}", tr().err_create_channel))),
             }
-            busy.set(false);
+            busy.try_set(false);
         });
     };
     let exclude = Signal::derive(move || {
@@ -5494,15 +5506,16 @@ fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
             }
             let id = chat_id.clone();
             spawn_local(async move {
+                // The dialog may be closed by the time the answers come: its signals are gone then.
                 if let Ok(d) = bridge::chat_details(&id.0).await {
-                    name.set(d.name.clone());
-                    description.set(d.description.clone());
-                    details.set(Some(d));
+                    name.try_set(d.name.clone());
+                    description.try_set(d.description.clone());
+                    details.try_set(Some(d));
                 }
                 match bridge::chat_members(&id.0).await {
                     Ok(m) => {
                         let count = m.len() as u32;
-                        members.set(m);
+                        members.try_set(m);
                         c.snap.update(|s| {
                             if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == id) {
                                 ch.member_count = count;
@@ -5850,9 +5863,9 @@ fn ActivityList() -> impl IntoView {
                             }
                         }
                     });
-                    found.set(f.messages);
+                    found.try_set(f.messages);
                 }
-                loading.set(false);
+                loading.try_set(false);
             });
         }
     }
@@ -6609,14 +6622,8 @@ fn PrefUpdates() -> impl IntoView {
         checked.set(None);
         spawn_local(async move {
             let result = bridge::check_update().await;
-            checking.set(false);
-            match result {
-                Ok(status) => {
-                    c.update.set(status);
-                    checked.set(Some(Ok(())));
-                }
-                Err(e) => checked.set(Some(Err(e))),
-            }
+            checking.try_set(false);
+            checked.try_set(Some(result.map(|status| c.update.set(status))));
         });
     };
     let status = move || {
@@ -6673,13 +6680,16 @@ fn PrefEmoji() -> impl IntoView {
     // The emoji being renamed (its message time) with the new name, and the one to confirm deleting.
     let renaming: RwSignal<Option<(Timestamp, String)>> = RwSignal::new(None);
     let deleting: RwSignal<Option<Timestamp>> = RwSignal::new(None);
+    // Runs once Telemost answers, maybe after the preferences closed.
     let done = move |r: Result<Vec<mostik_core::custom_emoji::EmojiSet>, String>| match r {
         Ok(sets) => {
             c.custom.set(sets);
-            renaming.set(None);
-            deleting.set(None);
+            renaming.try_set(None);
+            deleting.try_set(None);
         }
-        Err(e) => error.set(Some(e)),
+        Err(e) => {
+            error.try_set(Some(e));
+        }
     };
     let row = move |e: mostik_core::custom_emoji::CustomEmoji, chat: ChatId, taken: bool| {
         let (me, author) = c.snap.with_untracked(|s| {
@@ -6799,16 +6809,19 @@ fn AddEmojiDialog() -> impl IntoView {
     let close = move || c.adding_emoji.set(false);
     let pick = move |_| {
         spawn_local(async move {
+            // The dialog may be closed while the file dialog is open: its signals are gone then.
             match bridge::pick_emoji_image().await {
                 Ok(Some(f)) => {
-                    if name.with_untracked(|n| n.trim().is_empty()) {
-                        name.set(mostik_core::custom_emoji::name_from_file(&f.name));
+                    if name.try_with_untracked(|n| n.trim().is_empty()) == Some(true) {
+                        name.try_set(mostik_core::custom_emoji::name_from_file(&f.name));
                     }
-                    file.set(Some(f));
-                    error.set(None);
+                    file.try_set(Some(f));
+                    error.try_set(None);
                 }
                 Ok(None) => {}
-                Err(e) => error.set(Some(e)),
+                Err(e) => {
+                    error.try_set(Some(e));
+                }
             }
         });
     };
@@ -6827,9 +6840,11 @@ fn AddEmojiDialog() -> impl IntoView {
                     c.custom.set(sets);
                     close();
                 }
-                Err(e) => error.set(Some(e)),
+                Err(e) => {
+                    error.try_set(Some(e));
+                }
             }
-            busy.set(false);
+            busy.try_set(false);
         });
     };
     let ready =

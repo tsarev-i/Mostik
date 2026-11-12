@@ -308,7 +308,7 @@ pub fn EmojiPicker(
                 }
                 Err(err) => ctx.error.set(Some(err)),
             }
-            busy.set(false);
+            busy.try_set(false);
         });
     };
     let jump = move |id: String| {

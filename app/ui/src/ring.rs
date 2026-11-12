@@ -21,7 +21,7 @@ pub fn RingDialog(
         spawn_local(async move {
             if let Err(e) = bridge::answer_ring(accept).await {
                 leptos::logging::warn!("answer_ring: {e}");
-                busy.set(false);
+                busy.try_set(false);
             }
         });
     };
