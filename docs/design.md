@@ -72,6 +72,8 @@ until then Noto Sans is used.
   start of the text, × and Escape cancel it); the sent reply shows the original above its text, and a
   click on it scrolls to the original.
 - The day separator is a centred pill that sticks to the top of the feed.
+- Changes of a chat are muted lines in its feed, like a call line: who created it, added or removed
+  people, joined or left (Telemost's `ChatCreatedInfo`, `ParticipantsChangedDiff`, `UserAction`).
 - A collapsed sidebar section still shows chats with unread messages; the open chat hides with the rest.
 - Sidebar section headers have no caret, as in Slack: on hover it shows in place of the section icon
   (the star of "Starred", the hash of "Channels", the speech bubbles of "Direct messages", a folder's

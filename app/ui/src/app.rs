@@ -3526,6 +3526,9 @@ fn FeedRow(days: Memo<Vec<feed::FeedDay<(u32, u32, u32)>>>, ts: Timestamp, in_th
     let Some(first) = days.with_untracked(|d| feed::find_line(d, ts).cloned()) else {
         return ().into_any();
     };
+    if first.msg.system.is_some() {
+        return view! { <SystemRow msg=first.msg/> }.into_any();
+    }
     // A call line is small and changes when the call ends: it is simply built again.
     if first.msg.call.is_some() {
         let line = Memo::new(move |_| days.with(|d| feed::find_line(d, ts).cloned()));
@@ -3648,6 +3651,53 @@ fn CallRow(msg: Message, end: Option<Message>, live: bool) -> impl IntoView {
                 {people}
             </div>
             {join}
+        </div>
+    }
+    .into_any()
+}
+
+/// What a note about the chat says after the name of its author.
+fn chat_note_text(s: &Snapshot, m: &Message) -> Option<String> {
+    let note = m.system.as_ref()?;
+    let name = |id: &UserId| {
+        s.user(id)
+            .filter(|u| u.has_name())
+            .map_or_else(|| tr().someone.to_owned(), |u| u.display_name.clone())
+    };
+    Some(tr().chat_note(note, &m.author, name))
+}
+
+/// A note about the chat, like Slack's "joined #channel": who did what, and when.
+#[component]
+fn SystemRow(msg: Message) -> impl IntoView {
+    let c = ctx();
+    let Some(note) = msg.system.clone() else {
+        return ().into_any();
+    };
+    let (name, text) = c.snap.with_untracked(|s| {
+        (
+            s.user(&msg.author)
+                .map_or_else(|| tr().someone.to_owned(), |u| u.display_name.clone()),
+            chat_note_text(s, &msg).unwrap_or_default(),
+        )
+    });
+    let icon = match note {
+        SystemNote::Created { .. } => I::Hash,
+        SystemNote::Members { added, .. } if added.is_empty() => I::UserMinus,
+        SystemNote::Left => I::UserMinus,
+        SystemNote::Members { .. } | SystemNote::Joined => I::UserPlus,
+    };
+    let id = msg.author.clone();
+    view! {
+        <div class="msg call-note ended chat-note" data-ts=msg.ts.to_string()>
+            <span class="call-note-icon"><span class="call-note-badge"><Icon icon=icon size=16/></span></span>
+            <div class="call-note-body">
+                <span class="chat-note-text">
+                    <button class="msg-author" on:click=move |_| ops::open_profile(c, id.clone())>{name}</button>
+                    " "{text}
+                </span>
+                <span class="msg-time">{time::hm(msg.ts)}</span>
+            </div>
         </div>
     }
     .into_any()
@@ -4353,8 +4403,8 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -
     let copy = |text: String| {
         let _ = window().navigator().clipboard().write_text(&text);
     };
-    // Replies go to messages, not to call notes; as in Telemost, they lead the menu.
-    let replies = msg.call.is_none().then(|| {
+    // Replies go to messages, not to notes; as in Telemost, they lead the menu.
+    let replies = (!msg.is_note()).then(|| {
         let (m_reply, m_quote) = (msg.clone(), msg.clone());
         let selected = quote.clone();
         view! {
@@ -4849,7 +4899,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 let last = c.snap.with_untracked(|s| {
                     s.messages
                         .iter()
-                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && m.call.is_none())
+                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && !m.is_note())
                         .max_by_key(|m| m.ts)
                         .cloned()
                 });
@@ -5867,6 +5917,10 @@ fn DmList() -> impl IntoView {
                         let end = matches!(note, CallNote::Ended { .. }).then_some(m);
                         return format!("📞 {}", call_title(note, end, &me).0);
                     }
+                    if let Some(text) = c.snap.with(|s| chat_note_text(s, m)) {
+                        let who = c.snap.with(|s| s.user(&m.author).map(|u| u.display_name.clone())).unwrap_or_default();
+                        return format!("{who} {text}");
+                    }
                     let text = c.snap.with(|s| s.plain(&m.text));
                     let text = if text.is_empty() && !m.forwarded.is_empty() { format!("↪ {}", c.snap.with(|s| s.plain(&m.forwarded[0].text))) } else if text.is_empty() && !m.attachments.is_empty() { "📎".to_owned() } else { text };
                     if m.author == me && ch.kind != ChatKind::Notes { format!("{}: {text}", tr().you_label) } else { text }
@@ -6164,7 +6218,7 @@ fn DraftsView() -> impl IntoView {
             let mut list: Vec<(Message, String)> = s
                 .messages
                 .iter()
-                .filter(|m| m.author == s.me && m.call.is_none())
+                .filter(|m| m.author == s.me && !m.is_note())
                 .map(|m| {
                     (
                         m.clone(),

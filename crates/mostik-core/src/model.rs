@@ -226,6 +226,10 @@ pub struct Message {
     /// Not a text message but Telemost's note that a call in the chat started or ended.
     #[serde(default)]
     pub call: Option<CallNote>,
+    /// Not a text message but Telemost's note about the chat itself: created, people added or
+    /// removed, someone joined or left.
+    #[serde(default)]
+    pub system: Option<SystemNote>,
 }
 
 impl Message {
@@ -233,6 +237,12 @@ impl Message {
     /// sequence number, must not count as unread and must survive reloading the chat history.
     pub fn is_ringing(&self) -> bool {
         matches!(self.call, Some(CallNote::Ringing { .. }))
+    }
+
+    /// A note of Telemost (a call, a change of the chat) rather than a message someone wrote: it
+    /// has no text, menu or replies.
+    pub fn is_note(&self) -> bool {
+        self.call.is_some() || self.system.is_some()
     }
 
     /// The message this one replies to, with the quoted fragment if there is one.
@@ -302,6 +312,20 @@ pub struct Meeting {
     pub participants: u32,
     /// The call is over: `status` 2 (0 is "nobody joined yet", 1 "going on").
     pub ended: bool,
+}
+
+/// A change of the chat, as Telemost notes it in the chat; the message author is who made it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SystemNote {
+    /// The chat was created with this name.
+    Created { name: String },
+    /// People were added to the chat or removed from it.
+    Members { added: Vec<UserId>, removed: Vec<UserId> },
+    /// The author joined the chat.
+    Joined,
+    /// The author left the chat.
+    Left,
 }
 
 /// Why a direct call ended: Telemost's `MeetingEndedReason`.
@@ -679,11 +703,11 @@ pub fn chat_title(snapshot: &Snapshot, chat: &Chat) -> String {
 pub const GROUPING_WINDOW_MCS: Timestamp = 5 * 60 * 1_000_000;
 
 /// Whether `next` continues the visual group started by `prev`.
-/// Call notes stand apart and never join a group.
+/// Notes of calls and chat changes stand apart and never join a group.
 pub fn continues_group(prev: Option<&Message>, next: &Message) -> bool {
     match prev {
-        Some(_) if next.call.is_some() => false,
-        Some(p) if p.call.is_some() => false,
+        Some(_) if next.is_note() => false,
+        Some(p) if p.is_note() => false,
         Some(p) => p.author == next.author && next.ts.saturating_sub(p.ts) < GROUPING_WINDOW_MCS,
         None => false,
     }
@@ -727,6 +751,7 @@ mod tests {
             attachments: vec![],
             forwarded: vec![],
             call: None,
+            system: None,
         }
     }
 

@@ -111,12 +111,20 @@ pub fn reaction_authors(sm: &Value) -> Vec<User> {
         .collect()
 }
 
-/// People the message mentions (`MentionedUsers`, which Telemost adds next to `ClientMessage`),
-/// so `@<guid>` in the text can show their names.
+/// People the message names: those it mentions (`MentionedUsers`, which Telemost adds next to
+/// `ClientMessage`), so `@<guid>` in the text can show their names, and those a note about the
+/// chat's members adds or removes.
 pub fn mentioned_users(sm: &Value) -> Vec<User> {
+    let diff = sm
+        .pointer("/ClientMessage/SystemMessage/ParticipantsChangedDiff")
+        .or_else(|| sm.pointer("/ClientMessage/SystemMessage/ParticipantsChangedDiffV2"));
+    let members = ["AddedUsers", "RemovedUsers"]
+        .into_iter()
+        .filter_map(|key| diff?.get(key)?.as_array());
     sm.get("MentionedUsers")
         .and_then(Value::as_array)
         .into_iter()
+        .chain(members)
         .flatten()
         .filter_map(user_from)
         .collect()
@@ -214,7 +222,9 @@ pub enum Parsed {
 fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>) -> Parsed {
     let info = &sm["ServerMessageInfo"];
     let Some(plain) = sm.pointer("/ClientMessage/Plain") else {
-        return call_note(sm).map_or(Parsed::Skip, |m| Parsed::Message(Box::new(m)));
+        return call_note(sm)
+            .or_else(|| chat_note(sm))
+            .map_or(Parsed::Skip, |m| Parsed::Message(Box::new(m)));
     };
     let Some(chat) = s(plain, &["ChatId"]).or(chat_hint) else {
         return Parsed::Skip;
@@ -260,6 +270,7 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
         attachments: attachments(plain),
         forwarded,
         call: None,
+        system: None,
     }))
 }
 
@@ -349,7 +360,54 @@ fn system_note(chat: &str, ts: Timestamp, info: &Value) -> Message {
         attachments: vec![],
         forwarded: vec![],
         call: None,
+        system: None,
     }
+}
+
+/// Telemost's note about a change of the chat, `SystemMessage{ChatId, …}` by whoever made it:
+/// - `ChatCreatedInfo: {InitialInfo: {Name, Description}}`: created the chat (in a group call
+///   chat it is the start of the call, see [`call_note`]);
+/// - `ParticipantsChangedDiff` (or `…V2`, which may also list groups and departments):
+///   `{AddedUsers, RemovedUsers}` of `UserInfo`s;
+/// - `UserAction`: 0 left the chat, 1 joined it, 2 joined it by an invite link.
+///
+/// Other system messages (renames, generic texts) stay out of the feed.
+fn chat_note(sm: &Value) -> Option<Message> {
+    let sys = sm.pointer("/ClientMessage/SystemMessage")?;
+    let info = &sm["ServerMessageInfo"];
+    let note = if let Some(created) = sys.get("ChatCreatedInfo") {
+        SystemNote::Created {
+            name: s(created, &["InitialInfo", "Name"]).unwrap_or_default().to_owned(),
+        }
+    } else if let Some(diff) = sys
+        .get("ParticipantsChangedDiff")
+        .or_else(|| sys.get("ParticipantsChangedDiffV2"))
+    {
+        let guids = |key: &str| -> Vec<UserId> {
+            diff.get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|u| s(u, &["Guid"]))
+                .map(|g| UserId(g.to_owned()))
+                .collect()
+        };
+        let (added, removed) = (guids("AddedUsers"), guids("RemovedUsers"));
+        if added.is_empty() && removed.is_empty() {
+            return None;
+        }
+        SystemNote::Members { added, removed }
+    } else {
+        match n(sys, &["UserAction"])? {
+            0 => SystemNote::Left,
+            1 | 2 => SystemNote::Joined,
+            _ => return None,
+        }
+    };
+    Some(Message {
+        system: Some(note),
+        ..system_note(s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, info)
+    })
 }
 
 /// A push about a direct call ringing for the user:
@@ -1449,9 +1507,67 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
-        let joined = json!({"ClientMessage": {"SystemMessage": {"ChatId": "0/0/abc", "UserAction": 0}},
-            "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 8}});
-        assert_eq!(from_push(&joined, None), None);
+    }
+
+    #[test]
+    fn chat_changes_are_notes() {
+        let push = |sys: Value| {
+            json!({"ServerMessage": {"ClientMessage": {"SystemMessage": sys},
+                "ServerMessageInfo": {"From": {"DisplayName": "Anna Smirnova", "Guid": "u1"}, "SeqNo": 3, "Timestamp": 8}}})
+        };
+        let note = |sys: Value| match from_push(&push(sys), None) {
+            Some(LiveEvent::Upsert { message, mentioned, .. }) => {
+                assert_eq!(
+                    (message.chat_id.0.as_str(), message.ts, message.seq_no),
+                    ("0/0/abc", 8, 3)
+                );
+                assert_eq!(message.author.0, "u1");
+                assert!(message.is_note() && message.text.is_empty());
+                (
+                    message.system,
+                    mentioned.into_iter().map(|u| u.display_name).collect::<Vec<_>>(),
+                )
+            }
+            other => panic!("{other:?}"),
+        };
+        let created = note(json!({"ChatId": "0/0/abc", "PayloadId": "p",
+            "ChatCreatedInfo": {"InitialInfo": {"Name": "release", "Description": "Releases"}}}));
+        assert_eq!(created.0, Some(SystemNote::Created { name: "release".into() }));
+        let changed = note(json!({"ChatId": "0/0/abc", "ParticipantsChangedDiff": {
+            "AddedUsers": [{"Guid": "u2", "DisplayName": "Boris Kotov"}, {"Guid": "u3", "DisplayName": "Vera Lebedeva"}],
+            "RemovedUsers": [{"Guid": "u4", "DisplayName": "Gleb Orlov"}]}}));
+        let id = |g: &str| UserId(g.into());
+        assert_eq!(
+            changed.0,
+            Some(SystemNote::Members {
+                added: vec![id("u2"), id("u3")],
+                removed: vec![id("u4")]
+            })
+        );
+        // Their names come along, for the line to show them.
+        assert_eq!(changed.1, ["Boris Kotov", "Vera Lebedeva", "Gleb Orlov"]);
+        let v2 = note(json!({"ChatId": "0/0/abc", "ParticipantsChangedDiffV2": {"RemovedUsers": [{"Guid": "u1"}]}}));
+        assert_eq!(
+            v2.0,
+            Some(SystemNote::Members {
+                added: vec![],
+                removed: vec![id("u1")]
+            })
+        );
+        // `UserAction` 0 is leaving (sent explicitly), 1 and 2 are joining.
+        assert_eq!(
+            note(json!({"ChatId": "0/0/abc", "UserAction": 0})).0,
+            Some(SystemNote::Left)
+        );
+        assert_eq!(
+            note(json!({"ChatId": "0/0/abc", "UserAction": 2})).0,
+            Some(SystemNote::Joined)
+        );
+        // Groups or departments only, and system messages the feed does not show, are left out.
+        let groups = push(json!({"ChatId": "0/0/abc", "ParticipantsChangedDiffV2": {"AddedGroups": [{"GroupId": 5}]}}));
+        assert_eq!(from_push(&groups, None), None);
+        let generic = push(json!({"ChatId": "0/0/abc", "GenericMessage": {"MessageText": "x"}}));
+        assert_eq!(from_push(&generic, None), None);
     }
 
     #[test]
@@ -1576,15 +1692,24 @@ mod tests {
             notes,
             vec![
                 (11, "u1", Some(&CallNote::Started { url: String::new() })),
+                // People invited to the call are a line about the chat's members.
+                (12, "u1", None),
                 (500, "u1", Some(&ended)),
                 (700, "u2", Some(&CallNote::Started { url: url.into() })),
                 (900, "u2", Some(&ended)),
             ]
         );
-        // An ordinary group made by someone is not a call.
+        assert!(data.messages[1].system.is_some());
+        // An ordinary group made by someone is not a call but a line about the chat.
         let made = json!({"ClientMessage": {"SystemMessage": {"ChatId": "0/0/g2", "ChatCreatedInfo": {}}},
             "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 5}});
-        assert_eq!(from_push(&made, None), None);
+        match from_push(&made, None) {
+            Some(LiveEvent::Upsert { message, .. }) => {
+                assert_eq!(message.call, None);
+                assert_eq!(message.system, Some(SystemNote::Created { name: String::new() }));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1775,7 +1900,11 @@ mod tests {
         let ch = &d.chats[0];
         assert_eq!((ch.unread, ch.member_count, ch.muted, ch.last_ts), (3, 19, true, 9));
         assert_eq!(ch.description, None);
-        assert_eq!(d.messages.len(), 1, "system and deleted messages stay out of the feed");
+        assert_eq!(
+            d.messages.len(),
+            1,
+            "empty system and deleted messages stay out of the feed"
+        );
         assert_eq!(d.messages[0].text, "hello");
         assert_eq!(d.messages[0].seq_no, 10);
         assert_eq!(

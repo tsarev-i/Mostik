@@ -323,7 +323,11 @@ pub fn hide(snapshot: &mut Snapshot, mut chats: Vec<ServiceChat>) -> Vec<Service
 /// The chat a live event is about.
 fn event_chat(ev: &LiveEvent) -> Option<(&str, bool)> {
     Some(match ev {
-        LiveEvent::Upsert { message, .. } => (message.chat_id.0.as_str(), message.thread_parent.is_none()),
+        // Joins and leaves of colleagues define no emoji.
+        LiveEvent::Upsert { message, .. } => (
+            message.chat_id.0.as_str(),
+            message.thread_parent.is_none() && message.system.is_none(),
+        ),
         LiveEvent::Deleted {
             chat_id, thread_parent, ..
         } => (chat_id.0.as_str(), thread_parent.is_none()),

@@ -4,7 +4,7 @@
 //! Changing the language re-renders the whole workspace, so
 //! components read strings non-reactively via [`tr`].
 
-use mostik_core::NotifyLevel;
+use mostik_core::{NotifyLevel, SystemNote, UserId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1438,19 +1438,69 @@ impl Tr {
                 Lang::En => "you".into(),
             });
         }
-        let and = match self.lang {
-            Lang::Ru => " и ",
-            Lang::En => " and ",
-        };
-        let list = match who.split_last() {
-            Some((last, rest)) if !rest.is_empty() => format!("{}{and}{last}", rest.join(", ")),
-            Some((last, _)) => last.clone(),
-            None => String::new(),
-        };
+        let list = self.list(&who);
         match self.lang {
             Lang::Ru => format!("Отреагировали: {list}"),
             Lang::En => format!("{list} reacted"),
         }
+    }
+
+    /// "Anna, Boris and Vera".
+    pub fn list(&self, names: &[String]) -> String {
+        let and = match self.lang {
+            Lang::Ru => " и ",
+            Lang::En => " and ",
+        };
+        match names.split_last() {
+            Some((last, rest)) if !rest.is_empty() => format!("{}{and}{last}", rest.join(", ")),
+            Some((last, _)) => last.clone(),
+            None => String::new(),
+        }
+    }
+
+    /// What a note about the chat says after the name of its author, as in Slack's "joined
+    /// #channel"; `name` names the people it adds or removes. Russian names are not declined,
+    /// so they follow a colon.
+    pub fn chat_note(&self, note: &SystemNote, author: &UserId, name: impl Fn(&UserId) -> String) -> String {
+        let list = |ids: &[UserId]| self.list(&ids.iter().map(&name).collect::<Vec<_>>());
+        let only_author = |ids: &[UserId]| ids == std::slice::from_ref(author);
+        let ru = self.lang == Lang::Ru;
+        match note {
+            SystemNote::Created { name } => match (ru, mostik_core::split_chat_icon(name).1) {
+                (true, "") => "создал(а) канал".to_owned(),
+                (true, name) => format!("создал(а) канал #{name}"),
+                (false, "") => "created the channel".to_owned(),
+                (false, name) => format!("created #{name}"),
+            },
+            SystemNote::Joined => self.chat_joined(),
+            SystemNote::Left => self.chat_left(),
+            SystemNote::Members { added, removed } if removed.is_empty() && only_author(added) => self.chat_joined(),
+            SystemNote::Members { added, removed } if added.is_empty() && only_author(removed) => self.chat_left(),
+            SystemNote::Members { added, removed } => match (ru, added.is_empty(), removed.is_empty()) {
+                (true, false, true) => format!("добавил(а) в канал: {}", list(added)),
+                (true, true, _) => format!("удалил(а) из канала: {}", list(removed)),
+                (true, false, false) => format!("добавил(а) в канал: {}; удалил(а): {}", list(added), list(removed)),
+                (false, false, true) => format!("added {}", list(added)),
+                (false, true, _) => format!("removed {}", list(removed)),
+                (false, false, false) => format!("added {} and removed {}", list(added), list(removed)),
+            },
+        }
+    }
+
+    fn chat_joined(&self) -> String {
+        match self.lang {
+            Lang::Ru => "присоединился(-ась) к каналу",
+            Lang::En => "joined the channel",
+        }
+        .to_owned()
+    }
+
+    fn chat_left(&self) -> String {
+        match self.lang {
+            Lang::Ru => "покинул(а) канал",
+            Lang::En => "left the channel",
+        }
+        .to_owned()
     }
 
     /// How long a call lasted, from whole minutes.
@@ -1579,6 +1629,32 @@ mod tests {
         assert_eq!(RU.in_call(3), "3 человека в звонке");
         assert_eq!(RU.in_call(5), "5 человек в звонке");
         assert_eq!(EN.in_call(2), "2 in the call");
+    }
+
+    #[test]
+    fn chat_notes() {
+        let id = |s: &str| UserId(s.into());
+        let name = |u: &UserId| format!("<{}>", u.0);
+        let members = |added: &[&str], removed: &[&str]| SystemNote::Members {
+            added: added.iter().map(|a| id(a)).collect(),
+            removed: removed.iter().map(|r| id(r)).collect(),
+        };
+        let me = id("a");
+        assert_eq!(
+            EN.chat_note(&members(&["b", "c", "d"], &[]), &me, name),
+            "added <b>, <c> and <d>"
+        );
+        assert_eq!(
+            RU.chat_note(&members(&["b"], &["c"]), &me, name),
+            "добавил(а) в канал: <b>; удалил(а): <c>"
+        );
+        // Adding or removing oneself is joining or leaving.
+        assert_eq!(EN.chat_note(&members(&["a"], &[]), &me, name), "joined the channel");
+        assert_eq!(RU.chat_note(&members(&[], &["a"]), &me, name), "покинул(а) канал");
+        let created = SystemNote::Created {
+            name: "⚠️|Test".into()
+        };
+        assert_eq!(EN.chat_note(&created, &me, name), "created #Test");
     }
 
     #[test]

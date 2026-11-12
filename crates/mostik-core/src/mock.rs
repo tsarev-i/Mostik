@@ -62,6 +62,7 @@ fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
         attachments: vec![],
         forwarded: vec![],
         call: None,
+        system: None,
     }
 }
 
@@ -84,6 +85,13 @@ fn call(chat: &str, ts: Timestamp, author: &str, started: bool) -> Message {
                 seconds: None,
             }
         }),
+        ..msg(chat, ts, author, "")
+    }
+}
+
+fn note(chat: &str, ts: Timestamp, author: &str, system: SystemNote) -> Message {
+    Message {
+        system: Some(system),
         ..msg(chat, ts, author, "")
     }
 }
@@ -279,6 +287,24 @@ pub fn demo() -> Snapshot {
             "anna",
             "We picked Lato for the UI, message text is 15/22.",
         ),
+        note(
+            "release",
+            YESTERDAY + 30 * MIN,
+            "gleb",
+            SystemNote::Created {
+                name: "release-1-0".into(),
+            },
+        ),
+        note(
+            "release",
+            YESTERDAY + 31 * MIN,
+            "gleb",
+            SystemNote::Members {
+                added: vec![uid("vera"), uid("boris"), uid("me")],
+                removed: vec![],
+            },
+        ),
+        note("release", TODAY + 40 * MIN, "anna", SystemNote::Joined),
         msg(
             "release",
             TODAY + 50 * MIN,

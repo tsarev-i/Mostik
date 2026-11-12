@@ -117,6 +117,7 @@ mod tests {
             attachments: vec![],
             forwarded: vec![],
             call: None,
+            system: None,
         }
     }
 

@@ -639,6 +639,7 @@ pub async fn send_message(
         attachments: vec![],
         forwarded: vec![],
         call: None,
+        system: None,
     })
 }
 
@@ -1284,6 +1285,10 @@ fn handle_incoming(
             {
                 let chat = message.chat_id.0.clone();
                 let first = !sh.pending.contains_key(&chat);
+                // A note about members brings no chat: it may say the user was just removed.
+                if first && message.system.is_some() {
+                    return;
+                }
                 sh.pending.entry(chat.clone()).or_default().push(ev);
                 if first {
                     let (app, shared) = (app.clone(), shared.clone());
@@ -1588,9 +1593,9 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
             *entry = (m.ts, m.seq_no.max(entry.1));
         }
     }
-    // Only the start of a call notifies; "the call ended" is just a line in the chat.
+    // Only the start of a call notifies; "the call ended" and changes of the chat are just lines in it.
     let ended = matches!(m.call, Some(mostik_core::CallNote::Ended { .. }));
-    if !sh.ready || sh.me.as_ref() == Some(&m.author) || m.edited || ended {
+    if !sh.ready || sh.me.as_ref() == Some(&m.author) || m.edited || ended || m.system.is_some() {
         return;
     }
     // A muted chat notifies about mentions only, or about nothing.

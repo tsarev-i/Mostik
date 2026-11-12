@@ -629,6 +629,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 .call-note.missed .call-note-badge { background: rgba(224, 30, 90, 0.16); color: var(--badge); }
 .call-note.missed .call-note-title { color: var(--badge); }
 .call-note-sep, .call-note-meta { color: var(--text-muted); font-size: 13px; }
+/* A note about the chat (created, people added or removed): the call line's look, muted. */
+.chat-note-text { color: var(--text-muted); }
+.chat-note-text .msg-author { color: var(--text); font-weight: 700; }
 .call-join { flex: none; display: flex; align-items: center; gap: 6px; border-color: var(--online); color: var(--online); }
 
 .msg-row { display: flex; gap: 8px; }

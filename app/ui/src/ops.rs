@@ -1107,6 +1107,7 @@ pub async fn send(
             attachments: vec![],
             forwarded: vec![],
             call: None,
+            system: None,
         }
     };
     if let Some(r) = &reply {
@@ -1551,6 +1552,7 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
         attachments: vec![],
         forwarded: original,
         call: None,
+        system: None,
     };
     upsert(c, message, None);
     Ok(())
@@ -2035,6 +2037,7 @@ mod tests {
             attachments: vec![],
             forwarded: vec![],
             call: None,
+            system: None,
         }
     }
 
