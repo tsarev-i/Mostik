@@ -1,0 +1,79 @@
+/* Mostik: layout following Slack 4.53 metrics (docs/design.md). */
+
+:root {
+  color-scheme: dark;
+  --font: "Lato", "Noto Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Noto Sans Mono", monospace;
+
+  /* The colours of the frame, rail and sidebar are in “Sidebar themes”. */
+
+  --bg: #202326;
+  --bg-raised: #25272b;
+  --bg-hover: #272a2e;
+  --bg-input: #272a2d;
+  /* Menus, pickers, dialogs and other panels over the window. */
+  --bg-popover: #1a1d21;
+  /* A code block or a quote. */
+  --bg-block: rgba(255, 255, 255, 0.04);
+  --border: #37393d;
+  --border-soft: rgba(255, 255, 255, 0.08);
+  --text: #d1d2d3;
+  --text-strong: #f8f8f8;
+  --text-muted: #9a9b9e;
+  --link: #1d9bd1;
+  --code-text: #e8912d;
+  --accent-green: #007a5a;
+  --accent-green-hover: #148567;
+  /* Focus rings, drop and resize marks, the outline of an own reaction: the same in both modes. */
+  --accent-blue: #1d9bd1;
+  /* The offline banner and the pinned mark. */
+  --accent-orange: #e8912d;
+  /* The highlighted item of a menu or list (white text on it) and the selected option. */
+  --highlight: #1264a3;
+  /* Unread counts, and red for danger: leave, delete, errors. */
+  --badge: #e01e5a;
+  --badge-hover: #c41a50;
+  --online: #2bac76;
+  --mention-bg: rgba(242, 199, 68, 0.1);
+  --mention-bar: #e8912d;
+  --mention-chip: rgba(29, 155, 209, 0.15);
+  --mention-chip-me: rgba(242, 199, 68, 0.25);
+  --important-bg: rgba(43, 172, 118, 0.08);
+
+  --topbar-h: 40px;
+  --rail-w: 70px;
+  --sidebar-w: 270px;
+  --thread-w: 400px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--frame-c);
+  color: var(--text);
+  font: 15px/1.46668 var(--font);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:disabled { opacity: 0.4; cursor: default; }
+
+.icon { flex: none; display: block; }
+
+.window {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(160deg, var(--frame-a) 0%, var(--frame-b) 55%, var(--frame-c) 100%);
+}

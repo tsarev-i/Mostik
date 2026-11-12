@@ -1,0 +1,86 @@
+/* ── Presence and statuses ──────────────────────────────────────── */
+
+.status-emoji { margin-left: 4px; font-size: 14px; line-height: 1; cursor: default; }
+/* Hover tip of an element with `data-tip` (a status), shown at once like Slack's. */
+.hover-tip {
+  position: fixed;
+  z-index: 100;
+  transform: translate(-50%, -100%);
+  max-width: 260px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #1d1c1d;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+.hover-tip.below { transform: translate(-50%, 0); }
+/* Telemost's "In meeting" status: green headphones, like a Slack huddle. */
+.status-meeting { display: inline-flex; vertical-align: -2px; color: var(--online); }
+.me-menu > .me-status-btn {
+  width: calc(100% - 24px);
+  margin: 0 12px 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+.status-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+.emoji-input { flex: none; display: grid; place-items: center; width: 40px; height: 38px; border: 0; background: none; font-size: 20px; line-height: 1; color: var(--text-muted); border-radius: 6px; }
+.emoji-input:hover { color: var(--text); background: var(--bg-hover); }
+.status-presets { display: flex; flex-direction: column; }
+.status-preset { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 6px; text-align: left; }
+.status-preset:hover { background: var(--bg-hover); }
+.preset-emoji { font-size: 18px; width: 22px; text-align: center; }
+
+/* Status in the rail, as in Slack: an emoji badge above the avatar, together one capsule. */
+.rail-me { position: relative; display: flex; flex-direction: column; align-items: center; border-radius: 8px; }
+.rail-me.with-status { background: rgba(var(--chrome-ink), 0.22); }
+.rail-status {
+  width: 36px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding-top: 2px;
+  font-size: 16px;
+  line-height: 1;
+}
+.me-sub { position: relative; }
+.me-sub-btn { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 20px; text-align: left; }
+.me-sub-btn:hover { background: var(--highlight); color: #fff; }
+.me-submenu {
+  position: absolute;
+  left: 100%;
+  top: -8px;
+  min-width: 200px;
+  padding: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-popover);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.me-submenu button { width: 100%; padding: 6px 20px; text-align: left; }
+.me-submenu button:hover { background: var(--highlight); color: #fff; }
+.details-title { display: flex; align-items: center; gap: 6px; }
+.member-search { margin-bottom: 8px; }
+.add-people-row .dm-name { color: var(--text-strong); font-weight: 700; }
+.modal-backdrop.nested { z-index: 11; background: rgba(0, 0, 0, 0.3); }

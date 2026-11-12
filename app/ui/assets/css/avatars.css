@@ -1,0 +1,83 @@
+/* ── Avatars ────────────────────────────────────────────────────── */
+
+.avatar {
+  position: relative;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 700;
+  line-height: 1;
+  user-select: none;
+}
+.avatar.unknown { width: 36px; height: 36px; background: #555; border-radius: 8px; }
+.avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+/* The presence dot sticks out past the avatar edge, as in Slack, ringed in the colour behind it. */
+.presence {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  z-index: 1;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--sidebar-bottom);
+  box-sizing: content-box;
+}
+.presence.online { background: var(--online); }
+.presence.offline, .presence.away {
+  background: var(--sidebar-bottom);
+  box-shadow: inset 0 0 0 1.5px rgba(var(--chrome-ink), 0.75);
+}
+.presence.busy { background: var(--badge); }
+.rail-me .presence { border-color: var(--rail-bottom); }
+.sb-icon .presence { width: 7px; height: 7px; right: -2px; bottom: -2px; }
+/* At the start of a line of text: the avatar menu, the profile. */
+.me-status .presence, .profile-line .presence {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 4px;
+}
+.main .presence, .thread-pane .presence, .modal .presence, .me-menu .presence { border-color: var(--bg); }
+.main .presence.offline, .main .presence.away, .thread-pane .presence.offline, .thread-pane .presence.away,
+.modal .presence.offline, .modal .presence.away, .me-menu .presence.offline, .me-menu .presence.away {
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1.5px var(--text-muted);
+}
+.sb-row.selected .presence, .dm-row.selected .presence { border-color: var(--sidebar-selected); }
+/* “Do not disturb”: a lilac crescent with a “z” instead of the dot. */
+.presence.dnd {
+  width: 12px;
+  height: 12px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  right: -5px;
+  bottom: -5px;
+}
+.presence.dnd::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #c9a6df;
+  -webkit-mask: radial-gradient(circle at 75% 28%, transparent 0 38%, #000 40%);
+  mask: radial-gradient(circle at 75% 28%, transparent 0 38%, #000 40%);
+  box-shadow: 0 0 0 2px var(--rail-bottom);
+}
+.presence.dnd::after {
+  content: "z";
+  position: absolute;
+  top: -6px;
+  right: -3px;
+  inset: auto;
+  font-size: 9px;
+  font-weight: 900;
+  color: #c9a6df;
+  line-height: 1;
+}

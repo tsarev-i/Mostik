@@ -44,7 +44,7 @@ gradient window background.
 | Workspace tile | `#A9A9AC` | the rail |
 
 The other tokens (badge `#E01E5A`, online `#2BAC76`, mention highlight and so on) are
-the `:root` variables in `app/ui/assets/app.css`.
+the `:root` variables in `app/ui/assets/css/base.css`.
 
 The rail and sidebar rows above are Slack's Aubergine; Mostik no longer has that theme.
 

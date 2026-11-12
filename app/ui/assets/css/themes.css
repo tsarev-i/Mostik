@@ -1,0 +1,122 @@
+/* ── Sidebar themes ─────────────────────────────────────────────── */
+
+/* A theme sets the colours of the frame, rail and sidebar; Dusk also paints the message column in dark mode.
+   The swatches in Preferences carry `data-theme` too and paint themselves with the same tokens, so a swatch
+   always shows the theme as it is. */
+
+:root {
+  --sidebar-hover: rgba(255, 255, 255, 0.08);
+  /* Ink of the frame, rail and sidebar as an RGB triple for rgba(), its strongest shade
+     (names, unread chats) and the tint of panels on the sidebar (the call bar). */
+  --chrome-ink: 255, 255, 255;
+  --chrome-strong: #fff;
+  --chrome-panel: rgba(0, 0, 0, 0.28);
+}
+
+/* Mostik's own. Dusk is the default: its frame, rail and sidebar apply to `:root` without a known theme. */
+:root, .swatch[data-theme="dusk"] {
+  --frame-a: #2a3446; --frame-b: #1f2735; --frame-c: #171c25;
+  --rail-bottom: #1b2130;
+  --sidebar-top: #1f2634; --sidebar-bottom: #1a202c;
+  --sidebar-selected: #3f5f96; --sidebar-text: #b7c1d3;
+}
+/* Dusk is a whole palette: its own ink on the chrome and, in dark mode, the message column (light mode,
+   below, keeps its own colours for the column). Text pairs: 11.8, muted 6.3, link 7.7, sidebar 9.0, selected 6.4. */
+:root[data-theme="dusk"] {
+  --sidebar-hover: rgba(255, 255, 255, 0.07);
+  --chrome-ink: 223, 229, 239;
+  --chrome-strong: #f1f4f9;
+  --bg: #1b1f27; --bg-raised: #222731; --bg-hover: #232935; --bg-input: #20252f;
+  --border: #333a48; --border-soft: rgba(255, 255, 255, 0.07);
+  --text: #d5dae3; --text-strong: #eff2f7; --text-muted: #95a1b5;
+  --link: #82b5ee; --code-text: #e8b38a;
+  --accent-green: #2f7d66; --badge: #c93762; --online: #4fbf8f; --accent-orange: #e3a24a;
+  --mention-bg: rgba(240, 196, 92, 0.08); --mention-bar: #e3a24a;
+  --mention-chip: rgba(130, 181, 238, 0.16); --mention-chip-me: rgba(240, 196, 92, 0.24);
+  --important-bg: rgba(79, 191, 143, 0.08);
+}
+:root[data-theme="moss"], .swatch[data-theme="moss"] {
+  --frame-a: #4d5532; --frame-b: #30351f; --frame-c: #232716;
+  --rail-bottom: #2c311d;
+  --sidebar-top: #2f3422; --sidebar-bottom: #24281a;
+  --sidebar-selected: #5e7230; --sidebar-text: #d4d9c3;
+}
+/* The classic ones. Twilight took Aubergine's place. */
+:root[data-theme="twilight"], .swatch[data-theme="twilight"] {
+  --frame-a: #53388a; --frame-b: #35245c; --frame-c: #22183f;
+  --rail-bottom: #2b1d4e;
+  --sidebar-top: #362460; --sidebar-bottom: #271a47;
+  --sidebar-selected: #7750d3; --sidebar-text: #d8d0f1;
+}
+:root[data-theme="midnight"], .swatch[data-theme="midnight"] {
+  --frame-a: #2a2d33; --frame-b: #1d1f23; --frame-c: #16181b;
+  --rail-bottom: #191b1f;
+  --sidebar-top: #1d1f23; --sidebar-bottom: #17191c;
+  --sidebar-selected: #1164a3; --sidebar-text: #c9cacc;
+}
+:root[data-theme="forest"], .swatch[data-theme="forest"] {
+  --frame-a: #1d5a40; --frame-b: #12392a; --frame-c: #0c281d;
+  --rail-bottom: #0f3123;
+  --sidebar-top: #133b2b; --sidebar-bottom: #0e2a1f;
+  --sidebar-selected: #2bac76; --sidebar-text: #c3d9cf;
+}
+:root[data-theme="ocean"], .swatch[data-theme="ocean"] {
+  --frame-a: #1b4a78; --frame-b: #102e4c; --frame-c: #0b2038;
+  --rail-bottom: #0e2944;
+  --sidebar-top: #112f4e; --sidebar-bottom: #0c2238;
+  --sidebar-selected: #2d8fd5; --sidebar-text: #c2d4e6;
+}
+:root[data-theme="sunset"], .swatch[data-theme="sunset"] {
+  --frame-a: #7a3417; --frame-b: #4a1d12; --frame-c: #33130c;
+  --rail-bottom: #401a10;
+  --sidebar-top: #4a1f13; --sidebar-bottom: #34150d;
+  --sidebar-selected: #e8912d; --sidebar-text: #e6cfc4;
+}
+
+/* ── Light mode: main column, dialogs, menus ────────────────────── */
+
+:root[data-mode="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-hover: #f8f8f8;
+  --bg-input: #ffffff;
+  --bg-popover: #ffffff;
+  --bg-block: #f8f8f8;
+  --border: #dddddd;
+  --border-soft: rgba(0, 0, 0, 0.1);
+  --text: #1d1c1d;
+  --text-strong: #1d1c1d;
+  --text-muted: #616061;
+  --link: #1264a3;
+  --mention-bg: #fef6e1;
+  --mention-chip: rgba(29, 155, 209, 0.1);
+  --mention-chip-me: rgba(242, 199, 68, 0.4);
+  --important-bg: #f2fbf6;
+}
+:root[data-mode="light"] .modal,
+:root[data-mode="light"] .popover,
+:root[data-mode="light"] .search-results,
+:root[data-mode="light"] .me-menu,
+:root[data-mode="light"] .login-card { color: var(--text); }
+:root[data-mode="light"] .icon-btn:hover,
+:root[data-mode="light"] .fmt:hover,
+:root[data-mode="light"] .cb:hover,
+:root[data-mode="light"] .msg-actions button:hover,
+:root[data-mode="light"] .btn:hover,
+:root[data-mode="light"] .huddle-btn:hover,
+:root[data-mode="light"] .ch-title:hover { background: rgba(0, 0, 0, 0.06); }
+:root[data-mode="light"] .reaction { background: rgba(0, 0, 0, 0.05); }
+:root[data-mode="light"] .reaction:hover { border-color: rgba(0, 0, 0, 0.3); }
+:root[data-mode="light"] .reaction.mine { background: #e8f5fa; border-color: var(--accent-blue); }
+:root[data-mode="light"] .msg-text code { background: #f6f6f6; border-color: #e0e0e0; color: #c01343; }
+:root[data-mode="light"] .app-tag { background: rgba(0, 0, 0, 0.08); }
+:root[data-mode="light"] .mention.me { color: #8f5b00; }
+:root[data-mode="light"] .file-card { background: #ffffff; }
+:root[data-mode="light"] .file-card:hover { background: #f8f8f8; }
+:root[data-mode="light"] .image { background: #f4f4f4; }
+:root[data-mode="light"] .messages::-webkit-scrollbar-thumb,
+:root[data-mode="light"] .tp-scroll::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.2); }
+:root[data-mode="light"] .send-group.empty { color: #a0a0a2; }
+:root[data-mode="light"] .sr-item.msg:hover .sr-chat { color: rgba(255, 255, 255, 0.85); }
+:root[data-mode="light"] .card { border-color: rgba(0, 0, 0, 0.08); }
