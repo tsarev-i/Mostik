@@ -299,6 +299,9 @@ pub struct HistoryPage {
     /// The server may have older messages. Decided by the raw page: service records such as
     /// joins are dropped by the parser, so fewer messages than asked does not mean the end.
     more: bool,
+    /// The time of the oldest record of the page, deleted messages and service records included:
+    /// the next page starts before it, or a run of deleted messages would be asked for again.
+    oldest: Option<Timestamp>,
 }
 
 /// History page: the latest messages before `before` (exclusive). The page comes back at once;
@@ -364,6 +367,7 @@ pub async fn history(
         messages: data.messages,
         users,
         more: raw >= limit as usize,
+        oldest: convert::oldest_record(&body),
     })
 }
 

@@ -282,6 +282,10 @@ pub struct HistoryPage {
     pub users: Vec<User>,
     /// The server may have older messages.
     pub more: bool,
+    /// The time of the oldest record of the page, deleted messages and service records included:
+    /// the next older page starts before it.
+    #[serde(default)]
+    pub oldest: Option<Timestamp>,
 }
 
 pub async fn history(

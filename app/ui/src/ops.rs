@@ -38,9 +38,11 @@ fn learn_users(s: &mut Snapshot, users: Vec<User>) {
 pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
     let current = c.current.get_untracked();
     let open_thread = c.thread.get_untracked();
-    let is_new = c
-        .snap
-        .with_untracked(|s| !s.messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts));
+    let viewing =
+        current == m.chat_id && document_visible() && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
+    let start = loaded_from(&m);
+    let mut shown = true;
+    let mut added = false;
     c.snap.update(|s| {
         // A push carries the author's current name and photo: they replace a stand-in like
         // "Unknown user" and an old picture.
@@ -76,57 +78,82 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
             };
             return;
         }
-        let mine = m.author == s.me;
-        let viewing = current == m.chat_id
-            && document_visible()
-            && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
-        // Only an unread feed message from someone else can add a mention. A ringing call is not
-        // a message: Telemost counts only the note that the call ended.
-        let counts = !mine && !viewing && m.thread_parent.is_none() && !m.is_ringing();
-        let mentioned = counts && s.mentions_me(&m.text);
-        if let Some(parent) = m.thread_parent {
-            if let Some(p) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == parent) {
-                let t = p.thread.get_or_insert(ThreadSummary {
-                    reply_count: 0,
-                    last_reply_ts: m.ts,
-                    participants: vec![],
-                });
-                t.reply_count += 1;
-                t.last_reply_ts = t.last_reply_ts.max(m.ts);
-                if !t.participants.contains(&m.author) {
-                    t.participants.push(m.author.clone());
-                }
-            }
-        } else if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == m.chat_id) {
-            ch.last_ts = ch.last_ts.max(m.ts);
-            if counts {
-                ch.unread += 1;
-                if mentioned {
-                    ch.mentions += 1;
-                }
-            }
-        }
-        s.messages.push(m.clone());
-        sort_sections(s);
+        added = add_new(s, &m, viewing, start);
+        shown = added;
     });
+    if !shown {
+        return;
+    }
     if let Some(parent) = m.thread_parent
-        && is_new
+        && added
+        && !m.edited
     {
         track_thread(c, &m, parent);
     }
     let viewing_reply = m.thread_parent.is_some() && open_thread == m.thread_parent;
     let read_on_open = c.settings.with_untracked(|s| s.mark_read_on_open);
-    let held = c.hold_unread.with_untracked(|h| h.as_ref() == Some(&m.chat_id));
-    if c.live
-        && read_on_open
-        && !held
-        && m.chat_id == current
-        && !c.view.get_untracked().is_home_page()
-        && (m.thread_parent.is_none() || viewing_reply)
-        && document_visible()
-    {
+    if c.live && read_on_open && reading(c, &m.chat_id) && (m.thread_parent.is_none() || viewing_reply) {
         mark_read(c, m.chat_id);
     }
+}
+
+/// Adds message `m`, not loaded so far, and keeps the counters: an unread message from someone
+/// else in a chat the user is not `viewing` adds to the chat's unread and mentions, a reply to
+/// its thread's replies. Telemost pushes an edit as an ordinary message, so an edit counts
+/// nowhere, and a message older than the loaded part of its chat or thread (which starts at
+/// `start` when known) stays out of the feed. Returns whether the message was added.
+fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Option<Timestamp>) -> bool {
+    let oldest = s
+        .messages
+        .iter()
+        .filter(|x| x.chat_id == m.chat_id && x.thread_parent == m.thread_parent)
+        .map(|x| x.ts)
+        .min();
+    if start.or(oldest).is_some_and(|from| m.ts < from) {
+        return false;
+    }
+    let mine = m.author == s.me;
+    // Only an unread feed message from someone else can add a mention. A ringing call is not
+    // a message: Telemost counts only the note that the call ended.
+    let counts = !mine && !viewing && !m.edited && m.thread_parent.is_none() && !m.is_ringing();
+    let mentioned = counts && s.mentions_me(&m.text);
+    if let Some(parent) = m.thread_parent {
+        if !m.edited
+            && let Some(p) = s.messages.iter_mut().find(|x| x.chat_id == m.chat_id && x.ts == parent)
+        {
+            let t = p.thread.get_or_insert(ThreadSummary {
+                reply_count: 0,
+                last_reply_ts: m.ts,
+                participants: vec![],
+            });
+            t.reply_count += 1;
+            t.last_reply_ts = t.last_reply_ts.max(m.ts);
+            if !t.participants.contains(&m.author) {
+                t.participants.push(m.author.clone());
+            }
+        }
+    } else if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == m.chat_id) {
+        ch.last_ts = ch.last_ts.max(m.ts);
+        if counts {
+            ch.unread += 1;
+            if mentioned {
+                ch.mentions += 1;
+            }
+        }
+    }
+    s.messages.push(m.clone());
+    sort_sections(s);
+    true
+}
+
+/// Whether chat `id` is in front of the user, so what comes in it is read: it is open and not
+/// covered by a page of the Home view, the user has not marked it unread while in it, and the
+/// window is not hidden.
+fn reading(c: Ctx, id: &ChatId) -> bool {
+    c.current.with_untracked(|cur| cur == id)
+        && !c.view.get_untracked().is_home_page()
+        && c.hold_unread.with_untracked(|h| h.as_ref() != Some(id))
+        && document_visible()
 }
 
 fn document_visible() -> bool {
@@ -420,6 +447,73 @@ fn forget_fresh() {
     FRESH.with_borrow_mut(|f| f.clear());
 }
 
+thread_local! {
+    /// Where the loaded history of each chat starts: the time of its oldest record, deleted
+    /// messages and service records included. The next older page is asked for before it: after a
+    /// run of deleted messages the oldest message shown would ask for the same page again.
+    static CURSOR: std::cell::RefCell<std::collections::HashMap<ChatId, Timestamp>> = Default::default();
+}
+
+/// Where the loaded history of chat `id` starts, if a page of it has been loaded.
+fn cursor(id: &ChatId) -> Option<Timestamp> {
+    CURSOR.with_borrow(|c| c.get(id).copied())
+}
+
+fn set_cursor(id: &ChatId, ts: Option<Timestamp>) {
+    CURSOR.with_borrow_mut(|c| match ts {
+        Some(ts) => c.insert(id.clone(), ts),
+        None => c.remove(id),
+    });
+}
+
+/// Where the loaded part of message `m`'s chat starts: known for a feed message once a history
+/// page has been loaded; thread replies come in pages of their own.
+fn loaded_from(m: &Message) -> Option<Timestamp> {
+    m.thread_parent.is_none().then(|| cursor(&m.chat_id)).flatten()
+}
+
+/// The `before` of the next older history page of chat `id`: where its loaded history starts,
+/// or the oldest message shown when no page has been loaded.
+fn older_page_before(s: &Snapshot, id: &ChatId, loaded: Option<Timestamp>) -> Option<Timestamp> {
+    loaded.or_else(|| {
+        s.messages
+            .iter()
+            .filter(|m| &m.chat_id == id && m.thread_parent.is_none())
+            .map(|m| m.ts)
+            .min()
+    })
+}
+
+/// Where the history of a chat starts once `page`, asked for before `before` (`None` for the
+/// latest page), has come: its oldest record, else its oldest message. `None` when the page has
+/// nothing older than `before`, so there is nothing further back to ask for.
+fn page_start(before: Option<Timestamp>, page: &bridge::HistoryPage) -> Option<Timestamp> {
+    let oldest = page.oldest.or_else(|| page.messages.iter().map(|m| m.ts).min())?;
+    before.is_none_or(|b| oldest < b).then_some(oldest)
+}
+
+/// Adds a page of chat `id` asked for before `before`: its messages join the feed, the chat's
+/// history now starts at the page's oldest record, and ends there when the page is the last one.
+fn add_older_page(c: Ctx, id: &ChatId, before: Timestamp, page: bridge::HistoryPage) {
+    let start = page_start(Some(before), &page);
+    if start.is_some() {
+        set_cursor(id, start);
+    }
+    if !page.more || start.is_none() {
+        c.exhausted.update(|e| {
+            e.insert(id.clone());
+        });
+    }
+    c.snap.update(|s| {
+        learn_users(s, page.users);
+        for m in page.messages {
+            if !s.messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
+                s.messages.push(m);
+            }
+        }
+    });
+}
+
 /// Makes the chat current (recording it in the navigation history if `record`). Returns `true`
 /// if the chat history needs to be loaded from the server.
 fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
@@ -478,6 +572,7 @@ async fn load_latest(c: Ctx, id: &ChatId) {
         Ok(page) => {
             let full = !page.more;
             FRESH.with_borrow_mut(|f| f.insert(id.clone()));
+            set_cursor(id, page_start(None, &page));
             c.snap.update(|s| {
                 learn_users(s, page.users);
                 // History never has a ringing call: it stays, or "Join" would go.
@@ -496,7 +591,9 @@ async fn load_latest(c: Ctx, id: &ChatId) {
                 }
             });
             fill_screen(c, id.clone());
-            if read_on_open && !c.view.get_untracked().is_home_page() {
+            // Only what is in front of the user is read: not a chat in a hidden window after a
+            // reconnection, nor one the user marked unread.
+            if read_on_open && reading(c, id) {
                 mark_read(c, id.clone());
             }
         }
@@ -575,30 +672,12 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
         };
         let mut pages = 0;
         while c.live && !has(c) && pages < 20 && !c.exhausted.with_untracked(|e| e.contains(&chat2)) {
-            let oldest = c.snap.with_untracked(|s| {
-                s.messages
-                    .iter()
-                    .filter(|m| m.chat_id == chat2 && m.thread_parent.is_none())
-                    .map(|m| m.ts)
-                    .min()
-            });
-            let Some(oldest) = oldest else { break };
-            match bridge::history(&chat2.0, Some(oldest), None).await {
-                Ok(page) => {
-                    if !page.more {
-                        c.exhausted.update(|e| {
-                            e.insert(chat2.clone());
-                        });
-                    }
-                    c.snap.update(|s| {
-                        learn_users(s, page.users);
-                        for m in page.messages {
-                            if !s.messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
-                                s.messages.push(m);
-                            }
-                        }
-                    });
-                }
+            let loaded = cursor(&chat2);
+            let Some(before) = c.snap.with_untracked(|s| older_page_before(s, &chat2, loaded)) else {
+                break;
+            };
+            match bridge::history(&chat2.0, Some(before), None).await {
+                Ok(page) => add_older_page(c, &chat2, before, page),
                 Err(e) => return report(c, format!("{}: {e}", tr().err_older)),
             }
             pages += 1;
@@ -638,31 +717,15 @@ pub fn load_older(c: Ctx) -> bool {
     if !c.live || c.loading_older.get_untracked() || c.exhausted.with_untracked(|e| e.contains(&id)) {
         return false;
     }
-    let oldest = c.snap.with_untracked(|s| {
-        s.messages
-            .iter()
-            .filter(|m| m.chat_id == id && m.thread_parent.is_none())
-            .map(|m| m.ts)
-            .min()
-    });
-    let Some(oldest) = oldest else { return false };
+    let loaded = cursor(&id);
+    let Some(before) = c.snap.with_untracked(|s| older_page_before(s, &id, loaded)) else {
+        return false;
+    };
     c.loading_older.set(true);
     spawn_local(async move {
-        match bridge::history(&id.0, Some(oldest), None).await {
+        match bridge::history(&id.0, Some(before), None).await {
             Ok(page) => {
-                if !page.more {
-                    c.exhausted.update(|e| {
-                        e.insert(id.clone());
-                    });
-                }
-                c.snap.update(|s| {
-                    learn_users(s, page.users);
-                    for m in page.messages {
-                        if !s.messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
-                            s.messages.push(m);
-                        }
-                    }
-                });
+                add_older_page(c, &id, before, page);
                 c.loading_older.set(false);
                 fill_screen(c, id);
                 return;
@@ -1667,6 +1730,7 @@ fn drop_chat(c: Ctx, id: &ChatId) {
         return;
     }
     FRESH.with_borrow_mut(|f| f.remove(id));
+    set_cursor(id, None);
     c.snap.update(|s| {
         s.chats.retain(|ch| &ch.id != id);
         s.messages.retain(|m| &m.chat_id != id);
@@ -1880,7 +1944,117 @@ pub fn set_status(c: Ctx, availability: Availability, status: Option<CustomStatu
 
 #[cfg(test)]
 mod tests {
-    use super::split_message_link;
+    use super::*;
+
+    fn page(messages: Vec<Message>, oldest: Option<Timestamp>) -> bridge::HistoryPage {
+        bridge::HistoryPage {
+            messages,
+            users: vec![],
+            more: true,
+            oldest,
+        }
+    }
+
+    /// The demo data with only the given messages in chat `general`.
+    fn snapshot(messages: Vec<Message>) -> Snapshot {
+        let mut s = mostik_core::mock::demo();
+        s.messages = messages;
+        for ch in &mut s.chats {
+            (ch.unread, ch.mentions) = (0, 0);
+        }
+        s
+    }
+
+    fn message(ts: Timestamp, text: &str) -> Message {
+        Message {
+            chat_id: ChatId("general".into()),
+            ts,
+            author: UserId("anna".into()),
+            text: text.into(),
+            thread_parent: None,
+            edited: false,
+            important: false,
+            reactions: vec![],
+            thread: None,
+            seq_no: 0,
+            attachments: vec![],
+            forwarded: vec![],
+            call: None,
+        }
+    }
+
+    fn counters(s: &Snapshot) -> (u32, u32) {
+        let ch = s.chat(&ChatId("general".into())).unwrap();
+        (ch.unread, ch.mentions)
+    }
+
+    #[test]
+    fn a_page_of_deleted_records_moves_the_history_start() {
+        // 30 deleted messages: no message, but the oldest record is further back.
+        assert_eq!(page_start(Some(1000), &page(vec![], Some(400))), Some(400));
+        assert_eq!(page_start(None, &page(vec![message(700, "a")], Some(400))), Some(400));
+        // A backend without `oldest`: the oldest message.
+        assert_eq!(page_start(Some(1000), &page(vec![message(700, "a")], None)), Some(700));
+        // Nothing older than asked for: the history goes no further.
+        assert_eq!(page_start(Some(1000), &page(vec![], None)), None);
+        assert_eq!(page_start(Some(1000), &page(vec![], Some(1000))), None);
+    }
+
+    #[test]
+    fn older_pages_start_where_the_loaded_history_starts() {
+        let id = ChatId("general".into());
+        let s = snapshot(vec![message(700, "a"), message(900, "b")]);
+        // After a run of deleted messages the start is before the oldest message shown.
+        assert_eq!(older_page_before(&s, &id, Some(400)), Some(400));
+        assert_eq!(older_page_before(&s, &id, None), Some(700));
+        assert_eq!(older_page_before(&s, &ChatId("dev".into()), None), None);
+    }
+
+    #[test]
+    fn an_edit_of_an_old_message_is_no_news() {
+        let edited = |ts, text| Message {
+            edited: true,
+            ..message(ts, text)
+        };
+        let mut s = snapshot(vec![message(700, "a"), message(900, "b")]);
+        // Older than the loaded part: not shown, not counted.
+        assert!(!add_new(&mut s, &edited(500, "@all fixed"), false, None));
+        assert!(!add_new(&mut s, &edited(650, "@all fixed"), false, Some(680)));
+        assert_eq!(s.messages.len(), 2);
+        assert_eq!(counters(&s), (0, 0));
+        // Within the loaded part but not loaded (a gap): shown, still not counted.
+        assert!(add_new(&mut s, &edited(800, "@all fixed"), false, None));
+        assert_eq!(counters(&s), (0, 0));
+        // A new message counts, a mention too.
+        assert!(add_new(&mut s, &message(1000, "@all news"), false, None));
+        assert_eq!(counters(&s), (1, 1));
+        // Not in a chat the user is looking at.
+        assert!(add_new(&mut s, &message(1100, "@all more"), true, None));
+        assert_eq!(counters(&s), (1, 1));
+    }
+
+    #[test]
+    fn an_edit_of_a_thread_reply_adds_no_reply() {
+        let mut parent = message(700, "question");
+        parent.thread = Some(ThreadSummary {
+            reply_count: 3,
+            last_reply_ts: 760,
+            participants: vec![],
+        });
+        let reply = |ts, edited| Message {
+            thread_parent: Some(700),
+            edited,
+            ..message(ts, "answer")
+        };
+        let mut s = snapshot(vec![parent, reply(750, false)]);
+        let count = |s: &Snapshot| s.messages[0].thread.as_ref().map(|t| t.reply_count);
+        assert!(!add_new(&mut s, &reply(720, true), false, None));
+        assert!(add_new(&mut s, &reply(755, true), false, None));
+        assert_eq!(count(&s), Some(3));
+        assert!(add_new(&mut s, &reply(780, false), false, None));
+        assert_eq!(count(&s), Some(4));
+        assert_eq!(counters(&s), (0, 0));
+    }
 
     #[test]
     fn splits_message_links() {

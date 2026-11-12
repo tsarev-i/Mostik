@@ -436,6 +436,19 @@ pub struct HistoryData {
     pub last: BTreeMap<String, (Timestamp, u64)>,
 }
 
+/// The time of the oldest record of a `history` page. Deleted messages and service records count
+/// too: the feed leaves them out, but the next page must start before them.
+pub fn oldest_record(v: &Value) -> Option<Timestamp> {
+    v.pointer("/Chats/0/Messages")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| {
+            let sm = item.get("ServerMessage").unwrap_or(item);
+            n(sm, &["ServerMessageInfo", "Timestamp"]).or_else(|| n(sm, &["ClientMessage", "Plain", "Timestamp"]))
+        })
+        .min()
+}
+
 /// Parses the response of the `history` WS method.
 pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
     let mut users: BTreeMap<String, User> = BTreeMap::new();
@@ -1739,6 +1752,8 @@ mod tests {
             ]
         }]});
         let d = from_history(&v, Some(&UserId("me".into())));
+        // The system record is the oldest: the next page starts before it.
+        assert_eq!(oldest_record(&v), Some(1));
         assert_eq!(d.chats.len(), 1);
         let ch = &d.chats[0];
         assert_eq!((ch.unread, ch.member_count, ch.muted, ch.last_ts), (3, 19, true, 9));
@@ -2198,5 +2213,20 @@ mod tests {
         assert_eq!(base64("aGk"), Some(b"hi".to_vec()));
         assert_eq!(base64("aGk="), Some(b"hi".to_vec()));
         assert_eq!(base64("a*"), None);
+    }
+
+    #[test]
+    fn a_page_of_deleted_messages_still_has_an_oldest_record() {
+        let v = json!({"Chats": [{"ChatId": "0/0/a", "Messages": [
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/a", "Timestamp": 7}},
+              "ServerMessageInfo": {"Timestamp": 7, "From": {"Guid": "u1"}}}},
+            {"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/a", "Timestamp": 5}},
+              "ServerMessageInfo": {"Timestamp": 5, "Deleted": true}}}]}]});
+        assert!(from_history(&v, None).messages.is_empty());
+        assert_eq!(oldest_record(&v), Some(5));
+        assert_eq!(
+            oldest_record(&json!({"Chats": [{"ChatId": "0/0/a", "Messages": []}]})),
+            None
+        );
     }
 }
