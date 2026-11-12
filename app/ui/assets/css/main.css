@@ -98,7 +98,8 @@
 
 /* ── Feed ───────────────────────────────────────────────────────── */
 
-.messages { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+/* The feed keeps its place itself (MessageList): no scroll anchoring of the engine on top of it. */
+.messages { flex: 1; overflow-y: auto; overflow-anchor: none; padding-bottom: 12px; }
 .messages::-webkit-scrollbar, .tp-scroll::-webkit-scrollbar { width: 10px; }
 .messages::-webkit-scrollbar-thumb, .tp-scroll::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.15);

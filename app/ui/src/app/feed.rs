@@ -153,61 +153,62 @@ pub(super) fn MessageList() -> impl IntoView {
         let id = c.current.get();
         c.snap.with(|s| s.channel_messages(&id))
     });
-    // Scrolling: to the bottom when the chat changes or new messages arrive, if the user is at the bottom;
-    // when older messages load, keep the visible position.
+    // Scrolling: at the bottom while the user is there, so that new messages show; otherwise the
+    // message at the top of the view stays in place as the list changes. WebKitGTK has no scroll
+    // anchoring, and a scroll position alone does not survive a change: older pages come above the
+    // view, new messages and the rest of a fresh page below, and the user goes on scrolling while a
+    // page loads.
     let stick = RwSignal::new(true);
-    let anchor: RwSignal<Option<(i32, i32)>> = RwSignal::new(None);
+    // The message at the top of the view and how far below the list's top edge it starts.
+    let keep = StoredValue::new(None::<(Timestamp, f64)>);
+    // The list has changed and `restore` has not run yet: the scroll events till then are the
+    // user's, over a list that moved under them.
+    let restoring = StoredValue::new(false);
     // The last scroll position, to tell the user scrolling up from the list moving by itself.
     let last_top = StoredValue::new(None::<i32>);
     Effect::new(move |prev: Option<ChatId>| {
         let id = c.current.get();
         if prev.as_ref() != Some(&id) {
             stick.set(true);
-            anchor.set(None);
+            keep.set_value(None);
             last_top.set_value(None);
         }
         id
     });
+    // The list may be gone by the time it runs (another view opened).
+    let restore = move || {
+        restoring.try_set_value(false);
+        let Some(el) = list_ref.try_get_untracked().flatten() else {
+            return;
+        };
+        if stick.try_get_untracked() == Some(true) {
+            el.set_scroll_top(el.scroll_height());
+        } else if let Some((ts, offset)) = keep.try_get_value().flatten()
+            && let Some(now) = row_offset(&el, ts)
+        {
+            el.set_scroll_top(el.scroll_top() + (now - offset).round() as i32);
+        }
+    };
     Effect::new(move |_| {
         messages.track();
-        // An older page has come, or failed, when the loading stops.
+        // When the loading stops, an older page has come or the start of the chat shows above.
         c.loading_older.track();
-        // The list may be gone by the next frame (another view opened).
-        request_animation_frame(move || {
-            let Some(el) = list_ref.try_get_untracked().flatten() else {
-                return;
-            };
-            match anchor.try_get_untracked().flatten() {
-                Some(_) if c.loading_older.get_untracked() => {}
-                Some((height, top)) => {
-                    el.set_scroll_top(el.scroll_height() - height + top);
-                    anchor.try_set(None);
-                }
-                None if stick.try_get_untracked() == Some(true) => el.set_scroll_top(el.scroll_height()),
-                None => {}
-            }
-        });
+        restoring.set_value(true);
+        request_animation_frame(restore);
     });
     Effect::new(move |_| {
         if c.highlight.with(Option::is_some) {
             stick.set(false);
         }
     });
-    // Pictures and videos get their height only once loaded, after the list has scrolled down:
-    // stay at the bottom while they come. `load` does not bubble, so it is caught on the way down.
+    // Pictures and videos get their height only once loaded: keep the view in place then too.
+    // `load` does not bubble, so it is caught on the way down.
     Effect::new(move |attached: Option<bool>| {
         if attached == Some(true) {
             return true;
         }
         let Some(el) = list_ref.get() else { return false };
-        let on_load = wasm_bindgen::closure::Closure::<dyn Fn()>::new(move || {
-            if stick.try_get_untracked() == Some(true)
-                && anchor.try_get_untracked().is_some_and(|a| a.is_none())
-                && let Some(el) = list_ref.try_get_untracked().flatten()
-            {
-                el.set_scroll_top(el.scroll_height());
-            }
-        });
+        let on_load = wasm_bindgen::closure::Closure::<dyn Fn()>::new(restore);
         for event in ["load", "loadedmetadata"] {
             let _ = el.add_event_listener_with_callback_and_bool(
                 event,
@@ -222,14 +223,26 @@ pub(super) fn MessageList() -> impl IntoView {
     let on_scroll = move |_| {
         let Some(el) = list_ref.get_untracked() else { return };
         let top = el.scroll_top();
-        stick.set(el.scroll_height() - top - el.client_height() < 120);
-        let up = last_top.get_value().is_some_and(|last| top < last);
+        let last = last_top.get_value();
         last_top.set_value(Some(top));
+        let up = last.is_some_and(|last| top < last);
+        // Near the bottom the list follows new messages. A step up lets go of it at once: in a
+        // short chat the top is near the bottom too, and the list must not snap back down as an
+        // older page comes. Right at the bottom it holds on, as when the last message goes away.
+        let below = el.scroll_height() - top - el.client_height();
+        stick.set(below < 2 || (!up && below < 120));
+        if restoring.get_value() {
+            // Before `restore` the kept message moves in the view only as far as the user scrolls.
+            if let (Some(last), Some((ts, offset))) = (last, keep.get_value()) {
+                keep.set_value(Some((ts, offset - f64::from(top - last))));
+            }
+            return;
+        }
+        keep.set_value(top_row(&el));
         // Older messages load as the user scrolls up near the top. Not when the list moves by itself:
-        // another chat is shorter, it goes to the bottom, or, before the last older page is in place,
-        // the spinner goes away.
-        if up && top < 200 && anchor.get_untracked().is_none() && ops::load_older(c) {
-            anchor.set(Some((el.scroll_height(), top)));
+        // another chat is shorter or it goes to the bottom.
+        if up && top < 200 {
+            ops::load_older(c);
         }
     };
     view! {
@@ -248,6 +261,36 @@ pub(super) fn MessageList() -> impl IntoView {
             <Feed messages=messages/>
         </div>
     }
+}
+
+/// The message at the top edge of the list's view and how far below the edge it starts (less than
+/// zero: partly hidden above it).
+fn top_row(list: &web_sys::Element) -> Option<(Timestamp, f64)> {
+    let rows = list.query_selector_all(".msg[data-ts]").ok()?;
+    let edge = list.get_bounding_client_rect().top();
+    let row = |i| {
+        rows.item(i)
+            .and_then(|n| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(n).ok())
+    };
+    // The rows go down the list in order: the first one whose bottom is below the edge.
+    let (mut lo, mut hi) = (0, rows.length());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if row(mid)?.get_bounding_client_rect().bottom() <= edge {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let el = row(lo)?;
+    let ts = el.get_attribute("data-ts")?.parse().ok()?;
+    Some((ts, el.get_bounding_client_rect().top() - edge))
+}
+
+/// How far below the top edge of the list's view the message `ts` starts.
+fn row_offset(list: &web_sys::Element, ts: Timestamp) -> Option<f64> {
+    let row = list.query_selector(&format!(".msg[data-ts=\"{ts}\"]")).ok()??;
+    Some(row.get_bounding_client_rect().top() - list.get_bounding_client_rect().top())
 }
 
 #[component]
