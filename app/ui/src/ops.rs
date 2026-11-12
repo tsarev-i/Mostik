@@ -879,11 +879,55 @@ fn with_mention_ids(c: Ctx, text: &str) -> String {
     mostik_core::markup::names_to_ids(text, &mention_targets(c))
 }
 
-pub async fn send(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>) -> Result<(), String> {
+/// What the composer replies to: a message of its chat or thread, and the quoted fragment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplyTarget {
+    pub msg: Message,
+    pub quote: Option<String>,
+}
+
+impl ReplyTarget {
+    /// The original as the reply shows it above its text.
+    fn forwarded(&self, c: Ctx) -> Forwarded {
+        let m = &self.msg;
+        Forwarded {
+            author: m.author.clone(),
+            author_name: c
+                .snap
+                .with_untracked(|s| s.user(&m.author).map(|u| u.display_name.clone()))
+                .unwrap_or_default(),
+            ts: m.ts,
+            chat_id: Some(m.chat_id.clone()),
+            text: m.text.clone(),
+            attachments: m.attachments.clone(),
+            quote: self.quote.clone(),
+            reply: true,
+        }
+    }
+}
+
+/// Starts a reply to `msg` (quoting `quote`, when given) in the composer of its chat or thread.
+pub fn start_reply(c: Ctx, msg: Message, quote: Option<String>) {
+    c.editing.set(None);
+    let quote = quote.map(|q| q.trim().to_owned()).filter(|q| !q.is_empty());
+    c.replying.set(Some(ReplyTarget { msg, quote }));
+}
+
+pub async fn send(
+    c: Ctx,
+    chat: ChatId,
+    text: String,
+    thread: Option<Timestamp>,
+    reply: Option<ReplyTarget>,
+) -> Result<(), String> {
     let text = with_mention_ids(c, &text);
     let me = c.snap.with_untracked(|s| s.me.clone());
-    let message = if c.live {
-        bridge::send_message(&chat.0, &text, thread).await?
+    let reply_ref = reply.as_ref().map(|r| bridge::ReplyRef {
+        ts: r.msg.ts,
+        quote: r.quote.as_deref(),
+    });
+    let mut message = if c.live {
+        bridge::send_message(&chat.0, &text, thread, reply_ref).await?
     } else {
         Message {
             chat_id: chat,
@@ -901,6 +945,9 @@ pub async fn send(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>)
             call: None,
         }
     };
+    if let Some(r) = &reply {
+        message.forwarded = vec![r.forwarded(c)];
+    }
     upsert(c, message, None);
     Ok(())
 }
@@ -1299,7 +1346,8 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
     } else {
         (now_mcs(), 0)
     };
-    let original = if m.forwarded.is_empty() {
+    // A reply is forwarded as itself, not as the message it answers.
+    let original = if m.forwarded.is_empty() || m.reply_to().is_some() {
         vec![Forwarded {
             author: m.author.clone(),
             author_name,
@@ -1307,6 +1355,8 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
             chat_id: Some(m.chat_id.clone()),
             text: m.text.clone(),
             attachments: m.attachments.clone(),
+            quote: None,
+            reply: false,
         }]
     } else {
         m.forwarded.clone()

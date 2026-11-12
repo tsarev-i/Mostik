@@ -129,6 +129,25 @@ pub fn plain_text(chat_id: &str, payload_id: &str, text: &str) -> Value {
     json!({ "Plain": plain })
 }
 
+/// Reply to message `source_ts` of chat `source_chat`, as the web client sends it: the original as
+/// the only forwarded message from the same chat (a thread chat for a thread reply). A quoted
+/// fragment goes into `ForwardedMessageStyles[0].Quote`.
+pub fn reply(
+    chat_id: &str,
+    payload_id: &str,
+    text: &str,
+    source_chat: &str,
+    source_ts: u64,
+    quote: Option<&str>,
+) -> Value {
+    let mut msg = plain_text(chat_id, payload_id, text);
+    msg["Plain"]["ForwardedMessageRefs"] = json!([{ "ChatId": source_chat, "Timestamp": source_ts }]);
+    if let Some(q) = quote.map(str::trim).filter(|q| !q.is_empty()) {
+        msg["Plain"]["ForwardedMessageStyles"] = json!([{ "Quote": q }]);
+    }
+    msg
+}
+
 /// Edit: the same `Plain`, but with the `Timestamp` of the original message.
 pub fn edit_text(chat_id: &str, ts: u64, payload_id: &str, text: &str) -> Value {
     let mut msg = plain_text(chat_id, payload_id, text);
@@ -239,6 +258,35 @@ mod tests {
         assert!(edit["Plain"].get("MentionedUserIds").is_none());
         assert_eq!(edit_text("c", 42, "p", &text)["Plain"]["MentionedUserIds"], json!([id]));
         assert_eq!(delete("c", 42), json!({"Plain": {"ChatId": "c", "Timestamp": 42}}));
+    }
+
+    #[test]
+    fn reply_and_quote_shapes() {
+        assert_eq!(
+            reply("c", "p", "sure", "c", 42, None),
+            json!({"Plain": {"ChatId": "c", "PayloadId": "p", "Text": {"MessageText": "sure"},
+                "ForwardedMessageRefs": [{"ChatId": "c", "Timestamp": 42}]}})
+        );
+        assert_eq!(
+            reply("c", "p", "sure", "c", 42, Some("  ")),
+            reply("c", "p", "sure", "c", 42, None)
+        );
+        let quote = reply("100/0/u_1", "p", "why?", "100/0/u_1", 42, Some(" this **part** "));
+        assert_eq!(
+            quote["Plain"]["ForwardedMessageStyles"],
+            json!([{"Quote": "this **part**"}])
+        );
+        assert_eq!(quote["Plain"]["ForwardedMessageRefs"][0]["ChatId"], "100/0/u_1");
+        // Editing a reply resends the whole message: the reference and the quote stay.
+        let edit = edit_whole(&quote["Plain"], "100/0/u_1", 7, "edited");
+        assert_eq!(
+            edit["Plain"]["ForwardedMessageStyles"],
+            quote["Plain"]["ForwardedMessageStyles"]
+        );
+        assert_eq!(
+            edit["Plain"]["ForwardedMessageRefs"],
+            quote["Plain"]["ForwardedMessageRefs"]
+        );
     }
 
     #[test]

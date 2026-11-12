@@ -65,6 +65,8 @@ pub struct Ctx {
     pub hold_unread: RwSignal<Option<ChatId>>,
     /// Message being forwarded (the "Forward message" dialog).
     pub forwarding: RwSignal<Option<Message>>,
+    /// Message the composer of its chat or thread replies to: the bar above the field.
+    pub replying: RwSignal<Option<ops::ReplyTarget>>,
     /// The "Pinned" tab in the chat header is open.
     pub pins_tab: RwSignal<bool>,
     /// The "Browse channels" dialog.
@@ -174,6 +176,8 @@ pub enum CtxTarget {
     Message {
         msg: Box<Message>,
         mine: bool,
+        /// Text selected in the message when the menu opened: "Quote selection" sends it.
+        quote: Option<String>,
     },
     Chat(ChatId),
     /// "Sidebar settings" menu at the organization name.
@@ -218,6 +222,34 @@ fn wants_native_menu(e: &ev::MouseEvent) -> bool {
         })
         .is_some();
     selected || editable
+}
+
+/// Text selected within the text of message `ts` (one message, not a forwarded one inside it):
+/// what "Quote selection" quotes.
+fn selected_in_message(ts: Timestamp) -> Option<String> {
+    use wasm_bindgen::JsCast;
+    let sel = window().get_selection().ok().flatten()?;
+    if sel.is_collapsed() {
+        return None;
+    }
+    let text_of = |node: Option<web_sys::Node>| -> Option<web_sys::Element> {
+        let node = node?;
+        let el = match node.dyn_ref::<web_sys::Element>() {
+            Some(el) => el.clone(),
+            None => node.parent_element()?,
+        };
+        let text = el.closest(".msg-text").ok().flatten()?;
+        let row = text.closest(".msg").ok().flatten()?;
+        let own = text.closest(".fwd, .reply-ref").ok().flatten().is_none();
+        (own && row.get_attribute("data-ts") == Some(ts.to_string())).then_some(text)
+    };
+    let start = text_of(sel.anchor_node())?;
+    let end = text_of(sel.focus_node())?;
+    if !start.is_same_node(Some(&end)) {
+        return None;
+    }
+    let quote = String::from(sel.to_string()).trim().to_owned();
+    (!quote.is_empty()).then_some(quote)
 }
 
 /// Closes the message menu and the right-click menu.
@@ -408,6 +440,7 @@ pub fn App() -> impl IntoView {
         highlight: RwSignal::new(None),
         hold_unread: RwSignal::new(None),
         forwarding: RwSignal::new(None),
+        replying: RwSignal::new(None),
         pins_tab: RwSignal::new(false),
         browsing: RwSignal::new(false),
         settings: RwSignal::new(Settings::load()),
@@ -713,6 +746,8 @@ pub fn App() -> impl IntoView {
             c.prefs.set(false);
         } else if c.about.get_untracked() {
             c.about.set(false);
+        } else if c.replying.with_untracked(Option::is_some) && c.editing.with_untracked(Option::is_none) {
+            c.replying.set(None);
         } else {
             return;
         }
@@ -945,7 +980,7 @@ fn ContextMenu(menu: CtxMenu) -> impl IntoView {
         pos.set((x, y));
     });
     let items = match menu.target {
-        CtxTarget::Message { msg, mine } => message_menu_items(c, *msg, mine).into_any(),
+        CtxTarget::Message { msg, mine, quote } => message_menu_items(c, *msg, mine, quote).into_any(),
         CtxTarget::Chat(id) => chat_menu_items(c, id).into_any(),
         CtxTarget::SidebarPrefs => sidebar_menu_items(c).into_any(),
         CtxTarget::User(id) => user_menu_items(c, id).into_any(),
@@ -3756,7 +3791,11 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
             })
         }
     };
-    let forwarded = (!msg.forwarded.is_empty()).then(|| {
+    // A reply shows the original above its text; forwarded messages go below it.
+    let replied = msg.reply_to().cloned().map(|f| {
+        view! { <ReplyBlock f=f chat=msg.chat_id.clone() thread_parent=msg.thread_parent/> }
+    });
+    let forwarded = (!msg.forwarded.is_empty() && replied.is_none()).then(|| {
         msg.forwarded
             .clone()
             .into_iter()
@@ -3844,8 +3883,10 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
     };
     let (m_imp, m_pick, m_menu, m_ctx) = (msg.clone(), msg.clone(), msg.clone(), msg.clone());
     // A right click on a message opens the same menu as "More", but at the cursor, as in Slack.
+    // Selected text of the message keeps this menu: it offers to quote or copy the selection.
     let on_ctx = move |e: ev::MouseEvent| {
-        if editing.get_untracked() || wants_native_menu(&e) {
+        let quote = selected_in_message(ts);
+        if editing.get_untracked() || (quote.is_none() && wants_native_menu(&e)) {
             return;
         }
         e.prevent_default();
@@ -3857,6 +3898,7 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
             target: CtxTarget::Message {
                 msg: Box::new(m_ctx.clone()),
                 mine,
+                quote,
             },
         }));
     };
@@ -3875,6 +3917,7 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                 <div class="msg-gutter">{gutter}</div>
                 <div class="msg-content">
                     {header}
+                    {replied}
                     {move || if editing.get() {
                         view! { <InlineEditor msg=m_editor.clone()/> }.into_any()
                     } else {
@@ -3899,7 +3942,8 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                     <Icon icon=I::Bookmark size=16/>
                 </button>
                 // "More" is the same menu as the right click, under the button; at the window edge it opens upwards.
-                <button title=tr().more on:click=move |e: ev::MouseEvent| {
+                // Pressing it keeps the text selected in the message, for "Quote selection".
+                <button title=tr().more on:mousedown=|e: ev::MouseEvent| e.prevent_default() on:click=move |e: ev::MouseEvent| {
                     c.picker.set(None);
                     let (x, y) = e
                         .current_target()
@@ -3908,7 +3952,8 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                             let r = el.get_bounding_client_rect();
                             (r.right(), r.bottom() + 4.0)
                         });
-                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(m_menu.clone()), mine } }));
+                    let quote = selected_in_message(ts);
+                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(m_menu.clone()), mine, quote } }));
                 }><Icon icon=I::Kebab size=16/></button>
             </div>
             <Show when=move || picker_open.get()>
@@ -3993,6 +4038,82 @@ fn ForwardedBlock(f: Forwarded) -> impl IntoView {
             {(!f.text.is_empty()).then(|| view! { <div class="msg-text">{names.with(|who| render_text(&f.text, who, Me { id: &me_id.0, name: &me_name }))}</div> })}
             <Attachments list=f.attachments.clone()/>
             {footer}
+        </div>
+    }
+}
+
+/// One line about the message a reply answers: the quoted fragment, else its text without markup,
+/// else its first attachment; a deleted message has none of them.
+fn reply_snippet(s: &Snapshot, quote: Option<&str>, text: &str, attachments: &[Attachment]) -> String {
+    let line = match quote.filter(|q| !q.trim().is_empty()) {
+        Some(q) => q.to_owned(),
+        None if !text.trim().is_empty() => s.mention_names().with(|who| mostik_core::markup::plain(text, who)),
+        None => match attachments.first() {
+            Some(a) if a.kind == AttachmentKind::Image => format!("🖼 {}", a.name),
+            Some(a) => format!("📄 {}", a.name),
+            None => tr().reply_deleted.to_owned(),
+        },
+    };
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Author's name for a reply: the known person, else the name Telemost sent with the original.
+fn reply_author(s: &Snapshot, id: &UserId, sent_name: &str) -> String {
+    s.user(id)
+        .map(|u| u.display_name.clone())
+        .filter(|n| !n.is_empty())
+        .or_else(|| Some(sent_name.to_owned()).filter(|n| !n.is_empty()))
+        .unwrap_or_else(|| tr().user.to_owned())
+}
+
+/// The message a reply answers, above the reply's text, as in Telemost: author and the quoted
+/// fragment or the start of the text. A click scrolls the feed to the original.
+#[component]
+fn ReplyBlock(f: Forwarded, chat: ChatId, thread_parent: Option<Timestamp>) -> impl IntoView {
+    let c = ctx();
+    let (name, line) = c.snap.with_untracked(|s| {
+        (
+            reply_author(s, &f.author, &f.author_name),
+            reply_snippet(s, f.quote.as_deref(), &f.text, &f.attachments),
+        )
+    });
+    let ts = f.ts;
+    let quoted = f.quote.is_some();
+    view! {
+        <button class=if quoted { "reply-ref quoted" } else { "reply-ref" } title=tr().go_to_original
+            on:click=move |_| ops::jump_to_message(c, chat.clone(), ts, thread_parent)>
+            <span class="reply-author">{name}</span>
+            <span class="reply-line">{line}</span>
+        </button>
+    }
+}
+
+/// The bar above the field while the user replies: to whom, what, and × to cancel.
+#[component]
+fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
+    let c = ctx();
+    let m = &target.msg;
+    let (name, line) = c.snap.with_untracked(|s| {
+        (
+            reply_author(s, &m.author, ""),
+            reply_snippet(s, target.quote.as_deref(), &m.text, &m.attachments),
+        )
+    });
+    let label = if target.quote.is_some() {
+        tr().quoting(&name)
+    } else {
+        tr().replying_to(&name)
+    };
+    view! {
+        <div class="reply-bar">
+            <Icon icon=I::Reply size=16/>
+            <div class="reply-bar-body">
+                <span class="reply-author">{label}</span>
+                <span class="reply-line">{line}</span>
+            </div>
+            <button class="icon-btn" title=tr().cancel_reply on:click=move |_| c.replying.set(None)>
+                <Icon icon=I::X size=14/>
+            </button>
         </div>
     }
 }
@@ -4107,7 +4228,7 @@ fn ReactionPicker(msg: Message) -> impl IntoView {
 }
 
 /// Message menu items shared by the "More" button and the right click, like "More actions" in Slack.
-fn message_menu_items(c: Ctx, msg: Message, mine: bool) -> impl IntoView {
+fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -> impl IntoView {
     let (m_edit, m_del, m_unread, m_link, m_fwd, m_pin) = (
         msg.clone(),
         msg.clone(),
@@ -4121,7 +4242,24 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool) -> impl IntoView {
     let copy = |text: String| {
         let _ = window().navigator().clipboard().write_text(&text);
     };
+    // Replies go to messages, not to call notes; as in Telemost, they lead the menu.
+    let replies = msg.call.is_none().then(|| {
+        let (m_reply, m_quote) = (msg.clone(), msg.clone());
+        let selected = quote.clone();
+        view! {
+            <button on:click=move |_| { close_menus(c); ops::start_reply(c, m_reply.clone(), None); }>{tr().reply}</button>
+            {selected.map(|q| {
+                let copied = q.clone();
+                view! {
+                    <button on:click=move |_| { close_menus(c); ops::start_reply(c, m_quote.clone(), Some(q.clone())); }>{tr().quote_selection}</button>
+                    <button on:click=move |_| { close_menus(c); copy(copied.clone()); }>{tr().copy_selection}</button>
+                }
+            })}
+            <div class="menu-sep"></div>
+        }
+    });
     view! {
+        {replies}
         // Telemost does not make your own message unread, so the item is only for others' messages.
         {(!in_thread && !mine).then(|| view! {
             <button on:click=move |_| { close_menus(c); ops::mark_unread(c, &m_unread); }>{tr().mark_unread}</button>
@@ -4380,12 +4518,42 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         }
     });
 
-    // Chat draft: fill it in on opening, save it while typing (main composer only).
+    // Chat draft: fill it in on opening, save it while typing (main composer only). The draft keeps
+    // only the text: a reply started in another chat ends when the chat changes.
     Effect::new(move |_| {
         let id = c.current.get();
         if !thread {
             set_draft.set(c.drafts.with_untracked(|d| d.get(&id).cloned().unwrap_or_default()));
+            if c.replying
+                .with_untracked(|r| r.as_ref().is_some_and(|r| r.msg.chat_id != id))
+            {
+                c.replying.set(None);
+            }
         }
+    });
+
+    // The reply this field sends: to a message of its chat, in its thread for the thread field.
+    let reply = Memo::new(move |_| {
+        let (chat, place) = (c.current.get(), if thread { c.thread.get() } else { None });
+        if thread && place.is_none() {
+            return None;
+        }
+        c.replying.with(|r| {
+            r.clone()
+                .filter(|r| r.msg.chat_id == chat && r.msg.thread_parent == place)
+        })
+    });
+    // Starting a reply puts the caret at the end of this field.
+    Effect::new(move |prev: Option<Option<(ChatId, Timestamp)>>| {
+        let now = reply.with(|r| r.as_ref().map(|r| (r.msg.chat_id.clone(), r.msg.ts)));
+        if now.is_some()
+            && prev.flatten() != now
+            && let Some(el) = area.get_untracked()
+        {
+            let _ = el.focus();
+            crate::editor::set_caret(&el, utf16_len(&crate::editor::value(&el)));
+        }
+        now
     });
     let remember = move |text: &str| {
         if thread {
@@ -4426,14 +4594,26 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         let chat_for_draft = chat.clone();
         let thread_parent = parent();
         let sent_text = text.clone();
+        let replying = reply.get_untracked();
         sending.set(true);
         spawn_local(async move {
-            let result = if with_files {
-                ops::send_files(c, chat, text, thread_parent).await
-            } else {
-                ops::send(c, chat, text, thread_parent).await
+            // A reply is a text message: attached files follow it without a caption. Files alone
+            // keep the reply bar for the text that comes next.
+            let replied = replying.is_some() && !text.is_empty();
+            let result = match (replying.clone(), with_files) {
+                (Some(r), true) if !text.is_empty() => {
+                    match ops::send(c, chat.clone(), text, thread_parent, Some(r)).await {
+                        Ok(()) => ops::send_files(c, chat, String::new(), thread_parent).await,
+                        Err(e) => Err(e),
+                    }
+                }
+                (_, true) => ops::send_files(c, chat, text, thread_parent).await,
+                (r, false) => ops::send(c, chat, text, thread_parent, r).await,
             };
             sending.set(false);
+            if result.is_ok() && replied && c.replying.get_untracked() == replying {
+                c.replying.set(None);
+            }
             match result {
                 Ok(()) => {
                     // Clear only what was sent: while the message was on its way the user may have
@@ -4515,7 +4695,9 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     return accept_suggestion(suggest_sel.get_untracked());
                 }
                 "Escape" => {
+                    // Closes only the suggestions, not the reply bar.
                     ev.prevent_default();
+                    ev.stop_propagation();
                     return suggestions.set(vec![]);
                 }
                 _ => {}
@@ -4565,6 +4747,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     view! {
         <div class=if thread { "composer-wrap in-thread" } else { "composer-wrap" }>
             <div class="composer">
+                {move || reply.get().map(|r| view! { <ReplyBar target=r/> })}
                 {(!thread).then(|| view! {
                     <Show when=move || !c.pending_files.with(Vec::is_empty)>
                         <div class="pending-files">
@@ -5019,14 +5202,21 @@ fn ForwardDialog(msg: Message) -> impl IntoView {
             .snap
             .with_untracked(|s| s.user(&msg.author).map(|u| u.display_name.clone()))
             .unwrap_or_default();
-        msg.forwarded.first().cloned().unwrap_or(Forwarded {
+        // A reply is forwarded as itself, not as the message it answers.
+        let own = Forwarded {
             author: msg.author.clone(),
             author_name,
             ts: msg.ts,
             chat_id: Some(msg.chat_id.clone()),
             text: msg.text.clone(),
             attachments: msg.attachments.clone(),
-        })
+            quote: None,
+            reply: false,
+        };
+        match msg.forwarded.first() {
+            Some(f) if msg.reply_to().is_none() => f.clone(),
+            _ => own,
+        }
     };
     let send = move || {
         let Some(to) = target.get_untracked() else { return };

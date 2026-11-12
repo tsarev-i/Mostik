@@ -281,12 +281,24 @@ pub fn demo() -> Snapshot {
             "vera",
             "Regression passed, filed two minor bugs.",
         ),
-        msg(
-            "release",
-            TODAY + 52 * MIN,
-            "gleb",
-            "Minor ones go into the next patch.",
-        ),
+        Message {
+            forwarded: vec![Forwarded {
+                author: uid("vera"),
+                author_name: "Vera Lebedeva".into(),
+                ts: TODAY + 50 * MIN,
+                chat_id: Some(cid("release")),
+                text: "Regression passed, filed two minor bugs.".into(),
+                attachments: vec![],
+                quote: Some("filed two minor bugs".into()),
+                reply: true,
+            }],
+            ..msg(
+                "release",
+                TODAY + 52 * MIN,
+                "gleb",
+                "Minor ones go into the next patch.",
+            )
+        },
         call("design", YESTERDAY + 210 * MIN, "anna", true),
         call("design", YESTERDAY + 245 * MIN, "anna", false),
         call("release", TODAY + 55 * MIN, "gleb", true),

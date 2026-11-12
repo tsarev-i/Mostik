@@ -66,6 +66,11 @@ until then Noto Sans is used.
 
 - Consecutive messages of one author within 5 minutes are grouped without an avatar; the time shows on hover.
 - Hovering a message shows the action bar: reaction, reply in thread, forward, "important", more.
+- The message menu starts with "Reply" and, when text of the message is selected, "Quote selection"
+  and "Copy selection"; a right click on selected text of a message opens this menu instead of the
+  system one. A reply puts a bar over its chat's or thread's field (whom it answers, the quote or the
+  start of the text, × and Escape cancel it); the sent reply shows the original above its text, and a
+  click on it scrolls to the original.
 - The day separator is a centred pill that sticks to the top of the feed.
 - A collapsed sidebar section still shows chats with unread messages; the open chat hides with the rest.
 - Sidebar section headers have no caret, as in Slack: on hover it shows in place of the section icon
@@ -100,7 +105,9 @@ until then Noto Sans is used.
   Telemost reaction of Mostik's own type (`0x4D000000` + the message number), since Telemost stores any
   32-bit type. The official client shows the text and an empty reaction.
 - Telemost keeps one reaction per person on a message: a new one replaces the previous one.
-- Markup: bold, italic, strikethrough, underline, code, links and code blocks. Lists and quotes are not supported.
+- Markup: bold, italic, strikethrough, underline, code, links and code blocks. Lists and `>` quotes are
+  not markup in Telemost; a quote is a reply carrying a fragment of the original
+  (`ForwardedMessageRefs` with `ForwardedMessageStyles[].Quote`), as the official client sends it.
 - A call opens in its own window, like a huddle: the Telemost meeting page, titled "Call · #channel", with
   the current call shown at the bottom of the sidebar (where, and "Leave") and the header call button
   turned green. The window shows only the meeting page (`/private-join/<id>`, the iframe of the messenger's

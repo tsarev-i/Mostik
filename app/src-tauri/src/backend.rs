@@ -20,7 +20,7 @@ use mostik_yandex::session::CookieJar;
 use mostik_yandex::web::{WebClient, WebError};
 use mostik_yandex::wire::{self, HistoryRequest, PushRequest, request_id};
 use mostik_yandex::xiva_client::{Incoming, XivaClient, XivaError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -455,16 +455,29 @@ pub async fn mark_read(state: tauri::State<'_, AppState>, chat_id: String) -> Re
     push(&live, wire::seen_marker(&chat_id, ts, seq)).await.map(|_| ())
 }
 
+/// What a message replies to: message `ts` of the chat (or thread) it is sent to, with the quoted fragment.
+#[derive(Debug, Deserialize)]
+pub struct ReplyRef {
+    ts: Timestamp,
+    quote: Option<String>,
+}
+
+/// Sends a text message; with `reply`, a reply to a message of the same chat or thread.
 #[tauri::command]
 pub async fn send_message(
     state: tauri::State<'_, AppState>,
     chat_id: String,
     text: String,
     thread: Option<Timestamp>,
+    reply: Option<ReplyRef>,
 ) -> Result<Message, String> {
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    let resp = push(&live, wire::plain_text(&target, &request_id(), &text)).await?;
+    let msg = match &reply {
+        Some(r) => wire::reply(&target, &request_id(), &text, &target, r.ts, r.quote.as_deref()),
+        None => wire::plain_text(&target, &request_id(), &text),
+    };
+    let resp = push(&live, msg).await?;
     let ts = resp
         .pointer("/MessageInfo/TimestampMcs")
         .and_then(Value::as_u64)
