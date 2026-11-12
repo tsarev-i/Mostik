@@ -4,6 +4,7 @@
 //! `mostik-yandex` builds them and `mostik-ui` renders them.
 
 pub mod custom_emoji;
+pub mod feed;
 pub mod markup;
 pub mod mock;
 pub mod model;

@@ -36,8 +36,9 @@ pub struct Ctx {
     pub exhausted: RwSignal<HashSet<ChatId>>,
     pub loading_older: RwSignal<bool>,
     pub editing: RwSignal<Option<Message>>,
-    /// The text being edited, outside the editor: the message list rebuilds its rows whenever a
-    /// message of the chat changes, and the editor of a rebuilt row picks the draft up again.
+    /// The text being edited, outside the editor: a message line built again (the message list
+    /// shown again after the pinned message, the text changed on another device) picks the
+    /// draft up again.
     pub edit_draft: StoredValue<Option<EditDraft>>,
     pub confirm_delete: RwSignal<Option<Message>>,
     /// Channel the user is about to leave from the sidebar menu: waits for confirmation.
@@ -3219,7 +3220,7 @@ fn MessageList() -> impl IntoView {
                     view! { <div class="loading-older"></div> }.into_any()
                 }
             }}
-            {move || render_feed(messages.get(), false)}
+            <Feed messages=messages/>
         </div>
     }
 }
@@ -3244,7 +3245,7 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     c.picked
         .update(|p| p.extend(named.into_iter().map(|(name, id)| (name, UserId(id)))));
     let original = shown.trim().to_owned();
-    // The row may have been rebuilt while the user was typing: go on with their draft.
+    // The line may have been built again while the user was typing: go on with their draft.
     let key = (msg.chat_id.clone(), msg.ts);
     let draft = c
         .edit_draft
@@ -3455,72 +3456,93 @@ fn ChannelIntro() -> impl IntoView {
     }
 }
 
-/// Feed: in a channel messages are grouped by day, and the day badge sticks only within
-/// its group; the next day pushes it out, as in Slack. Threads have no days.
-fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
-    let mut out: Vec<AnyView> = Vec::new();
-    let mut day: Vec<AnyView> = Vec::new();
-    let mut day_ts: Option<Timestamp> = None;
-    let mut prev: Option<Message> = None;
-    let flush = |out: &mut Vec<AnyView>, day: &mut Vec<AnyView>, ts: Option<Timestamp>| {
-        if let Some(ts) = ts {
-            let items = std::mem::take(day);
-            out.push(view! { <div class="day-group"><DayDivider ts=ts/>{items}</div> }.into_any());
-        }
+/// The names that mentions in the lines of a feed show, shared by its lines.
+#[derive(Clone, Copy)]
+struct FeedCtx {
+    names: Memo<mostik_core::markup::MentionNames>,
+}
+
+/// Mention names for a message line: those of its feed; a line outside a feed (a pinned message,
+/// the parent of a thread) follows the snapshot itself.
+fn feed_names(c: Ctx) -> Memo<mostik_core::markup::MentionNames> {
+    use_context::<FeedCtx>()
+        .map(|f| f.names)
+        .unwrap_or_else(|| Memo::new(move |_| c.snap.with(Snapshot::mention_names)))
+}
+
+/// Calendar day of a feed: the chat, the day and the time of its first line.
+type FeedDayKey = (ChatId, (u32, u32, u32), Timestamp);
+
+/// A feed keyed by message. In a chat messages are grouped by day, and the day badge sticks only
+/// within its group, the next day pushes it out, as in Slack; threads have no days. A line is
+/// built once and follows its message: a new message, a reaction or an edit elsewhere keeps the
+/// text selected, the open reaction picker with its search and the editor of a message.
+#[component]
+fn Feed(messages: Memo<Vec<Message>>, #[prop(optional)] in_thread: bool) -> impl IntoView {
+    let c = ctx();
+    provide_context(FeedCtx {
+        names: Memo::new(move |_| c.snap.with(Snapshot::mention_names)),
+    });
+    let days = Memo::new(move |_| messages.with(|list| feed::layout(list, time::day_key)));
+    let line = move |key: (ChatId, Timestamp)| view! { <FeedRow days=days ts=key.1 in_thread=in_thread/> };
+    let key_of = |l: &feed::FeedLine| (l.msg.chat_id.clone(), l.msg.ts);
+    if in_thread {
+        let keys = Memo::new(move |_| days.with(|d| d.iter().flat_map(|d| &d.lines).map(key_of).collect::<Vec<_>>()));
+        return view! { <For each=move || keys.get() key=|k| k.clone() children=line/> }.into_any();
+    }
+    let day_keys = Memo::new(move |_| {
+        days.with(|d| {
+            d.iter()
+                .map(|d| (d.lines[0].msg.chat_id.clone(), d.day, d.lines[0].msg.ts))
+                .collect::<Vec<FeedDayKey>>()
+        })
+    });
+    view! {
+        <For each=move || day_keys.get() key=|(chat, day, _)| (chat.clone(), *day) children=move |(chat, day, first)| {
+            // The lines of this day of this chat: an outgoing chat's day must not take the new chat's lines.
+            let keys = move || {
+                days.with(|d| {
+                    d.iter()
+                        .find(|x| x.day == day)
+                        .map(|x| x.lines.iter().filter(|l| l.msg.chat_id == chat).map(key_of).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                })
+            };
+            view! {
+                <div class="day-group">
+                    <DayDivider ts=first/>
+                    <For each=keys key=|k| k.clone() children=line/>
+                </div>
+            }
+        }/>
+    }
+    .into_any()
+}
+
+/// A line of a [`Feed`]: it finds its message in the layout after every change, and only the
+/// parts of it that changed are built again.
+#[component]
+fn FeedRow(days: Memo<Vec<feed::FeedDay<(u32, u32, u32)>>>, ts: Timestamp, in_thread: bool) -> impl IntoView {
+    let Some(first) = days.with_untracked(|d| feed::find_line(d, ts).cloned()) else {
+        return ().into_any();
     };
-    // A call is one line, as in Slack: its start note shows the end too (how it went, how long
-    // it lasted), and the end note itself is not shown. An end without a start in the loaded
-    // page (a direct call in the history, whose ringing Telemost does not keep) is a line itself.
-    let mut ends: std::collections::HashMap<Timestamp, Message> = Default::default();
-    let mut paired: std::collections::HashSet<Timestamp> = Default::default();
-    let mut open: std::collections::HashMap<&str, Timestamp> = Default::default();
-    for m in &list {
-        match &m.call {
-            Some(note @ (CallNote::Started { .. } | CallNote::Ringing { .. })) => {
-                open.insert(note.url(), m.ts);
-            }
-            Some(note @ CallNote::Ended { .. }) => {
-                // The first call of a group call chat starts without a link.
-                if let Some(start) = open.remove(note.url()).or_else(|| open.remove("")) {
-                    ends.insert(start, m.clone());
-                    paired.insert(m.ts);
-                }
-            }
-            None => {}
-        }
+    // A call line is small and changes when the call ends: it is simply built again.
+    if first.msg.call.is_some() {
+        let line = Memo::new(move |_| days.with(|d| feed::find_line(d, ts).cloned()));
+        return (move || {
+            line.get()
+                .map(|l| view! { <CallRow msg=l.msg end=l.call_end live=l.live_call/> })
+        })
+        .into_any();
     }
-    // Only the latest call can offer "Join".
-    let last_call = list.iter().rev().find(|m| m.call.is_some()).map(|m| m.ts);
-    for m in list {
-        if m.call.is_some() && paired.contains(&m.ts) {
-            continue;
-        }
-        let new_day = prev.as_ref().is_none_or(|p| time::day_key(p.ts) != time::day_key(m.ts));
-        if new_day && !in_thread {
-            flush(&mut out, &mut day, day_ts);
-            day_ts = Some(m.ts);
-        }
-        let grouped = !new_day && continues_group(prev.as_ref(), &m);
-        let row = match &m.call {
-            Some(CallNote::Ended { .. }) => {
-                view! { <CallRow msg=m.clone() end=Some(m.clone()) live=false/> }.into_any()
-            }
-            Some(_) => {
-                let end = ends.remove(&m.ts);
-                let live = end.is_none() && last_call == Some(m.ts);
-                view! { <CallRow msg=m.clone() end=end live=live/> }.into_any()
-            }
-            None => view! { <MessageRow msg=m.clone() grouped=grouped in_thread=in_thread/> }.into_any(),
-        };
-        if in_thread {
-            out.push(row)
-        } else {
-            day.push(row)
-        }
-        prev = Some(m);
-    }
-    flush(&mut out, &mut day, day_ts);
-    out
+    // A line on its way out keeps its last message.
+    let msg = Memo::new(move |prev: Option<&Message>| {
+        days.with(|d| feed::find_line(d, ts).map(|l| l.msg.clone()))
+            .or_else(|| prev.cloned())
+            .unwrap_or_else(|| first.msg.clone())
+    });
+    let grouped = Memo::new(move |_| days.with(|d| feed::find_line(d, ts).is_some_and(|l| l.grouped)));
+    view! { <MessageRow msg=msg grouped=grouped in_thread=in_thread/> }.into_any()
 }
 
 /// How many people are in the call going on in the chat, as Telemost last reported.
@@ -3734,35 +3756,54 @@ fn custom_text(t: String) -> AnyView {
         .into_any()
 }
 
+/// A message in the feed. Its parts follow `msg` each on its own, so a change rebuilds only what
+/// changed: a new reaction keeps the text selected in the message and an open reaction picker.
 #[component]
-fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) -> impl IntoView {
+fn MessageRow(
+    #[prop(into)] msg: Signal<Message>,
+    #[prop(into)] grouped: Signal<bool>,
+    #[prop(optional)] in_thread: bool,
+) -> impl IntoView {
     let c = ctx();
-    let (author, names, me_name, me_id) = c.snap.with_untracked(|s| {
+    let names = feed_names(c);
+    // What never changes in a message: where it is and who wrote it.
+    let (chat_id, ts, author_id, thread_parent) =
+        msg.with_untracked(|m| (m.chat_id.clone(), m.ts, m.author.clone(), m.thread_parent));
+    let (me_name, me_id) = c.snap.with_untracked(|s| {
         (
-            s.user(&msg.author).cloned(),
-            s.mention_names(),
             s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
             s.me.clone(),
         )
     });
-    let mine = msg.author == me_id;
-    let me = Me {
-        id: &me_id.0,
-        name: &me_name,
+    let mine = author_id == me_id;
+    let key = (chat_id.clone(), ts);
+    let author = {
+        let id = author_id.clone();
+        Memo::new(move |_| c.snap.with(|s| s.user(&id).cloned()))
     };
-    let mentions_me = !mine && names.with(|who| mostik_core::markup::mentions_me(&msg.text, who, me));
-    let key = (msg.chat_id.clone(), msg.ts);
-
-    let mut cls = String::from("msg");
-    if grouped {
-        cls.push_str(" grouped");
-    }
-    if mentions_me {
-        cls.push_str(" mention-me");
-    }
-    if msg.important {
-        cls.push_str(" important");
-    }
+    let text = Memo::new(move |_| msg.with(|m| (m.text.clone(), m.edited)));
+    let important = Memo::new(move |_| msg.with(|m| m.important));
+    // A reply shows the original above its text; forwarded messages go below it.
+    let replied = Memo::new(move |_| msg.with(|m| m.reply_to().cloned()));
+    let forwarded = Memo::new(move |_| {
+        msg.with(|m| match m.reply_to() {
+            Some(_) => vec![],
+            None => m.forwarded.clone(),
+        })
+    });
+    let attachments = Memo::new(move |_| msg.with(|m| m.attachments.clone()));
+    let reactions = Memo::new(move |_| msg.with(|m| m.reactions.clone()));
+    let thread = Memo::new(move |_| msg.with(|m| m.thread.clone().filter(|t| !in_thread && t.reply_count > 0)));
+    let mentions_me = {
+        let (me_id, me_name) = (me_id.clone(), me_name.clone());
+        Memo::new(move |_| {
+            let me = Me {
+                id: &me_id.0,
+                name: &me_name,
+            };
+            !mine && text.with(|(t, _)| names.with(|n| n.with(|who| mostik_core::markup::mentions_me(t, who, me))))
+        })
+    };
     let editing = {
         let key = key.clone();
         Memo::new(move |_| {
@@ -3771,9 +3812,7 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
         })
     };
 
-    let ts = msg.ts;
     let open_thread = move |_| ops::open_thread(c, ts);
-    let author_id = msg.author.clone();
     let show_profile = {
         let id = author_id.clone();
         move |_| ops::open_profile(c, id.clone())
@@ -3790,115 +3829,153 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
             target: CtxTarget::User(author_id.clone()),
         }));
     };
-    let gutter = if grouped {
-        view! { <span class="msg-hover-time">{time::hm(ts)}</span> }.into_any()
-    } else {
-        match author.clone() {
-            Some(u) => view! { <button class="face-btn" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()><Avatar user=u size=36/></button> }.into_any(),
-            None => view! { <span class="avatar unknown"></span> }.into_any(),
-        }
-    };
-    let header = (!grouped).then(|| {
-        let name = author
-            .as_ref()
-            .map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
-        let robot = author.as_ref().is_some_and(|u| u.is_robot);
-        view! {
-            <div class="msg-head">
-                <button class="msg-author" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()>{name}</button>
-                {author.as_ref().and_then(status_badge)}
-                {robot.then(|| view! { <span class="app-tag">{tr().bot}</span> })}
-                <span class="msg-time">{time::hm(ts)}</span>
-            </div>
-        }
-    });
-    let important_label = msg.important.then(|| {
-        view! { <div class="important-label"><Icon icon=I::Bookmark size=12/><span>{tr().important}</span></div> }
-    });
-    let in_thread_parent = msg.thread_parent.is_some();
-    // Like "Pinned to this conversation" in Slack.
-    let pinned_label = {
-        let (chat, ts) = (msg.chat_id.clone(), msg.ts);
+    let gutter = {
+        let (show_profile, user_ctx) = (show_profile.clone(), user_ctx.clone());
         move || {
-            (!in_thread_parent && c.snap.with(|s| s.chat(&chat).and_then(|ch| ch.pinned)) == Some(ts)).then(|| {
-                view! { <div class="important-label pinned-label"><Icon icon=I::Pin size=12/><span>{tr().pinned_label}</span></div> }
-            })
+            if grouped.get() {
+                return view! { <span class="msg-hover-time">{time::hm(ts)}</span> }.into_any();
+            }
+            match author.get() {
+                Some(u) => view! { <button class="face-btn" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()><Avatar user=u size=36/></button> }.into_any(),
+                None => view! { <span class="avatar unknown"></span> }.into_any(),
+            }
         }
     };
-    // A reply shows the original above its text; forwarded messages go below it.
-    let replied = msg.reply_to().cloned().map(|f| {
-        view! { <ReplyBlock f=f chat=msg.chat_id.clone() thread_parent=msg.thread_parent/> }
-    });
-    let forwarded = (!msg.forwarded.is_empty() && replied.is_none()).then(|| {
-        msg.forwarded
-            .clone()
+    let header = move || {
+        (!grouped.get()).then(|| {
+            let author = author.get();
+            let name = author
+                .as_ref()
+                .map_or_else(|| tr().user.to_owned(), |u| u.display_name.clone());
+            let robot = author.as_ref().is_some_and(|u| u.is_robot);
+            view! {
+                <div class="msg-head">
+                    <button class="msg-author" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()>{name}</button>
+                    {author.as_ref().and_then(status_badge)}
+                    {robot.then(|| view! { <span class="app-tag">{tr().bot}</span> })}
+                    <span class="msg-time">{time::hm(ts)}</span>
+                </div>
+            }
+        })
+    };
+    let important_label = move || {
+        important.get().then(|| {
+            view! { <div class="important-label"><Icon icon=I::Bookmark size=12/><span>{tr().important}</span></div> }
+        })
+    };
+    // Like "Pinned to this conversation" in Slack.
+    let pinned = {
+        let chat = chat_id.clone();
+        Memo::new(move |_| {
+            thread_parent.is_none() && c.snap.with(|s| s.chat(&chat).and_then(|ch| ch.pinned)) == Some(ts)
+        })
+    };
+    let pinned_label = move || {
+        pinned.get().then(|| {
+            view! { <div class="important-label pinned-label"><Icon icon=I::Pin size=12/><span>{tr().pinned_label}</span></div> }
+        })
+    };
+    let reply_block = {
+        let chat = chat_id.clone();
+        move || {
+            replied
+                .get()
+                .map(|f| view! { <ReplyBlock f=f chat=chat.clone() thread_parent=thread_parent/> })
+        }
+    };
+    let forwarded_blocks = move || {
+        forwarded
+            .get()
             .into_iter()
             .map(|f| view! { <ForwardedBlock f=f/> })
             .collect_view()
-    });
-    let reactions = (!msg.reactions.is_empty()).then(|| {
-        let list = msg.reactions.clone();
-        let m = msg.clone();
-        let key = key.clone();
-        view! {
-            <div class="reactions">
-                {list.into_iter().map(|r| {
-                    let m = m.clone();
-                    let kind = r.kind;
-                    let custom = crate::custom::by_kind(c, &m.chat_id, kind);
-                    let title = c.snap.with_untracked(|s| reaction_title(s, &r, custom.as_ref()));
-                    // Follows the set: it may arrive after the message, and an emoji may be renamed.
-                    let (chat, glyph) = (m.chat_id.clone(), r.emoji.clone());
-                    let glyph = move || match crate::custom::by_kind(c, &chat, kind) {
-                        Some(e) => crate::custom::image(&e, "custom-emoji").into_any(),
-                        None if mostik_core::custom_emoji::is_custom_reaction(kind) => {
-                            view! { <span class="emoji" title=tr().unknown_custom_emoji>"▫️"</span> }.into_any()
-                        }
-                        None => view! { <span class="emoji">{glyph.clone()}</span> }.into_any(),
-                    };
-                    view! {
-                        <button class=if r.mine { "reaction mine" } else { "reaction" }
-                            title=title
-                            on:click=move |_| ops::toggle_reaction(c, &m, kind)>
-                            {glyph}
-                            <span class="count">{r.count}</span>
+    };
+    // The text is parsed again only when it changes, or the names it may mention do.
+    let body = {
+        let (me_id, me_name) = (me_id.clone(), me_name.clone());
+        move || {
+            text.with(|(t, edited)| {
+                let me = Me {
+                    id: &me_id.0,
+                    name: &me_name,
+                };
+                let body = names.with(|n| n.with(|who| render_text(t, who, me)));
+                let edited = edited.then(|| view! { <span class="edited">{tr().edited}</span> });
+                (!t.is_empty() || edited.is_some()).then(|| view! { <div class="msg-text">{body}{edited}</div> })
+            })
+        }
+    };
+    let reactions_view = {
+        let (key, chat_id) = (key.clone(), chat_id.clone());
+        move || {
+            let list = reactions.get();
+            (!list.is_empty()).then(|| {
+                let key = key.clone();
+                view! {
+                    <div class="reactions">
+                        {list.into_iter().map(|r| {
+                            let kind = r.kind;
+                            let custom = crate::custom::by_kind(c, &chat_id, kind);
+                            let title = c.snap.with_untracked(|s| reaction_title(s, &r, custom.as_ref()));
+                            // Follows the set: it may arrive after the message, and an emoji may be renamed.
+                            let (chat, glyph) = (chat_id.clone(), r.emoji.clone());
+                            let glyph = move || match crate::custom::by_kind(c, &chat, kind) {
+                                Some(e) => crate::custom::image(&e, "custom-emoji").into_any(),
+                                None if mostik_core::custom_emoji::is_custom_reaction(kind) => {
+                                    view! { <span class="emoji" title=tr().unknown_custom_emoji>"▫️"</span> }.into_any()
+                                }
+                                None => view! { <span class="emoji">{glyph.clone()}</span> }.into_any(),
+                            };
+                            view! {
+                                <button class=if r.mine { "reaction mine" } else { "reaction" }
+                                    title=title
+                                    on:click=move |_| msg.with_untracked(|m| ops::toggle_reaction(c, m, kind))>
+                                    {glyph}
+                                    <span class="count">{r.count}</span>
+                                </button>
+                            }
+                        }).collect_view()}
+                        <button class="reaction add" title=tr().add_reaction on:click=move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }>
+                            <Icon icon=I::SmilePlus size=16/>
                         </button>
-                    }
-                }).collect_view()}
-                <button class="reaction add" title=tr().add_reaction on:click=move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }>
-                    <Icon icon=I::SmilePlus size=16/>
-                </button>
-            </div>
+                    </div>
+                }
+            })
         }
-    });
-    let thread = msg.thread.clone().filter(|t| !in_thread && t.reply_count > 0).map(|t| {
-        let faces = c.snap.with_untracked(|s| {
-            // Telemost does not say who replied: the ones seen replying, or the loaded replies.
-            let ids = if t.participants.is_empty() {
-                s.thread_participants(&msg.chat_id, msg.ts)
-            } else {
-                t.participants.clone()
-            };
-            ids.iter()
-                .filter_map(|id| s.user(id).cloned())
-                .take(MAX_THREAD_FACES)
-                .collect::<Vec<_>>()
-        });
-        view! {
-            <button class="thread-summary" on:click=open_thread>
-                <span class="thread-faces">
-                    {faces.into_iter().map(|u| view! { <Avatar user=u size=24/> }).collect_view()}
-                </span>
-                <span class="thread-count">
-                    {tr().replies(t.reply_count)}
-                </span>
-                <span class="thread-last">{tr().last_reply(&time::relative(t.last_reply_ts))}</span>
-                <span class="thread-open">{tr().open_thread}</span>
-                <Icon icon=I::ChevronRight size=14/>
-            </button>
+    };
+    let thread_view = {
+        let chat = chat_id.clone();
+        move || {
+            thread.get().map(|t| {
+                let faces = c.snap.with_untracked(|s| {
+                    // Telemost does not say who replied: the ones seen replying, or the loaded replies.
+                    let ids = if t.participants.is_empty() {
+                        s.thread_participants(&chat, ts)
+                    } else {
+                        t.participants.clone()
+                    };
+                    ids.iter()
+                        .filter_map(|id| s.user(id).cloned())
+                        .take(MAX_THREAD_FACES)
+                        .collect::<Vec<_>>()
+                });
+                view! {
+                    <button class="thread-summary" on:click=open_thread>
+                        <span class="thread-faces">
+                            {faces.into_iter().map(|u| view! { <Avatar user=u size=24/> }).collect_view()}
+                        </span>
+                        <span class="thread-count">
+                            {tr().replies(t.reply_count)}
+                        </span>
+                        <span class="thread-last">{tr().last_reply(&time::relative(t.last_reply_ts))}</span>
+                        <span class="thread-open">{tr().open_thread}</span>
+                        <Icon icon=I::ChevronRight size=14/>
+                    </button>
+                }
+            })
         }
-    });
-    let reply_btn = (!in_thread && threads_supported(&msg.chat_id)).then(|| {
+    };
+    let reply_btn = (!in_thread && threads_supported(&chat_id)).then(|| {
         view! { <button title=tr().reply_in_thread on:click=open_thread><Icon icon=I::Threads size=16/></button> }
     });
     let picker_open = {
@@ -3909,13 +3986,10 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
         let key = key.clone();
         Memo::new(move |_| c.ctx_menu.with(|m| m.as_ref().is_some_and(|m| m.is_message(&key))))
     };
-    let k1 = key.clone();
-    let m_editor = msg.clone();
     let highlighted = {
         let key = key.clone();
         Memo::new(move |_| c.highlight.with(|h| h.as_ref() == Some(&key)))
     };
-    let (m_imp, m_pick, m_menu, m_ctx) = (msg.clone(), msg.clone(), msg.clone(), msg.clone());
     // A right click on a message opens the same menu as "More", but at the cursor, as in Slack.
     // Selected text of the message keeps this menu: it offers to quote or copy the selection.
     let on_ctx = move |e: ev::MouseEvent| {
@@ -3930,7 +4004,7 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
             x: e.client_x() as f64,
             y: e.client_y() as f64,
             target: CtxTarget::Message {
-                msg: Box::new(m_ctx.clone()),
+                msg: Box::new(msg.get_untracked()),
                 mine,
                 quote,
             },
@@ -3939,7 +4013,10 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
 
     view! {
         <div class=move || {
-            let mut cls = cls.clone();
+            let mut cls = String::from("msg");
+            if grouped.get() { cls.push_str(" grouped"); }
+            if mentions_me.get() { cls.push_str(" mention-me"); }
+            if important.get() { cls.push_str(" important"); }
             if editing.get() { cls.push_str(" editing"); }
             if picker_open.get() || ctx_open.get() { cls.push_str(" active"); }
             if highlighted.get() { cls.push_str(" highlight"); }
@@ -3951,28 +4028,27 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                 <div class="msg-gutter">{gutter}</div>
                 <div class="msg-content">
                     {header}
-                    {replied}
+                    {reply_block}
+                    // The editor depends on `editing` only: changes of the message do not rebuild it.
                     {move || if editing.get() {
-                        view! { <InlineEditor msg=m_editor.clone()/> }.into_any()
+                        view! { <InlineEditor msg=msg.get_untracked()/> }.into_any()
                     } else {
-                        {
-                            let me = Me { id: &me_id.0, name: &me_name };
-                            let body = names.with(|who| render_text(&m_editor.text, who, me));
-                            let edited = m_editor.edited.then(|| view! { <span class="edited">{tr().edited}</span> });
-                            (!m_editor.text.is_empty() || m_editor.edited).then(|| view! { <div class="msg-text">{body}{edited}</div> }).into_any()
-                        }
+                        body.clone().into_any()
                     }}
-                    {forwarded}
-                    <Attachments list=msg.attachments.clone()/>
-                    {reactions}
-                    {thread}
+                    {forwarded_blocks}
+                    {move || view! { <Attachments list=attachments.get()/> }}
+                    {reactions_view}
+                    {thread_view}
                 </div>
             </div>
             <div class="msg-actions">
-                <button title=tr().reaction on:click=move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(k1.clone())) }><Icon icon=I::SmilePlus size=16/></button>
+                <button title=tr().reaction on:click={
+                    let key = key.clone();
+                    move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }
+                }><Icon icon=I::SmilePlus size=16/></button>
                 {reply_btn}
-                <button title=if msg.important { tr().unmark_important } else { tr().mark_important }
-                    on:click=move |_| ops::toggle_important(c, &m_imp)>
+                <button title=move || if important.get() { tr().unmark_important } else { tr().mark_important }
+                    on:click=move |_| msg.with_untracked(|m| ops::toggle_important(c, m))>
                     <Icon icon=I::Bookmark size=16/>
                 </button>
                 // "More" is the same menu as the right click, under the button; at the window edge it opens upwards.
@@ -3987,11 +4063,11 @@ fn MessageRow(msg: Message, grouped: bool, #[prop(optional)] in_thread: bool) ->
                             (r.right(), r.bottom() + 4.0)
                         });
                     let quote = selected_in_message(ts);
-                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(m_menu.clone()), mine, quote } }));
+                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(msg.get_untracked()), mine, quote } }));
                 }><Icon icon=I::Kebab size=16/></button>
             </div>
             <Show when=move || picker_open.get()>
-                <ReactionPicker msg=m_pick.clone()/>
+                <ReactionPicker msg=msg/>
             </Show>
         </div>
     }
@@ -4246,18 +4322,19 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
 
 /// Reaction picker: the full list of Telemost reactions with search, like the emoji picker in Slack.
 #[component]
-fn ReactionPicker(msg: Message) -> impl IntoView {
+fn ReactionPicker(msg: Signal<Message>) -> impl IntoView {
     let c = ctx();
-    let chat = msg.chat_id.clone();
+    let chat = msg.with_untracked(|m| m.chat_id.clone());
+    // The message as it is at the pick: its reactions may have changed while the picker was open.
     let on_pick = Callback::new(move |key: String| {
         c.picker.set(None);
         if let Ok(kind) = key.parse::<u64>() {
-            ops::toggle_reaction(c, &msg, kind);
+            msg.with_untracked(|m| ops::toggle_reaction(c, m, kind));
         }
     });
     view! {
         <crate::emoji::EmojiPicker source=crate::emoji::Source::Reactions anchor=c.picker_at.get_untracked()
-            custom=crate::custom::for_chat(c, &chat) can_add=c.live on_pick=on_pick on_close=Callback::new(move |_| c.picker.set(None))/>
+            custom=untrack(|| crate::custom::for_chat(c, &chat)) can_add=c.live on_pick=on_pick on_close=Callback::new(move |_| c.picker.set(None))/>
     }
 }
 
@@ -4938,36 +5015,50 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
 #[component]
 fn ThreadPane() -> impl IntoView {
     let c = ctx();
-    let data = Memo::new(move |_| {
+    let open = Memo::new(move |_| Some((c.current.get(), c.thread.get()?)));
+    let parent = Memo::new(move |_| {
+        let (id, ts) = open.get()?;
+        c.snap
+            .with(|s| s.messages.iter().find(|m| m.chat_id == id && m.ts == ts).cloned())
+    });
+    let shown = Memo::new(move |_| parent.with(Option::is_some));
+    let title = Memo::new(move |_| {
         let id = c.current.get();
-        let parent = c.thread.get()?;
-        c.snap.with(|s| {
-            let pm = s.messages.iter().find(|m| m.chat_id == id && m.ts == parent)?.clone();
-            let title = s.chat(&id).map(|ch| chat_title(s, ch)).unwrap_or_default();
-            Some((pm, s.thread_replies(&id, parent), title))
-        })
+        c.snap
+            .with(|s| s.chat(&id).map(|ch| chat_title(s, ch)).unwrap_or_default())
+    });
+    let replies = Memo::new(move |_| {
+        open.get()
+            .map(|(id, parent)| c.snap.with(|s| s.thread_replies(&id, parent)))
+            .unwrap_or_default()
     });
     view! {
         <aside class="thread-pane">
             <header class="tp-header">
                 <div>
                     <div class="tp-title">{tr().thread}</div>
-                    <div class="tp-sub">{move || data.get().map(|(_, _, t)| format!("# {t}"))}</div>
+                    <div class="tp-sub">{move || shown.get().then(|| format!("# {}", title.get()))}</div>
                 </div>
                 <button class="icon-btn" title=tr().close on:click=move |_| c.thread.set(None)>
                     <Icon icon=I::X/>
                 </button>
             </header>
             <div class="tp-scroll">
-                {move || data.get().map(|(pm, replies, _)| {
-                    let n = replies.len() as u32;
-                    view! {
-                        <MessageRow msg=pm grouped=false in_thread=true/>
+                // Built once per thread; the parent and the replies follow their changes.
+                {move || {
+                    open.track();
+                    let first = shown.get().then(|| parent.get_untracked()).flatten()?;
+                    let msg = Memo::new(move |prev: Option<&Message>| {
+                        parent.get().or_else(|| prev.cloned()).unwrap_or_else(|| first.clone())
+                    });
+                    let n = move || replies.with(Vec::len) as u32;
+                    Some(view! {
+                        <MessageRow msg=msg grouped=false in_thread=true/>
                         // No "0 replies" once the last reply is deleted, as in Slack.
-                        {(n > 0).then(|| view! { <div class="tp-divider"><span>{tr().replies(n)}</span></div> })}
-                        {render_feed(replies, true)}
-                    }
-                })}
+                        {move || (n() > 0).then(|| view! { <div class="tp-divider"><span>{tr().replies(n())}</span></div> })}
+                        <Feed messages=replies in_thread=true/>
+                    })
+                }}
             </div>
             <Composer thread=true/>
         </aside>
