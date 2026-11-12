@@ -62,13 +62,23 @@ impl Default for UpdateState {
     }
 }
 
-/// Only the bundles the updater can replace: the AppImage and the NSIS setup.
+/// Only the bundles the updater can replace: the AppImage, the NSIS setup and the macOS .app.
 /// Builds run from `cargo` or installed some other way are left alone.
 fn supported() -> bool {
-    matches!(
-        tauri::utils::platform::bundle_type(),
-        Some(BundleType::AppImage | BundleType::Nsis)
-    )
+    match tauri::utils::platform::bundle_type() {
+        Some(BundleType::AppImage | BundleType::Nsis) => true,
+        // Tauri reports App for every macOS build, so a `cargo` run is told apart by its path.
+        Some(BundleType::App) => cfg!(target_os = "macos") && in_app_bundle(),
+        _ => false,
+    }
+}
+
+/// The executable sits inside `Mostik.app/Contents/MacOS`, which the updater replaces as a whole.
+fn in_app_bundle() -> bool {
+    std::env::current_exe().is_ok_and(|exe| {
+        exe.ancestors()
+            .any(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+    })
 }
 
 fn set_status(app: &AppHandle, status: UpdateStatus) {
