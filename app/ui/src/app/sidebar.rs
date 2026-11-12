@@ -299,11 +299,13 @@ fn SidebarSection(section: Section) -> impl IntoView {
     };
     let empty = Memo::new(move |_| visible.with(Vec::is_empty));
     // The section icon, as in Slack: a star for "Starred", a hash for "Channels", speech bubbles for
-    // "Direct messages", the emoji of a folder; "Meeting chats" and folders without an emoji have none.
+    // "Direct messages", people for "Meeting chats", the emoji of a folder; folders without an emoji
+    // have none.
     let icon = match section_id.as_str() {
         "starred" => Some(I::Star),
         "channels" => Some(I::HashSquare),
         "dms" => Some(I::Messages),
+        "meetings" => Some(I::Users),
         _ => None,
     };
     let emoji = {
