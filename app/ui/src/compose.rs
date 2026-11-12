@@ -296,7 +296,7 @@ fn LinkDialog(field: Field, target: LinkTarget) -> impl IntoView {
     view! {
         <Portal>
             <div class="modal-backdrop nested" on:click=move |_| field.close_link(None)>
-                <div class="modal link-dialog" on:click=|e| e.stop_propagation()>
+                <div class="modal" on:click=|e| e.stop_propagation()>
                     <header>
                         <h2>{if existing { tr().link_edit } else { tr().link_add }}</h2>
                         <button class="icon-btn" title=tr().close on:click=move |_| field.close_link(None)><Icon icon=I::X/></button>

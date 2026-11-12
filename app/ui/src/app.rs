@@ -1305,7 +1305,7 @@ fn workspace_menu_items(c: Ctx) -> impl IntoView {
     let face = org_avatar(c);
     let many = c.snap.with_untracked(|s| s.organizations.len() > 1);
     view! {
-        <div class="menu-head ws-head">
+        <div class="menu-head">
             <span class="ws-tile small">
                 {name.chars().next().unwrap_or('?').to_string()}
                 {face.map(|id| view! { <img class="ws-img" src=avatar_url(&id, 72) alt=""/> })}
@@ -1337,14 +1337,15 @@ fn organization_menu_items(c: Ctx) -> impl IntoView {
     let list = c.snap.with_untracked(|s| s.organizations.clone());
     if list.is_empty() {
         let name = org_name(c);
-        return view! { <button class="menu-radio checked" disabled=true><span class="menu-tick">"✓"</span>{name}</button> }.into_any();
+        return view! { <button class="menu-radio" disabled=true><span class="menu-tick">"✓"</span>{name}</button> }
+            .into_any();
     }
     list.into_iter()
         .map(|o| {
             let checked = Some(o.id) == current;
             let id = o.id;
             view! {
-                <button class=if checked { "menu-radio checked" } else { "menu-radio" } on:click=move |_| {
+                <button class="menu-radio" on:click=move |_| {
                     close_menus(c);
                     c.org.set(Some(id));
                     if let Some(st) = window().local_storage().ok().flatten() {
@@ -3713,7 +3714,7 @@ fn SystemRow(msg: Message) -> impl IntoView {
     };
     let id = msg.author.clone();
     view! {
-        <div class="msg call-note ended chat-note" data-ts=msg.ts.to_string()>
+        <div class="msg call-note ended" data-ts=msg.ts.to_string()>
             <span class="call-note-icon"><span class="call-note-badge"><Icon icon=icon size=16/></span></span>
             <div class="call-note-body">
                 <span class="chat-note-text">
@@ -4419,7 +4420,7 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
             .partition(|a| a.kind == AttachmentKind::Image && inline);
         let single = images.len() == 1;
         view! {
-            <div class=if single { "images single" } else { "images" }>
+            <div class="images">
                 {images.into_iter().map(|a| {
                     // Original proportions, at most 360×240 (a single image) or 160×160 (a gallery).
                     let (max_w, max_h) = if single { (360.0, 240.0) } else { (160.0, 160.0) };
@@ -5575,7 +5576,7 @@ fn ForwardDialog(msg: Message) -> impl IntoView {
     };
     view! {
         <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal create-channel forward-modal" on:click=|ev| ev.stop_propagation()>
+            <div class="modal forward-modal" on:click=|ev| ev.stop_propagation()>
                 <header>
                     <h2>{tr().forward_message}</h2>
                     <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
@@ -5625,7 +5626,7 @@ fn NewMessageDialog() -> impl IntoView {
     let exclude = Signal::derive(move || vec![me.clone()]);
     view! {
         <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal create-channel" on:click=|ev| ev.stop_propagation()>
+            <div class="modal" on:click=|ev| ev.stop_propagation()>
                 <header>
                     <h2>{tr().new_message}</h2>
                     <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
@@ -5703,7 +5704,7 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
     });
     view! {
         <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal create-channel" on:click=|ev| ev.stop_propagation()>
+            <div class="modal" on:click=|ev| ev.stop_propagation()>
                 <header>
                     <h2>{move || if step.get() == 1 { tr().create_channel.to_owned() } else { format!("{} #{}", tr().add_people_to, name.get()) }}</h2>
                     <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
@@ -6199,7 +6200,7 @@ fn ActivityList() -> impl IntoView {
         }
     };
     view! {
-        <div class="dm-list activity-list">
+        <div class="dm-list">
             <div class="dm-list-title">{tr().rail_activity}</div>
             <div class="act-tabs">
                 {tab_btn(ActivityTab::All, tr().act_all)}
@@ -6311,7 +6312,7 @@ fn ThreadsView() -> impl IntoView {
                     view! {
                         <div class="draft-row thread-row" class:unread=has_unread class:selected=selected
                             on:click=move |_| ops::open_followed_thread(c, parent.clone())>
-                            <span class="draft-face">{match author {
+                            <span>{match author {
                                 Some(u) => view! { <Avatar user=u size=36/> }.into_any(),
                                 None => view! { <span class="avatar unknown"></span> }.into_any(),
                             }}</span>
@@ -6398,7 +6399,7 @@ fn DraftsView() -> impl IntoView {
                         let (open, del) = (id.clone(), id.clone());
                         view! {
                             <div class="draft-row" on:click=move |_| go(open.clone())>
-                                <span class="draft-face">{match face {
+                                <span>{match face {
                                     Some(u) => view! { <Avatar user=u size=36/> }.into_any(),
                                     None => view! { <span class="draft-kind">{kind_icon(&kind, 18)}</span> }.into_any(),
                                 }}</span>
@@ -6567,7 +6568,7 @@ fn StatusDialog() -> impl IntoView {
     let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     view! {
         <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal status-modal" on:click=|ev| ev.stop_propagation()>
+            <div class="modal" on:click=|ev| ev.stop_propagation()>
                 <header>
                     <h2>{tr().update_status}</h2>
                     <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
@@ -7188,7 +7189,7 @@ fn ProfilePane() -> impl IntoView {
         Some((id, user, profile, me))
     });
     view! {
-        <aside class="thread-pane profile-pane">
+        <aside class="thread-pane">
             <header class="tp-header">
                 <div class="tp-title">{tr().profile}</div>
                 <button class="icon-btn" title=tr().close on:click=move |_| c.profile.set(None)><Icon icon=I::X/></button>
