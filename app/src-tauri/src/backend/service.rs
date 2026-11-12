@@ -30,10 +30,10 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
-use super::{
-    AppState, Live, PendingFile, Shared, chat_info_raw, history_page, live, original_plain, pick, push,
-    put_notify_level, rpc, rpc_ok, text,
-};
+use super::chats::{chat_info_raw, put_notify_level};
+use super::files::pick;
+use super::messages::{history_page, original_plain};
+use super::{AppState, Live, PendingFile, Shared, live, push, rpc, rpc_ok, text};
 
 /// The custom emoji sets changed: the payload is the new list.
 pub const EMOJI_EVENT: &str = "mostik://emoji";
