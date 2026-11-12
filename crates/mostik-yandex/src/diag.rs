@@ -98,3 +98,33 @@ mod tests {
         assert_eq!(id_pattern("chat_x9"), "<str4>_<str2>");
     }
 }
+
+/// Whether `MOSTIK_PUSH_LOG=<file>` asks for a traffic log (protocol research only: the file
+/// holds message texts and names).
+pub fn traffic_logging() -> bool {
+    std::env::var_os("MOSTIK_PUSH_LOG").is_some()
+}
+
+/// Appends one record to the traffic log, with the time in ms; does nothing without the variable.
+pub fn traffic_log(mut record: Value) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("MOSTIK_PUSH_LOG") else {
+        return;
+    };
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    record["t"] = json!(t);
+    // Several threads log at once: one lock and one write per line keep the lines whole.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let line = format!("{record}\n");
+    let _guard = LOCK.lock();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Bytes as a hex string, for bodies that are not JSON.
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}

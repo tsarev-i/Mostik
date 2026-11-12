@@ -32,6 +32,9 @@ pub struct ServiceChat {
     last_seq: u64,
     seen_seq: u64,
     muted: bool,
+    /// In the chat list. A known chat missing from it is read again in any case: the user may
+    /// have left it.
+    listed: bool,
 }
 
 /// A set on disk with the chat state it was read at.
@@ -46,6 +49,9 @@ struct Cached {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Disk {
+    /// The service chat scheme the cache is for ([`SERVICE_MARKER`]): a cache of an older one
+    /// (another chat name and alias) is dropped.
+    marker: String,
     /// Whose sets these are: another account starts afresh.
     me: String,
     sets: Vec<Cached>,
@@ -54,6 +60,24 @@ struct Disk {
     /// Service chats that hold the alias of their organization: of several service chats of one
     /// organization every client uses that one.
     aliased: BTreeSet<String>,
+}
+
+impl Disk {
+    /// An empty cache of the current scheme.
+    fn fresh() -> Self {
+        Self {
+            marker: SERVICE_MARKER.to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// The cache from its file; an unreadable one or one of an older scheme starts afresh.
+    fn load(bytes: &[u8]) -> Self {
+        serde_json::from_slice::<Self>(bytes)
+            .ok()
+            .filter(|d| d.marker == SERVICE_MARKER)
+            .unwrap_or_else(Self::fresh)
+    }
 }
 
 /// Service chat state that outlives a connection.
@@ -93,8 +117,7 @@ fn with_disk<R>(app: &AppHandle, f: impl FnOnce(&mut Disk) -> R) -> R {
     let disk = guard.get_or_insert_with(|| {
         dir(app)
             .and_then(|d| std::fs::read(d.join("sets.json")).ok())
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+            .map_or_else(Disk::fresh, |b| Disk::load(&b))
     });
     f(disk)
 }
@@ -159,7 +182,7 @@ pub async fn detect(app: &AppHandle, web: &mut WebClient, list: &Value, me: &Use
         if d.me != me.0 {
             *d = Disk {
                 me: me.0.clone(),
-                ..Disk::default()
+                ..Disk::fresh()
             };
         }
         d.sets.iter().map(|c| c.set.chat_id.0.clone()).collect()
@@ -180,6 +203,7 @@ pub async fn detect(app: &AppHandle, web: &mut WebClient, list: &Value, me: &Use
                 last_seq: c.get("LastSeqNo").and_then(Value::as_u64).unwrap_or(0),
                 seen_seq: c.get("LastSeenByMeSeqNo").and_then(Value::as_u64).unwrap_or(0),
                 muted: false,
+                listed: true,
             })
         })
         .collect();
@@ -218,6 +242,7 @@ pub async fn detect(app: &AppHandle, web: &mut WebClient, list: &Value, me: &Use
                 last_seq: 0,
                 seen_seq: 0,
                 muted: true,
+                listed: false,
             })
             .collect()
     });
@@ -363,11 +388,12 @@ pub fn start(app: AppHandle, live: Arc<Live>) {
             if !sc.muted {
                 mute(&live, &sc.id).await;
             }
-            let current = with_disk(&app, |d| {
-                d.sets
-                    .iter()
-                    .any(|c| c.set.chat_id.0 == sc.id && c.last_ts == sc.last_ts && c.last_edit_ts == sc.last_edit_ts)
-            });
+            let current = sc.listed
+                && with_disk(&app, |d| {
+                    d.sets.iter().any(|c| {
+                        c.set.chat_id.0 == sc.id && c.last_ts == sc.last_ts && c.last_edit_ts == sc.last_edit_ts
+                    })
+                });
             if current {
                 if sc.seen_seq < sc.last_seq {
                     mark_read(&app, &live, &sc.id, sc.last_ts, sc.last_seq).await;
@@ -419,40 +445,68 @@ async fn discover(app: &AppHandle, live: &Live) -> Vec<(String, Vec<u64>)> {
                 continue;
             }
         };
-        let Some((id, orgs)) = found else {
+        let Some(AliasedChat {
+            id,
+            organizations: orgs,
+            invite,
+            joinable,
+        }) = found
+        else {
             name_own(app, &mut web, org, &alias).await;
             continue;
         };
-        let member = with_disk(app, |d| {
+        // Whether the user is in the chat is Telemost's word, not the disk's: a chat they left or
+        // were removed from may still be cached.
+        let cached = with_disk(app, |d| {
             d.aliased.insert(id.clone());
             d.sets.iter().any(|c| c.set.chat_id.0 == id)
         });
-        eprintln!("service chat by alias: {}, member: {member}", id_pattern(&id));
-        if member {
+        eprintln!(
+            "service chat by alias: {}, joinable: {joinable}, cached: {cached}",
+            id_pattern(&id)
+        );
+        if !joinable && cached {
             continue;
         }
         if let Ok(mut sh) = live.shared.lock() {
             sh.service.insert(id.clone());
         }
-        match web.rpc("activate_chat", json!({ "chat_id": id })).await {
-            Ok(r) if rpc_ok(&r).is_ok() => {
-                mute(live, &id).await;
-                joined.push((id, orgs));
-            }
-            other => {
+        if joinable {
+            // A public chat is joined by its invite, as by a link: `activate_chat` answers a
+            // non-member with `no_permissions_for_this_chat_operation`.
+            let join = match &invite {
+                Some(hash) => web.rpc("invite", json!({ "invite": hash })).await,
+                None => web.rpc("activate_chat", json!({ "chat_id": id })).await,
+            };
+            if let Err(e) = join.as_ref().map_err(ToString::to_string).and_then(rpc_ok) {
                 with_disk(app, |d| d.aliased.remove(&id));
-                eprintln!("service chat join {}: {other:?}", id_pattern(&id));
+                eprintln!("service chat join {}: {e}", id_pattern(&id));
+                continue;
             }
+            eprintln!("service chat {}: joined", id_pattern(&id));
         }
+        mute(live, &id).await;
+        joined.push((id, orgs));
     }
     save(app);
     joined
 }
 
+/// A service chat found by its alias.
+#[derive(Debug, PartialEq, Eq)]
+struct AliasedChat {
+    id: String,
+    organizations: Vec<u64>,
+    /// The invite hash to join it by, when the answer has one.
+    invite: Option<String>,
+    /// Telemost offers the user to join it (the `join` right): they are not in it.
+    joinable: bool,
+}
+
 /// The service chat in a `get_chats_info {alias}` answer, if it is one of organization `org`.
 /// An alias is global in Telemost, so the name, the marker and the organization are checked; the
 /// preview of a chat the user is not in may lack the description or the organizations.
-fn aliased_chat(v: &Value, org: u64) -> Option<(String, Vec<u64>)> {
+fn aliased_chat(v: &Value, org: u64) -> Option<AliasedChat> {
     let c = v.pointer("/data/chats/0")?;
     if c.get("name").and_then(Value::as_str) != Some(SERVICE_CHAT_NAME) {
         return None;
@@ -466,8 +520,15 @@ fn aliased_chat(v: &Value, org: u64) -> Option<(String, Vec<u64>)> {
     if !orgs.is_empty() && !orgs.contains(&org) {
         return None;
     }
-    let orgs = if orgs.is_empty() { vec![org] } else { orgs };
-    Some((c.get("chat_id")?.as_str()?.to_owned(), orgs))
+    Some(AliasedChat {
+        id: c.get("chat_id")?.as_str()?.to_owned(),
+        organizations: if orgs.is_empty() { vec![org] } else { orgs },
+        invite: c.get("invite_hash").and_then(Value::as_str).map(str::to_owned),
+        joinable: c
+            .get("rights")
+            .and_then(Value::as_array)
+            .is_some_and(|r| r.iter().any(|x| x == "join")),
+    })
 }
 
 /// Gives the alias of organization `org` to the user's service chat there (the first by ID, as
@@ -554,6 +615,28 @@ async fn mark_read(app: &AppHandle, live: &Live, chat: &str, ts: Timestamp, seq:
     }
 }
 
+/// Whether a `history` answer says the user is not in the chat (they left it or were removed).
+fn not_member(v: &Value) -> bool {
+    v.get("ErrorInfos")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.get("Message").and_then(Value::as_str))
+        .any(|m| m.contains("not in chat members"))
+}
+
+/// Drops a service chat the user is no longer in: its set and its alias mark go, and the alias is
+/// looked up again at once, so the client joins the chat anew instead of keeping an empty set.
+fn forget(app: &AppHandle, chat: &str) {
+    with_disk(app, |d| {
+        d.sets.retain(|c| c.set.chat_id.0 != chat);
+        d.aliased.remove(chat);
+        d.looked_ms = 0;
+    });
+    save(app);
+    eprintln!("service chat {}: not a member, forgotten", id_pattern(chat));
+}
+
 /// Reads the whole service chat, rebuilds its set, keeps it on disk and marks the chat read.
 async fn refresh(app: &AppHandle, live: &Live, chat: &str, mut orgs: Vec<u64>) -> Result<(), String> {
     let mut messages = Vec::new();
@@ -567,6 +650,10 @@ async fn refresh(app: &AppHandle, live: &Live, chat: &str, mut orgs: Vec<u64>) -
                 .call("history", &HistoryRequest::page(chat, PAGE, before), HISTORY_TIMEOUT_S)
                 .await
             {
+                Ok(v) if not_member(&v) => {
+                    forget(app, chat);
+                    return Err("the user is not in the chat any more".to_owned());
+                }
                 Ok(v) if v.get("Chats").is_some() => {
                     body = Some(v);
                     break;
@@ -1063,6 +1150,22 @@ mod tests {
     }
 
     #[test]
+    fn drops_a_cache_of_the_old_scheme() {
+        let old = json!({"me": "u", "looked_ms": 5, "aliased": ["0/0/a"], "sets": [{"set": {"chat_id": "0/0/a",
+            "organizations": [7], "emoji": [], "taken": []}, "last_ts": 1, "last_edit_ts": 2}]});
+        let d = Disk::load(&serde_json::to_vec(&old).unwrap());
+        assert_eq!(
+            (d.marker.as_str(), d.sets.len(), d.aliased.len()),
+            (SERVICE_MARKER, 0, 0)
+        );
+        let mut current = old;
+        current["marker"] = json!(SERVICE_MARKER);
+        let d = Disk::load(&serde_json::to_vec(&current).unwrap());
+        assert_eq!((d.me.as_str(), d.sets.len(), d.looked_ms), ("u", 1, 5));
+        assert_eq!(Disk::load(b"not json").marker, SERVICE_MARKER);
+    }
+
+    #[test]
     fn reads_an_older_disk_cache() {
         let old = json!({"me": "u", "searched_ms": 5, "sets": [{"set": {"chat_id": "0/0/a",
             "organizations": [7], "emoji": [], "taken": []}, "last_ts": 1, "last_edit_ts": 2}]});
@@ -1074,14 +1177,38 @@ mod tests {
     }
 
     #[test]
+    fn tells_a_chat_the_user_left() {
+        let left = json!({"Chats": [{"ChatId": "0/0/a", "Counters": {}, "Status": 2}],
+            "ErrorInfos": [{"Message": "user not in chat members or it's a public chat and user/chat org ids don't match", "WorkerId": 76}],
+            "Status": 2});
+        assert!(not_member(&left));
+        assert!(!not_member(&json!({"Chats": [{"ChatId": "0/0/a", "Messages": []}]})));
+    }
+
+    #[test]
     fn checks_the_aliased_chat() {
         let answer = |c: Value| json!({"status": "ok", "data": {"chats": [c]}});
+        let found = |invite: Option<&str>, joinable| {
+            Some(AliasedChat {
+                id: "0/0/a".to_owned(),
+                organizations: vec![7],
+                invite: invite.map(str::to_owned),
+                joinable,
+            })
+        };
+        // What a non-member gets: no members, the right to join and the invite.
         let ours = answer(json!({"chat_id": "0/0/a", "name": SERVICE_CHAT_NAME,
-            "description": format!("x {SERVICE_MARKER}"), "organization_ids": [7]}));
-        assert_eq!(aliased_chat(&ours, 7), Some(("0/0/a".to_owned(), vec![7])));
+            "description": format!("x {SERVICE_MARKER}"), "organization_ids": [7],
+            "invite_hash": "h", "members": [], "rights": ["join", "read"]}));
+        assert_eq!(aliased_chat(&ours, 7), found(Some("h"), true));
         assert_eq!(aliased_chat(&ours, 8), None);
         let preview = answer(json!({"chat_id": "0/0/a", "name": SERVICE_CHAT_NAME}));
-        assert_eq!(aliased_chat(&preview, 7), Some(("0/0/a".to_owned(), vec![7])));
+        assert_eq!(aliased_chat(&preview, 7), found(None, false));
+        let member = answer(
+            json!({"chat_id": "0/0/a", "name": SERVICE_CHAT_NAME, "organization_ids": [7],
+            "invite_hash": "h", "rights": ["read", "write", "change"]}),
+        );
+        assert_eq!(aliased_chat(&member, 7), found(Some("h"), false));
         let unmarked = answer(json!({"chat_id": "0/0/b", "name": SERVICE_CHAT_NAME, "description": "a group"}));
         assert_eq!(aliased_chat(&unmarked, 7), None);
         let other = answer(json!({"chat_id": "0/0/c", "name": "other", "description": SERVICE_MARKER}));

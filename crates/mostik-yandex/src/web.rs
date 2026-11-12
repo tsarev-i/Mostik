@@ -330,6 +330,12 @@ impl WebClient {
             let resp = self.http.post(&url).headers(headers).body(bytes.clone()).send().await?;
             let status = resp.status();
             let body = resp.text().await?;
+            if crate::diag::traffic_logging() {
+                let logged = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| Value::String(body.clone()));
+                crate::diag::traffic_log(serde_json::json!({
+                    "dir": "in", "via": "http", "upload": url, "status": status.as_u16(), "body": logged
+                }));
+            }
             // A 403 usually means a stale CSRF token: retry once with a fresh one.
             if status == StatusCode::FORBIDDEN && !retried {
                 self.invalidate_csrf(&csrf);
@@ -356,6 +362,12 @@ impl WebClient {
     /// call that times out or gets a 5xx answer is repeated twice, after a pause.
     pub async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, WebError> {
         let request = RpcRequest::new(method, params).form_value()?;
+        if crate::diag::traffic_logging() {
+            let body = serde_json::from_str::<Value>(&request).unwrap_or_else(|_| Value::String(request.clone()));
+            crate::diag::traffic_log(
+                serde_json::json!({ "dir": "out", "via": "http", "method": method, "body": body }),
+            );
+        }
         let retries = if reads_only(method) { READ_RETRIES.len() } else { 0 };
         let mut attempt = 0;
         loop {
@@ -395,6 +407,12 @@ impl WebClient {
                 .await?;
             let status = resp.status();
             let body = resp.text().await?;
+            if crate::diag::traffic_logging() {
+                let logged = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| Value::String(body.clone()));
+                crate::diag::traffic_log(serde_json::json!({
+                    "dir": "in", "via": "http", "method": method, "status": status.as_u16(), "body": logged
+                }));
+            }
             if status == StatusCode::UNAUTHORIZED {
                 return Err(WebError::Unauthorized);
             }

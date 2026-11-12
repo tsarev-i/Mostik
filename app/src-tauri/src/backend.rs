@@ -1049,8 +1049,27 @@ impl From<WebError> for ConnectError {
     }
 }
 
+/// With `MOSTIK_PUSH_LOG=<file>` every push goes to the traffic log: a JSON body as is (with
+/// `parsed`: whether the app understood it), a protobuf one as hex.
+fn log_push(incoming: &Incoming, me: Option<&UserId>) {
+    if !mostik_yandex::diag::traffic_logging() {
+        return;
+    }
+    mostik_yandex::diag::traffic_log(match incoming {
+        Incoming::Push { event, body } => {
+            json!({ "event": event, "parsed": convert::from_push(body, me).is_some(), "body": body })
+        }
+        Incoming::Undecoded { event, version, body } => {
+            json!({ "event": event, "version": version, "hex": mostik_yandex::diag::hex(body) })
+        }
+        Incoming::Text(_) => return,
+        Incoming::Closed => json!({ "closed": true }),
+    });
+}
+
 /// Socket event: diagnostics, `Shared` update, UI event, notification.
 fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &AtomicUsize, incoming: Incoming) {
+    log_push(&incoming, shared.lock().ok().and_then(|sh| sh.me.clone()).as_ref());
     match incoming {
         Incoming::Push { event, body } => {
             if diag.fetch_add(1, Ordering::SeqCst) < MAX_DIAG_EVENTS
