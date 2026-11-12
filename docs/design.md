@@ -76,8 +76,8 @@ until then Noto Sans is used.
 - Sidebar section headers have no caret, as in Slack: on hover it shows in place of the section icon
   (the star of "Starred", the hash of "Channels", the speech bubbles of "Direct messages", a folder's
   emoji) or left of an icon-less title, and turns down over an expanded section. A section with an
-  icon lines up with the chat rows; icon-less ones ("Meeting chats", folders without an emoji) are
-  smaller muted headers.
+  icon reads like a chat row; icon-less ones ("Meeting chats", folders without an emoji) are smaller
+  muted headers. Chats sit a little to the right of their header, as in Slack.
 - A section header shows "+" and "⋮" on hover: "+" creates a channel in "Channels" and in one's own
   sections (the channel goes into that section), a message in "Direct messages"; "⋮" (or a right
   click) opens the section menu as in Slack: what the section makes, managing it, filter and sort

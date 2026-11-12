@@ -307,10 +307,10 @@ button:disabled { opacity: 0.4; cursor: default; }
 .sb-section-head.menu-open .sb-section-title,
 .sb-section-head:focus-within .sb-section-title { padding-right: 64px; }
 .sb-section-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-/* An icon-less title starts at the chat icon column; its caret sits in the gap on the left. */
+/* An icon-less title starts where a section icon would; its caret sits in the gap on the left. */
 .sb-section-slot { position: absolute; left: 2px; top: 6px; width: 16px; height: 16px; display: grid; place-items: center; }
 .sb-section-slot > * { grid-area: 1 / 1; }
-/* A section with an icon reads like a chat row: the icon in the icon column, the name in line with chat names. */
+/* A section with an icon reads like a chat row, a step to the left of its chats. */
 .sb-section-title.with-icon { padding-left: 16px; color: inherit; font-size: 15px; font-weight: 500; letter-spacing: 0; }
 .sb-section-title.with-icon .sb-section-slot { position: static; flex: none; width: 20px; height: 20px; }
 .sb-section-icon { display: grid; place-items: center; line-height: 1; opacity: 0.85; transition: opacity 0.12s; }
@@ -363,6 +363,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   text-align: left;
   white-space: nowrap;
 }
+/* Chats sit a little to the right of their section header, as in Slack, so the headers stand out. */
+.sb-section .sb-row { padding-left: 26px; }
 .sb-row:hover { background: var(--sidebar-hover); }
 .sb-row.ctx:not(.selected) { background: var(--sidebar-hover); }
 .sb-row.selected { background: var(--sidebar-selected); color: #fff; }
