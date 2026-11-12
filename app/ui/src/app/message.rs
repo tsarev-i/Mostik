@@ -378,37 +378,6 @@ fn read_status(c: Ctx, msg: &Message) -> Option<receipts::ReadStatus> {
     })
 }
 
-/// Who read a message, for its menu: "Anna, Boris, Vera and 2 more".
-fn readers(s: &Snapshot, count: u32, recent: &[UserId]) -> String {
-    let names: Vec<String> = recent
-        .iter()
-        .filter_map(|id| s.user(id).filter(|u| u.has_name()).map(|u| u.display_name.clone()))
-        .collect();
-    tr().readers(&names, count.saturating_sub(names.len() as u32))
-}
-
-/// What the message menu says about the reads of an own message, if anything.
-fn read_info(c: Ctx, msg: &Message) -> Option<String> {
-    Some(match read_status(c, msg)? {
-        receipts::ReadStatus::Seen { seen: false, .. } => tr().not_seen_yet.to_owned(),
-        receipts::ReadStatus::Seen { .. } => tr().read.to_owned(),
-        receipts::ReadStatus::Read { count: 0, .. } => tr().not_read_yet.to_owned(),
-        receipts::ReadStatus::Read {
-            count,
-            recent,
-            everyone,
-        } => {
-            let head = tr().read_by(count, everyone);
-            let names = c.snap.with_untracked(|s| readers(s, count, &recent));
-            if names.is_empty() {
-                head
-            } else {
-                format!("{head}: {names}")
-            }
-        }
-    })
-}
-
 /// Reaction tooltip: who reacted, as in Slack. Telemost names only the latest people, so the
 /// rest are counted; with nobody known it falls back to the reaction's name.
 fn reaction_title(s: &Snapshot, r: &Reaction, custom: Option<&mostik_core::custom_emoji::CustomEmoji>) -> String {
@@ -694,13 +663,6 @@ pub(super) fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option
     let copy = |text: String| {
         let _ = window().navigator().clipboard().write_text(&text);
     };
-    // Who read an own message, as a note above the items.
-    let reads = read_info(c, &msg).map(|text| {
-        view! {
-            <div class="menu-info"><Icon icon=I::CheckCheck size=16/><span>{text}</span></div>
-            <div class="menu-sep"></div>
-        }
-    });
     // Replies go to messages, not to notes; as in Telemost, they lead the menu.
     let replies = (!msg.is_note()).then(|| {
         let (m_reply, m_quote) = (msg.clone(), msg.clone());
@@ -724,7 +686,6 @@ pub(super) fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option
         }
     });
     view! {
-        {reads}
         {replies}
         // Telemost does not make your own message unread, so the item is only for others' messages.
         {(!in_thread && !mine).then(|| view! {

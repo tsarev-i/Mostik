@@ -183,7 +183,6 @@
 .me-sub-btn:hover .menu-value { color: inherit; }
 .popover.menu .menu-sep { height: 1px; margin: 6px 0; background: var(--border); }
 /* A note above the items, not an item: who read an own message. */
-.popover.menu .menu-info { display: flex; align-items: center; gap: 10px; padding: 6px 16px; max-width: 320px; font-size: 13px; color: var(--text-muted); }
 
 .composer-hint { padding-left: 8px; font-size: 12px; color: var(--text-muted); }
 .typing { height: 18px; padding: 2px 4px 0; font-size: 12px; color: var(--text-muted); }

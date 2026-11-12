@@ -116,12 +116,8 @@ pub struct Tr {
     pub link_copied: &'static str,
     pub copy_link: &'static str,
     pub mark_unread: &'static str,
-    pub read: &'static str,
     /// After the time in its hover tip: an own message someone has read.
     pub read_mark: &'static str,
-    pub not_seen_yet: &'static str,
-    pub not_read_yet: &'static str,
-    pub read_by_all: &'static str,
     /// Heading of a chat's notification choices in its menu.
     pub notify_label: &'static str,
     pub notify_all: &'static str,
@@ -516,11 +512,7 @@ pub static RU: Tr = Tr {
     link_copied: "Ссылка скопирована",
     copy_link: "Копировать ссылку",
     mark_unread: "Пометить непрочитанным",
-    read: "Прочитано",
     read_mark: "(прочитано)",
-    not_seen_yet: "Ещё не прочитано",
-    not_read_yet: "Ещё никто не прочитал",
-    read_by_all: "Прочитали все",
     notify_label: "Уведомления",
     notify_all: "Все сообщения",
     notify_mentions: "Только упоминания",
@@ -918,11 +910,7 @@ pub static EN: Tr = Tr {
     link_copied: "Link copied",
     copy_link: "Copy link",
     mark_unread: "Mark unread",
-    read: "Read",
     read_mark: "(read)",
-    not_seen_yet: "Not read yet",
-    not_read_yet: "Not read yet",
-    read_by_all: "Read by everyone",
     notify_label: "Notifications",
     notify_all: "All messages",
     notify_mentions: "Mentions only",
@@ -1481,27 +1469,6 @@ impl Tr {
         }
     }
 
-    /// The reads of an own message in a group: "Read by 5", or "Read by everyone".
-    pub fn read_by(&self, n: u32, everyone: bool) -> String {
-        match self.lang {
-            _ if everyone => self.read_by_all.to_owned(),
-            Lang::Ru => format!("{} {n}", ru_plural(n, "Прочитал(а)", "Прочитали", "Прочитали")),
-            Lang::En => format!("Read by {n}"),
-        }
-    }
-
-    /// Who read a message: the latest readers by name and how many more, "Anna, Boris and 2 more".
-    pub fn readers(&self, names: &[String], more: u32) -> String {
-        let mut who = names.to_vec();
-        if more > 0 && !names.is_empty() {
-            who.push(match self.lang {
-                Lang::Ru => format!("ещё {more}"),
-                Lang::En => format!("{more} more"),
-            });
-        }
-        self.list(&who)
-    }
-
     /// "Anna, Boris and Vera".
     pub fn list(&self, names: &[String]) -> String {
         let and = match self.lang {
@@ -1706,19 +1673,6 @@ mod tests {
         );
         assert_eq!(EN.members_count(1), "1 member");
         assert_eq!(EN.members_count(21), "21 members");
-    }
-
-    #[test]
-    fn read_receipts() {
-        assert_eq!(RU.read_by(1, false), "Прочитал(а) 1");
-        assert_eq!(RU.read_by(5, false), "Прочитали 5");
-        assert_eq!(EN.read_by(3, false), "Read by 3");
-        assert_eq!(RU.read_by(9, true), "Прочитали все");
-        assert_eq!(EN.read_by(9, true), "Read by everyone");
-        let names = ["Anna".to_owned(), "Boris".to_owned(), "Vera".to_owned()];
-        assert_eq!(RU.readers(&names, 2), "Anna, Boris, Vera и ещё 2");
-        assert_eq!(EN.readers(&names[..1], 0), "Anna");
-        assert_eq!(EN.readers(&[], 4), "");
     }
 
     #[test]
