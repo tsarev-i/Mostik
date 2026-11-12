@@ -1,6 +1,7 @@
 # dev and pull requests: build and tests on Linux.
 # main: the same, then bundles in parallel (AppImage for Linux, NSIS setup for Windows, an Apple
-# Silicon .app and DMG for macOS) and a GitHub release tagged vX.Y.Z with the bundles attached.
+# Silicon .app and DMG for macOS), each after the tests on its platform, and a GitHub release
+# tagged vX.Y.Z with the bundles attached.
 #
 # macOS bundles are signed ad hoc (signingIdentity "-" in tauri.conf.json), without an Apple
 # Developer ID: Gatekeeper asks the user to allow the first launch.
@@ -167,6 +168,12 @@ jobs:
 
       - name: Build UI (wasm)
         run: bash scripts/ui.sh build --release
+
+      # The Windows and macOS code (password store, call window, menus) is tested here only:
+      # the Test job runs on Linux. Not `--locked`: setting the version has changed Cargo.toml.
+      - name: Run tests
+        if: runner.os != 'Linux'
+        run: cargo test --workspace --all-features
 
       # The UI is already built: on Windows the hook's `bash` could resolve to WSL instead of Git Bash.
       # The signing key gives the bundles .sig files for the updater.

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use leptos::ev;
@@ -113,8 +113,8 @@ pub struct Ctx {
     /// People picked from `@` suggestions or named in an edited message, by the name the
     /// text shows: sending turns `@Name` into their `@<guid>` even when the name is not unique.
     pub picked: RwSignal<std::collections::HashMap<String, UserId>>,
-    /// Messages already removed as deleted, so a deletion is counted once.
-    pub deleted: RwSignal<HashSet<(ChatId, Timestamp)>>,
+    /// The latest messages removed as deleted, so a deletion is counted once (see `ops::remove`).
+    pub deleted: RwSignal<VecDeque<(ChatId, Timestamp)>>,
     /// Chats hidden from the sidebar with "×", kept between runs.
     pub hidden: RwSignal<hidden::Hidden>,
     /// Own sidebar sections: the Telemost chat folders of the current organization.

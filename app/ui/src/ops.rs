@@ -177,11 +177,27 @@ fn sort_sections(s: &mut Snapshot) {
     }
 }
 
+/// Deletions [`remove`] remembers: the push of the user's own comes back within seconds.
+const DELETED_KEPT: usize = 100;
+
 /// Removes a deleted message. A reply lowers its thread's reply count even when the replies
 /// are not loaded; a deleted parent takes its thread along, from the list and the thread pane.
 /// Each deletion counts once: the user's own comes back from Telemost as a push.
 pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timestamp>) {
-    let first = c.deleted.try_update(|d| d.insert((chat.clone(), ts))).unwrap_or(true);
+    let key = (chat.clone(), ts);
+    let first = c
+        .deleted
+        .try_update(|d| {
+            if d.contains(&key) {
+                return false;
+            }
+            if d.len() >= DELETED_KEPT {
+                d.pop_front();
+            }
+            d.push_back(key);
+            true
+        })
+        .unwrap_or(true);
     if !first {
         return;
     }
@@ -284,10 +300,11 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             reads,
         } => peer_seen(c, chat_id, user, ts, reads),
         LiveEvent::Typing { chat_id, user } => {
-            let until = js_sys::Date::now() + 5000.0;
+            let now = js_sys::Date::now();
             c.typing.update(|t| {
-                t.retain(|(ch, u, _)| !(ch == &chat_id && u == &user));
-                t.push((chat_id, user, until));
+                // Lines that have run out go too: the list keeps only the people typing now.
+                t.retain(|(ch, u, until)| *until > now && !(ch == &chat_id && u == &user));
+                t.push((chat_id, user, now + 5000.0));
             });
         }
         LiveEvent::Online { user } => {
@@ -1643,6 +1660,7 @@ pub fn open_url(c: Ctx, url: String) {
 pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
     match boot {
         Ok(bridge::Boot::Ready { snapshot }) => {
+            forget_gone_chats(c, &snapshot);
             let first = snapshot.sections.iter().flat_map(|s| s.chats.first()).next().cloned();
             c.snap.set(*snapshot);
             c.phase.set(Phase::Ready);
@@ -1657,6 +1675,29 @@ pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
             reason: reason.or_else(take_sign_out_note),
         }),
         Err(e) => c.phase.set(Phase::Login { reason: Some(e) }),
+    }
+}
+
+/// Drops what the sidebar keeps in `localStorage` (hidden chats, the custom order) about chats
+/// the user is no longer in.
+fn forget_gone_chats(c: Ctx, s: &Snapshot) {
+    // An empty chat list is more likely a failure than an account without chats.
+    if s.chats.is_empty() {
+        return;
+    }
+    let known: std::collections::HashSet<&ChatId> = s.chats.iter().map(|ch| &ch.id).collect();
+    if c.hidden.with_untracked(|h| h.keys().any(|id| !known.contains(id))) {
+        c.hidden.update(|h| h.retain(|id, _| known.contains(id)));
+    }
+    if c.chat_order
+        .with_untracked(|o| o.values().flatten().any(|id| !known.contains(id)))
+    {
+        c.chat_order.update(|o| {
+            o.retain(|_, ids| {
+                ids.retain(|id| known.contains(id));
+                !ids.is_empty()
+            })
+        });
     }
 }
 
@@ -1768,6 +1809,10 @@ pub fn subscribe(c: Ctx) {
 /// progress. An open thread stays and gets the replies missed while offline.
 fn reconnected(c: Ctx, mut fresh: Snapshot) {
     forget_fresh();
+    // Directory profiles may have changed meanwhile: they load again when opened, all but the
+    // one on screen.
+    let open = c.profile.get_untracked();
+    c.profiles.update(|p| p.retain(|id, _| Some(id) == open.as_ref()));
     c.snap.update(|s| {
         let old = std::mem::take(&mut s.messages);
         // The snapshot has no presence (everyone is offline in it): known people keep theirs
