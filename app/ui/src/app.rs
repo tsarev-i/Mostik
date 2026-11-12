@@ -4674,7 +4674,8 @@ fn ThreadPane() -> impl IntoView {
                     let n = replies.len() as u32;
                     view! {
                         <MessageRow msg=pm grouped=false in_thread=true/>
-                        <div class="tp-divider"><span>{tr().replies(n)}</span></div>
+                        // No "0 replies" once the last reply is deleted, as in Slack.
+                        {(n > 0).then(|| view! { <div class="tp-divider"><span>{tr().replies(n)}</span></div> })}
                         {render_feed(replies, true)}
                     }
                 })}
