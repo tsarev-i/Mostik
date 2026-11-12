@@ -18,7 +18,8 @@ mod webview;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::webview::NewWindowResponse;
+use tauri::{AppHandle, Emitter, Manager, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 
 /// Shows, unminimizes and focuses the main window.
@@ -102,6 +103,29 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The main window, as `tauri.conf.json` describes it (`"create": false` there), kept on the
+/// app's own pages: links from messages open in the default browser, never in its place.
+fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
+        return Ok(());
+    };
+    let window = WebviewWindowBuilder::from_config(app, config)?
+        .on_navigation(|url| {
+            let own = webview::is_app_url(url);
+            if !own {
+                eprintln!(
+                    "main window: refused to leave the app for {}",
+                    url.origin().ascii_serialization()
+                );
+            }
+            own
+        })
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .build()?;
+    webview::harden(&window);
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -138,15 +162,13 @@ fn main() {
             }
         })
         .setup(|app| {
+            create_main_window(app.handle())?;
             // Before anything can notify: clicks are reported only for notifications shown
             // after a handler exists.
             open_from_notification(app.handle());
             // The tray is optional: without an app indicator in the desktop environment we simply run without it.
             if let Err(e) = setup_tray(app.handle()) {
                 eprintln!("tray icon unavailable: {e}");
-            }
-            if let Some(main) = app.get_webview_window("main") {
-                webview::harden(&main);
             }
             call::cleanup(app.handle());
             update::start(app.handle());

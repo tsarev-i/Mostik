@@ -3674,11 +3674,18 @@ fn render_inline(text: &str, who: &Mentionable, me: Me) -> AnyView {
             Inline::Underline(t) => view! { <u>{t}</u> }.into_any(),
             Inline::Code(t) => view! { <code>{t}</code> }.into_any(),
             Inline::Link { text, url } => {
-                let target = url.clone();
+                let (target, middle) = (url.clone(), url.clone());
+                // A middle click is no `click`: left to the webview, WebKitGTK opens the link
+                // right in the app window. It opens in the default browser, like a click.
                 view! {
                     <a class="msg-link" href=url.clone() title=url on:click=move |e| {
                         e.prevent_default();
                         ops::open_url(ctx(), target.clone());
+                    } on:auxclick=move |e| {
+                        e.prevent_default();
+                        if e.button() == 1 {
+                            ops::open_url(ctx(), middle.clone());
+                        }
                     }>{text}</a>
                 }
                 .into_any()
