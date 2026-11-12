@@ -51,7 +51,7 @@ pub async fn listen<T: DeserializeOwned + 'static>(event: &str, mut handler: imp
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Boot {
     NeedLogin { reason: Option<String> },
-    Ready { snapshot: Snapshot },
+    Ready { snapshot: Box<Snapshot> },
 }
 
 /// Mirror of `mostik_yandex::convert::LiveEvent`.
@@ -131,6 +131,9 @@ pub enum LiveEvent {
         chats: Vec<(ChatId, mostik_core::NotifyLevel)>,
     },
     Meeting(mostik_core::Meeting),
+    Paused {
+        pause: Option<mostik_core::Pause>,
+    },
 }
 
 pub const EVENT: &str = "mostik://event";

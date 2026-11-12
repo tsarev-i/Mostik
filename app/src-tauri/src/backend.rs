@@ -75,15 +75,15 @@ const MAX_DIAG_EVENTS: usize = 300;
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Boot {
     NeedLogin { reason: Option<String> },
-    Ready { snapshot: Snapshot },
+    Ready { snapshot: Box<Snapshot> },
 }
 
 /// State updated from live events.
 #[derive(Default)]
 struct Shared {
     me: Option<UserId>,
-    /// Own availability: no notifications in "Do not disturb" mode.
-    my_availability: mostik_core::Availability,
+    /// Notifications paused on every device ("Do not disturb"): none are shown meanwhile.
+    paused: Option<mostik_core::Pause>,
     /// The last `(Timestamp, SeqNo)` per chat, for read markers.
     last: BTreeMap<String, (Timestamp, u64)>,
     /// The read marker last sent per chat: the same one is not sent again (an own message is
@@ -917,7 +917,9 @@ async fn connect(app: &AppHandle, state: &AppState, jar: CookieJar, signed_in: b
             *state.live.lock().await = Some(live.clone());
             start_heartbeat(app);
             service::start(app.clone(), live.clone());
-            Ok(Boot::Ready { snapshot })
+            Ok(Boot::Ready {
+                snapshot: Box::new(snapshot),
+            })
         }
         Err(ConnectError::Unauthorized) => {
             store::delete();
@@ -1130,12 +1132,6 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             if !sync_shared(app, shared, &ev) {
                 return;
             }
-            if let LiveEvent::Status(p) = &ev
-                && me.as_ref() == Some(&p.user)
-                && let Ok(mut sh) = shared.lock()
-            {
-                sh.my_availability = p.availability;
-            }
             // A call rings with a dialog in the main window and a ringtone instead of a notification.
             if let LiveEvent::Upsert { message, author, .. } = &ev {
                 match (&message.call, &ringing) {
@@ -1233,6 +1229,10 @@ fn sync_shared(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, ev: &LiveEvent) 
         }
         LiveEvent::Mutings { chats } => {
             sh.muted = chats.iter().map(|(id, level)| (id.0.clone(), *level)).collect();
+            true
+        }
+        LiveEvent::Paused { pause } => {
+            sh.paused = *pause;
             true
         }
         _ => true,
@@ -1435,6 +1435,11 @@ fn mentions_me(sh: &Shared, m: &Message) -> bool {
     })
 }
 
+/// Whether notifications are paused now.
+fn paused(sh: &Shared) -> bool {
+    sh.paused.is_some_and(|p| p.active_at(js_now_mcs()))
+}
+
 /// Whether a call ringing in `m`'s chat may ring: not in "Do not disturb", not in a chat that
 /// notifies about nothing, not with notifications off. Unlike messages, a call rings even when
 /// the window is in focus, as in Slack.
@@ -1442,7 +1447,7 @@ fn may_ring(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message) -> bool {
     let Ok(sh) = shared.lock() else { return false };
     if !sh.ready
         || sh.me.as_ref() == Some(&m.author)
-        || sh.my_availability == mostik_core::Availability::DoNotDisturb
+        || paused(&sh)
         || sh.muted.get(&m.chat_id.0) == Some(&NotifyLevel::Nothing)
     {
         return false;
@@ -1472,7 +1477,7 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         Some(NotifyLevel::Mentions) if !mentions_me(&sh, m) => return,
         _ => {}
     }
-    if sh.my_availability == mostik_core::Availability::DoNotDisturb {
+    if paused(&sh) {
         return;
     }
     let prefs = app
@@ -2410,11 +2415,6 @@ pub async fn presence(
                 .online = online;
         }
     }
-    if let Some(mine) = out.get(&live.me.0)
-        && let Ok(mut sh) = live.shared.lock()
-    {
-        sh.my_availability = mine.availability;
-    }
     Ok(out.into_values().collect())
 }
 
@@ -2429,17 +2429,18 @@ pub async fn set_status(
     duration: Option<u64>,
 ) -> Result<(), String> {
     let live = live(&state).await?;
-    let mut status = json!({ "Availability": availability });
+    // As the official web client does: "Do not disturb" also turns notifications off
+    // (`NotificationMode` 1), on every device of the user.
+    let dnd = availability == mostik_core::Availability::DoNotDisturb.code();
+    let mut status = json!({ "Availability": availability, "NotificationMode": u64::from(dnd) });
     if !emoji.trim().is_empty() || !text.trim().is_empty() {
         status["CustomStatus"] = json!({ "Emoji": emoji.trim(), "Text": text.trim() });
     }
     if let Some(d) = duration.filter(|d| *d > 0) {
         status["Duration"] = json!(d);
     }
+    // Telemost answers with the `status` bucket, which says whether notifications are paused.
     push(&live, json!({ "UserStatus": status })).await?;
-    if let Ok(mut sh) = live.shared.lock() {
-        sh.my_availability = mostik_core::Availability::from_code(availability);
-    }
     Ok(())
 }
 
@@ -2859,6 +2860,7 @@ async fn connect_inner(
     let service_chats = service::hide(&mut snapshot, service_chats);
     if let Ok(mut sh) = shared.lock() {
         sh.me = Some(me_id.clone());
+        sh.paused = snapshot.paused;
         sh.service = service_chats.iter().map(|s| s.id.clone()).collect();
         sh.service_chats = service_chats;
         sh.orgs = snapshot.organizations.iter().map(|o| o.id).collect();

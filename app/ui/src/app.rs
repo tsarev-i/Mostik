@@ -73,8 +73,6 @@ pub struct Ctx {
     pub browsing: RwSignal<bool>,
     pub settings: RwSignal<Settings>,
     pub status_dialog: RwSignal<bool>,
-    /// Until when (ms) notifications are paused, for the status line in the avatar menu.
-    pub dnd_until: RwSignal<Option<f64>>,
     /// Files attached to the main composer (picked in the dialog or dropped).
     pub pending_files: RwSignal<Vec<bridge::PendingFile>>,
     pub new_message: RwSignal<bool>,
@@ -385,6 +383,7 @@ fn empty_snapshot() -> Snapshot {
         sections: vec![],
         messages: vec![],
         folders: vec![],
+        paused: None,
     }
 }
 
@@ -451,7 +450,6 @@ pub fn App() -> impl IntoView {
         browsing: RwSignal::new(false),
         settings,
         status_dialog: RwSignal::new(false),
-        dnd_until: RwSignal::new(None),
         pending_files: RwSignal::new(vec![]),
         new_message: RwSignal::new(false),
         creating_channel: RwSignal::new(None),
@@ -510,13 +508,13 @@ pub fn App() -> impl IntoView {
         }
     });
     set_interval(move || c.now.set(js_sys::Date::now()), Duration::from_secs(1));
+    // A notification pause ends by itself: Telemost says nothing then.
     Effect::new(move |_| {
-        if let Some(until) = c.dnd_until.get()
-            && c.now.get() > until
-        {
-            c.dnd_until.set(None);
-            let me = c.snap.with_untracked(|s| s.me.clone());
+        let now = (c.now.get() * 1000.0) as Timestamp;
+        if c.snap.with_untracked(|s| s.paused.is_some_and(|p| !p.active_at(now))) {
             c.snap.update(|s| {
+                s.paused = None;
+                let me = s.me.clone();
                 if let Some(u) = s.users.iter_mut().find(|u| u.id == me)
                     && u.availability == Availability::DoNotDisturb
                 {
@@ -6170,12 +6168,10 @@ fn MeMenu() -> impl IntoView {
     let set = move |availability: Availability, duration: Option<u64>| {
         close();
         let status = me.get_untracked().and_then(|u| u.status);
-        c.dnd_until.set(match (availability, duration) {
-            (Availability::DoNotDisturb, Some(d)) => Some(js_sys::Date::now() + d as f64 * 1000.0),
-            _ => None,
-        });
         ops::set_status(c, availability, status, duration);
     };
+    // Paused here or on another device; an ended pause is cleared every second.
+    let paused = Memo::new(move |_| c.snap.with(|s| s.paused));
     let pauses = move || {
         [
             (30 * 60, tr().pause_30m),
@@ -6187,11 +6183,10 @@ fn MeMenu() -> impl IntoView {
     view! {
         <div class="me-menu" on:mouseleave=move |_| close()>
             {move || me.get().map(|u| {
-                let dnd = u.availability == Availability::DoNotDisturb;
-                let line = match (dnd, c.dnd_until.get(), u.status.clone()) {
-                    (true, Some(until), _) => format!("{} {}", tr().paused_until, time::hm((until * 1000.0) as Timestamp)),
-                    (_, _, Some(st)) if st.in_meeting => status_text(&st),
-                    (_, _, Some(st)) => format!("{} {}", st.emoji, st.text).trim().to_owned(),
+                let line = match (paused.get().and_then(|p| p.until), u.status.clone()) {
+                    (Some(until), _) => format!("{} {}", tr().paused_until, time::hm(until)),
+                    (_, Some(st)) if st.in_meeting => status_text(&st),
+                    (_, Some(st)) => format!("{} {}", st.emoji, st.text).trim().to_owned(),
                     _ => availability_label(&u).to_owned(),
                 };
                 view! {
@@ -6210,7 +6205,7 @@ fn MeMenu() -> impl IntoView {
             <div class="me-sep"></div>
             {move || {
                 let away = me.get().is_some_and(|u| u.availability == Availability::Away);
-                let dnd = me.get().is_some_and(|u| u.availability == Availability::DoNotDisturb);
+                let dnd = paused.get().is_some() || me.get().is_some_and(|u| u.availability == Availability::DoNotDisturb);
                 view! {
                     <button on:click=move |_| set(if away { Availability::Default } else { Availability::Away }, None)>
                         {if away { tr().set_active } else { tr().set_away }}

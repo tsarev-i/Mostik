@@ -77,6 +77,21 @@ pub struct PresenceInfo {
     pub status: Option<CustomStatus>,
 }
 
+/// Notifications paused on every device of the user: Telemost's "Do not disturb".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pause {
+    /// Until when (µs); `None` means until turned back on.
+    pub until: Option<Timestamp>,
+}
+
+impl Pause {
+    /// Whether notifications are still paused at `now` (µs): Telemost does not say when a pause
+    /// ends by itself.
+    pub fn active_at(&self, now: Timestamp) -> bool {
+        self.until.is_none_or(|until| now < until)
+    }
+}
+
 /// Custom status: an emoji and a short text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomStatus {
@@ -414,6 +429,9 @@ pub struct Snapshot {
     /// Telemost chat folders listing their chats by hand, of every organization.
     #[serde(default)]
     pub folders: Vec<ChatFolder>,
+    /// Notifications are paused ("Do not disturb").
+    #[serde(default)]
+    pub paused: Option<Pause>,
 }
 
 /// A Telemost chat folder (the `folders` bucket) that lists its chats by hand; Mostik shows it as
@@ -805,6 +823,7 @@ mod tests {
             chats: vec![],
             sections: vec![],
             folders: vec![],
+            paused: None,
         };
         let active: Vec<_> = snap.active_calls().into_iter().map(|(c, u)| (c.0, u)).collect();
         assert_eq!(active, [("a".into(), "u-a".into()), ("c".into(), "u-c".into())]);

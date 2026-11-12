@@ -366,6 +366,11 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
         LiveEvent::Meeting(m) => c.meetings.update(|list| {
             list.insert(m.chat_id.clone(), m);
         }),
+        LiveEvent::Paused { pause } => {
+            if c.snap.with_untracked(|s| s.paused != pause) {
+                c.snap.update(|s| s.paused = pause);
+            }
+        }
         LiveEvent::Mutings { chats } => c.snap.update(|s| {
             for ch in &mut s.chats {
                 let level = chats
@@ -1573,7 +1578,7 @@ pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
     match boot {
         Ok(bridge::Boot::Ready { snapshot }) => {
             let first = snapshot.sections.iter().flat_map(|s| s.chats.first()).next().cloned();
-            c.snap.set(snapshot);
+            c.snap.set(*snapshot);
             c.phase.set(Phase::Ready);
             c.online.set(true);
             refresh_presence(c);
@@ -1914,7 +1919,8 @@ pub fn refresh_me(c: Ctx) {
     });
 }
 
-/// Own availability and status.
+/// Own availability and status, for `duration` seconds or until changed. "Do not disturb" also
+/// pauses notifications on every device, as in Telemost.
 pub fn set_status(c: Ctx, availability: Availability, status: Option<CustomStatus>, duration: Option<u64>) {
     let me = c.snap.with_untracked(|s| s.me.clone());
     let (emoji, text) = status
@@ -1929,7 +1935,12 @@ pub fn set_status(c: Ctx, availability: Availability, status: Option<CustomStatu
                 availability,
                 status: status.clone(),
             }],
-        )
+        );
+        // What Telemost will say in the `status` bucket a moment later.
+        let pause = (availability == Availability::DoNotDisturb).then(|| Pause {
+            until: duration.map(|d| now_mcs() + d * 1_000_000),
+        });
+        c.snap.update(|s| s.paused = pause);
     };
     if !c.live {
         return apply(c);

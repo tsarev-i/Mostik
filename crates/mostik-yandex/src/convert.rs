@@ -679,6 +679,10 @@ pub enum LiveEvent {
     },
     /// A call in a chat changed: people joined or left, or it ended.
     Meeting(Meeting),
+    /// Notifications were paused or resumed ("Do not disturb"), on any device.
+    Paused {
+        pause: Option<Pause>,
+    },
 }
 
 /// Parses the body of a `delivery` push. `None` means the event is not of interest yet.
@@ -815,6 +819,7 @@ fn state_sync(sync: &Value) -> Option<LiveEvent> {
                 "chat_mutings" => Some(LiveEvent::Mutings {
                     chats: chat_mutings(value),
                 }),
+                "status" => Some(LiveEvent::Paused { pause: pause(value) }),
                 _ => None,
             }
         }
@@ -855,6 +860,16 @@ fn pinned_chats(value: &Value) -> Vec<ChatId> {
         .filter_map(Value::as_str)
         .map(|id| ChatId(id.to_owned()))
         .collect()
+}
+
+/// The notification pause of the `status` bucket value `{mute_deadline, mute_mode}`. Telemost
+/// writes it itself right after each own `UserStatus`: `mute_mode` is its `NotificationMode`
+/// (1: notifications off), `mute_deadline` its time plus `Duration`, in µs (0: no end). When the
+/// deadline passes, nothing is sent.
+fn pause(value: &Value) -> Option<Pause> {
+    (n(value, &["mute_mode"]).unwrap_or(0) != 0).then(|| Pause {
+        until: n(value, &["mute_deadline"]).filter(|t| *t > 0),
+    })
 }
 
 /// The muted chats of the `chat_mutings` bucket value: `{"<chat id>": {mute, mute_mentions}}`.
@@ -974,6 +989,7 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
         ],
         messages: data.messages,
         folders: vec![],
+        paused: None,
     }
 }
 
@@ -1251,7 +1267,7 @@ pub fn put_chat_folders(value: &mut Value, org: &str, folders: &[ChatFolder]) {
 }
 
 /// Applies synced settings (`get_buckets`): chat folders, pinned chats go to the "Starred"
-/// section, muted chats set `Chat::muted`.
+/// section, muted chats set `Chat::muted`, a notification pause sets `Snapshot::paused`.
 pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
     let list = buckets
         .pointer("/data/buckets")
@@ -1264,6 +1280,7 @@ pub fn apply_buckets(snapshot: &mut Snapshot, buckets: &Value) {
             .map(|b| b["bucket_value"].clone())
     };
     snapshot.folders = bucket("folders").map(|v| chat_folders(&v)).unwrap_or_default();
+    snapshot.paused = bucket("status").and_then(|v| pause(&v));
     if let Some(mutings) = bucket("chat_mutings") {
         for (id, level) in chat_mutings(&mutings) {
             if let Some(ch) = snapshot.chats.iter_mut().find(|ch| ch.id == id) {
@@ -1944,9 +1961,16 @@ mod tests {
         let buckets = json!({"status": "ok", "data": {"buckets": [
             {"bucket_name": "pinned_chats", "bucket_value": {"pinned_chats": ["0/0/b", "0/0/missing"]}},
             {"bucket_name": "chat_mutings", "bucket_value": {"0/0/a": {"mute": true, "mute_mentions": false},
-                                                              "0/0/b": {"mute": true, "mute_mentions": true}}}
+                                                              "0/0/b": {"mute": true, "mute_mentions": true}}},
+            {"bucket_name": "status", "bucket_value": {"mute_deadline": 1_700_000_060_000_000_u64, "mute_mode": 1}}
         ]}});
         apply_buckets(&mut snap, &buckets);
+        assert_eq!(
+            snap.paused,
+            Some(Pause {
+                until: Some(1_700_000_060_000_000)
+            })
+        );
         assert_eq!(snap.sections[0].id, "starred");
         assert_eq!(snap.sections[0].chats, vec![ChatId("0/0/b".into())]);
         assert!(!snap.sections[1].chats.contains(&ChatId("0/0/b".into())));
@@ -2183,8 +2207,6 @@ mod tests {
                 chats: vec![ChatId("0/0/b".into())]
             })
         );
-        let status = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status", "bucket_value": {}}}));
-        assert_eq!(from_push(&status, Some(&me)), None);
         let meeting = |status: u64, count: u64| {
             sync_push(json!({"type": "meeting_updated", "data": {
                 "meeting_id": "https://telemost.360.yandex.ru/j/555", "chat_id": "0/58/g1",
@@ -2210,6 +2232,28 @@ mod tests {
                 ..going
             }))
         );
+        // Values as Telemost wrote them for a one-minute "Do not disturb" and after it.
+        let paused = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status",
+            "bucket_value": {"mute_deadline": 1_700_000_060_000_000_u64, "mute_mode": 1}}}));
+        assert_eq!(
+            from_push(&paused, Some(&me)),
+            Some(LiveEvent::Paused {
+                pause: Some(Pause {
+                    until: Some(1_700_000_060_000_000)
+                })
+            })
+        );
+        let forever = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status",
+            "bucket_value": {"mute_deadline": 0, "mute_mode": 1}}}));
+        assert_eq!(
+            from_push(&forever, Some(&me)),
+            Some(LiveEvent::Paused {
+                pause: Some(Pause { until: None })
+            })
+        );
+        let resumed = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status",
+            "bucket_value": {"mute_deadline": 0, "mute_mode": 0}}}));
+        assert_eq!(from_push(&resumed, Some(&me)), Some(LiveEvent::Paused { pause: None }));
         assert_eq!(base64("aGk"), Some(b"hi".to_vec()));
         assert_eq!(base64("aGk="), Some(b"hi".to_vec()));
         assert_eq!(base64("a*"), None);
