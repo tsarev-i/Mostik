@@ -10,6 +10,10 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
     async fn tauri_invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 
+    /// `invoke` with options: raw bytes as the arguments and request headers.
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], js_name = invoke, catch)]
+    async fn tauri_invoke_with(cmd: &str, args: JsValue, options: JsValue) -> Result<JsValue, JsValue>;
+
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], js_name = listen, catch)]
     async fn tauri_listen(event: &str, handler: &Closure<dyn FnMut(JsValue)>) -> Result<JsValue, JsValue>;
 }
@@ -616,7 +620,7 @@ pub async fn chat_details(chat_id: &str) -> Result<ChatDetails, String> {
     call("chat_details", ChatArgs { chat_id }).await
 }
 
-/// A file picked in the dialog or dropped onto the window.
+/// A file picked in the dialog, dropped onto the window or pasted.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct PendingFile {
     pub path: String,
@@ -641,6 +645,24 @@ pub struct OpenTarget {
 
 pub async fn pick_files() -> Result<Vec<PendingFile>, String> {
     call("pick_files", NoArgs {}).await
+}
+
+/// Hands the contents of a pasted or dropped file to the app, which keeps it to be sent like a
+/// picked one. The bytes go as they are, not as JSON.
+pub async fn keep_file(name: &str, data: &js_sys::ArrayBuffer) -> Result<PendingFile, String> {
+    if !available() {
+        return Err("keep_file: no Tauri backend".into());
+    }
+    let headers = js_sys::Object::new();
+    let name = js_sys::encode_uri_component(name);
+    js_sys::Reflect::set(&headers, &"x-file-name".into(), &name).map_err(|e| format!("{e:?}"))?;
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &"headers".into(), &headers).map_err(|e| format!("{e:?}"))?;
+    let body = js_sys::Uint8Array::new(data);
+    let value = tauri_invoke_with("keep_file", body.into(), options.into())
+        .await
+        .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| format!("keep_file: {e}"))
 }
 
 #[derive(Serialize)]

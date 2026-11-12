@@ -4716,6 +4716,9 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         remember(&text);
         set_draft.set(text);
     });
+    if !thread {
+        crate::compose::attach_dropped(c);
+    }
     let on_key = move |ev: web_sys::KeyboardEvent| {
         if ev.is_composing() || field.hotkey(&ev) {
             return;
@@ -4837,7 +4840,11 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         suggestions.set(found);
                     }
                     on:keydown=on_key
-                    on:paste=move |e: ev::ClipboardEvent| { field.paste_link(&e); }
+                    on:paste=move |e: ev::ClipboardEvent| {
+                        if thread || !crate::compose::attach_pasted(c, &e) {
+                            field.paste_link(&e);
+                        }
+                    }
                     on:blur=move |_| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
                 ></div>
                 <Show when=move || !suggestions.with(Vec::is_empty)>

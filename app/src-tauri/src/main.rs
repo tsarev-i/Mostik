@@ -203,6 +203,7 @@ fn main() {
             backend::leave_chat,
             backend::chat_details,
             backend::pick_files,
+            backend::keep_file,
             backend::send_files,
             backend::presence,
             backend::set_status,

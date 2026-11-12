@@ -1,6 +1,6 @@
 //! What the three message fields share (the chat composer, the thread reply and the in-place
 //! editor of a message), as in Slack: the formatting toolbar and its hotkeys, the "Add link"
-//! dialog and a link pasted over selected text.
+//! dialog, a link pasted over selected text, and files pasted or dropped into a message.
 
 use std::ops::Range;
 
@@ -8,14 +8,16 @@ use leptos::ev;
 use leptos::html;
 use leptos::portal::Portal;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use mostik_core::markup::{link_address, link_at, link_markup, pasted_link, typed_address};
+use wasm_bindgen::JsCast;
 
 use crate::app::{
     Ctx, insert_into, place_caret, scoped_window_listener, selection, utf16_len, utf16_to_byte, wrap_selection,
 };
-use crate::editor;
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::{bridge, editor};
 
 /// A message field as its toolbar, hotkeys and dialogs see it.
 #[derive(Clone, Copy)]
@@ -321,6 +323,85 @@ fn LinkDialog(field: Field, target: LinkTarget) -> impl IntoView {
     }
 }
 
+/// Files pasted or dropped into a message are attached to it, as with "+": the app keeps their
+/// contents until the message goes. Returns whether there were any.
+fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
+    let files: Vec<web_sys::File> = data
+        .and_then(|d| d.files())
+        .map(|list| (0..list.length()).filter_map(|i| list.get(i)).collect())
+        .unwrap_or_default();
+    if files.is_empty() {
+        return false;
+    }
+    if !c.live {
+        c.error.set(Some(tr().only_in_app_files.into()));
+        return true;
+    }
+    spawn_local(async move {
+        for f in files {
+            let name = file_name(&f.name(), &f.type_());
+            let kept = match wasm_bindgen_futures::JsFuture::from(f.array_buffer()).await {
+                Ok(data) => bridge::keep_file(&name, data.unchecked_ref()).await,
+                Err(e) => Err(format!("{name}: {e:?}")),
+            };
+            match kept {
+                Ok(file) => c.pending_files.update(|p| p.push(file)),
+                Err(e) => return c.error.set(Some(e)),
+            }
+        }
+    });
+    true
+}
+
+/// Files pasted into a message are attached to it, unless they come with formatted text: a table
+/// copied from a spreadsheet or a document brings a picture of itself along, and then the text is
+/// what is meant. Returns whether the files were taken.
+pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent) -> bool {
+    let Some(data) = e.clipboard_data() else { return false };
+    let has = |kind: &str| data.get_data(kind).is_ok_and(|t| !t.trim().is_empty());
+    if has("text/plain") && has("text/html") {
+        return false;
+    }
+    let taken = attach(c, Some(data));
+    if taken {
+        e.prevent_default();
+    }
+    taken
+}
+
+/// Drag and drop onto the window: the files that reach the page (a picture dragged out of another
+/// program) are attached to the message. Files from a file manager do not get here: the app takes
+/// them itself and sends `mostik://files`.
+pub fn attach_dropped(c: Ctx) {
+    // Files are accepted anywhere in the window, not only over the text field.
+    scoped_window_listener(ev::dragover, |e| {
+        if e.data_transfer()
+            .is_some_and(|d| d.types().includes(&"Files".into(), 0))
+        {
+            e.prevent_default();
+        }
+    });
+    scoped_window_listener(ev::drop, move |e| {
+        if attach(c, e.data_transfer()) {
+            e.prevent_default();
+        }
+    });
+}
+
+/// The name a pasted file goes with: its own, or `image.png` and the like for a picture from the
+/// clipboard, which may have none.
+fn file_name(name: &str, kind: &str) -> String {
+    if !name.trim().is_empty() {
+        return name.to_owned();
+    }
+    let (base, sub) = kind.split_once('/').unwrap_or_default();
+    let base = if base == "image" { "image" } else { "file" };
+    match sub.split(['+', ';']).next().filter(|e| !e.is_empty()) {
+        Some(ext) => format!("{base}.{ext}"),
+        None => base.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +459,14 @@ mod tests {
         assert_eq!(paste_link("see docs", Some(4), Some(4), "https://e.org"), None);
         assert_eq!(paste_link("see docs", Some(4), Some(8), "plain words"), None);
         assert_eq!(paste_link("a\nb", Some(0), Some(3), "https://e.org"), None);
+    }
+
+    #[test]
+    fn pasted_files_get_a_name() {
+        assert_eq!(file_name("shot.png", "image/png"), "shot.png");
+        assert_eq!(file_name("", "image/png"), "image.png");
+        assert_eq!(file_name("", "image/svg+xml"), "image.svg");
+        assert_eq!(file_name("", "application/pdf"), "file.pdf");
+        assert_eq!(file_name("", ""), "file");
     }
 }

@@ -242,6 +242,8 @@ pub fn allow_files(app: &AppHandle, paths: &[std::path::PathBuf]) -> Vec<Pending
 pub struct AppState {
     pub prefs: StdMutex<Prefs>,
     allowed_files: StdMutex<BTreeSet<String>>,
+    /// Contents of the files pasted or dropped into the message field, by their [`KEPT`] path.
+    kept_files: StdMutex<BTreeMap<String, Vec<u8>>>,
     live: Mutex<Option<Arc<Live>>>,
     reconnecting: AtomicBool,
     heartbeat_running: AtomicBool,
@@ -2231,6 +2233,51 @@ pub async fn pick_files(app: AppHandle) -> Result<Vec<PendingFile>, String> {
     Ok(allow_files(&app, &paths))
 }
 
+/// Path prefix of the files kept by [`keep_file`]: they have no path on disk.
+const KEPT: &str = "kept:";
+
+/// A file pasted or dropped into the message field: its contents come in the request body, its
+/// name (URI-encoded) in the `x-file-name` header. It is kept in memory, so that a pasted
+/// screenshot leaves nothing on disk, and is sent like a picked file.
+#[tauri::command]
+pub async fn keep_file(
+    state: tauri::State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<PendingFile, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("no file contents".into());
+    };
+    let name = request
+        .headers()
+        .get("x-file-name")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .unwrap_or_default();
+    let name = name
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|n| !n.trim().is_empty() && !n.chars().any(char::is_control))
+        .unwrap_or("file");
+    let path = format!("{KEPT}{}/{name}", request_id());
+    let file = PendingFile {
+        path: path.clone(),
+        name: name.to_owned(),
+        size: bytes.len() as u64,
+        image: mime_guess::from_path(name)
+            .first()
+            .is_some_and(|m| m.type_() == "image"),
+    };
+    state
+        .kept_files
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(path.clone(), bytes.clone());
+    if let Ok(mut allowed) = state.allowed_files.lock() {
+        allowed.insert(path);
+    }
+    Ok(file)
+}
+
 /// Uploads the files and sends them: images as one gallery with a caption, the rest one by one.
 /// For non-images the caption goes as a separate text message before them.
 #[tauri::command]
@@ -2248,10 +2295,15 @@ pub async fn send_files(
     }
     let target = target_chat(&chat_id, thread)?;
     let gallery_id = request_id();
+    let kept: Vec<Option<Vec<u8>>> = {
+        let all = state.kept_files.lock().map_err(|e| e.to_string())?;
+        paths.iter().map(|p| all.get(p).cloned()).collect()
+    };
     // Files are read and uploaded a few at a time; `buffered` keeps their order for the gallery.
     let uploads: Vec<_> = paths
-        .into_iter()
-        .map(|path| upload_one(live.web.clone_light(), target.clone(), gallery_id.clone(), path))
+        .iter()
+        .zip(kept)
+        .map(|(path, kept)| upload_one(live.web.clone_light(), target.clone(), gallery_id.clone(), path, kept))
         .collect();
     let uploaded: Vec<Uploaded> = {
         use futures_util::{StreamExt, TryStreamExt};
@@ -2289,6 +2341,11 @@ pub async fn send_files(
         let msg = json!({ "Plain": { "ChatId": target, "PayloadId": payload, "MiscFile": { "FileInfo": info } } });
         sent.push(send_plain(&live, &chat_id, thread, msg, "").await?);
     }
+    if let Ok(mut kept) = state.kept_files.lock() {
+        for p in &paths {
+            kept.remove(p);
+        }
+    }
     Ok(sent)
 }
 
@@ -2301,10 +2358,20 @@ enum Uploaded {
     File(String, Value),
 }
 
-/// Reads a file without blocking the runtime and uploads it to the Messenger storage.
-async fn upload_one(mut web: WebClient, target: String, gallery_id: String, path: String) -> Result<Uploaded, String> {
-    let p = std::path::Path::new(&path);
-    let bytes = tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?;
+/// Reads a file without blocking the runtime (unless its contents are `kept` in memory) and
+/// uploads it to the Messenger storage.
+async fn upload_one(
+    mut web: WebClient,
+    target: String,
+    gallery_id: String,
+    path: &str,
+    kept: Option<Vec<u8>>,
+) -> Result<Uploaded, String> {
+    let p = std::path::Path::new(path);
+    let bytes = match kept {
+        Some(bytes) => bytes,
+        None => tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?,
+    };
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
