@@ -170,11 +170,21 @@ pub struct Live {
     shared: Arc<StdMutex<Shared>>,
 }
 
+/// What notifies, from "Preferences": the UI sends `all`, `direct` or `nothing`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyMode {
+    #[default]
+    All,
+    /// Direct chats and mentions.
+    Direct,
+    Nothing,
+}
+
 /// UI settings the backend needs (from "Preferences" in the UI).
 #[derive(Clone)]
 pub struct Prefs {
-    /// `all`, `direct` or `nothing`.
-    pub notify: String,
+    pub notify: NotifyMode,
     pub preview: bool,
     pub english: bool,
     /// Notification sound, one of [`mostik_core::NOTIFICATION_SOUNDS`].
@@ -187,7 +197,7 @@ impl Default for Prefs {
             .map(|l| !l.to_lowercase().starts_with("ru"))
             .unwrap_or(false);
         Self {
-            notify: "all".into(),
+            notify: NotifyMode::All,
             preview: true,
             sound: "marimba".into(),
             english,
@@ -1607,7 +1617,7 @@ fn may_ring(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message) -> bool {
         return false;
     }
     let state = app.state::<AppState>();
-    state.prefs.lock().is_ok_and(|p| p.notify != "nothing")
+    state.prefs.lock().is_ok_and(|p| p.notify != NotifyMode::Nothing)
 }
 
 fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>) {
@@ -1643,9 +1653,9 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
     let direct = !m.chat_id.0.contains('/');
     // Only "direct and mentions" needs to know about mentions.
     let mentioned = || mentions_me(&sh, m);
-    match prefs.notify.as_str() {
-        "nothing" => return,
-        "direct" if !direct && !mentioned() => return,
+    match prefs.notify {
+        NotifyMode::Nothing => return,
+        NotifyMode::Direct if !direct && !mentioned() => return,
         _ => {}
     }
     let focused = app
@@ -2790,7 +2800,7 @@ pub fn set_zoom(app: AppHandle, scale: f64) -> Result<(), String> {
 pub fn set_preferences(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    notify: String,
+    notify: NotifyMode,
     preview: bool,
     lang: String,
     sound: Option<String>,
@@ -3002,8 +3012,8 @@ async fn connect_inner(
 
     // Without `whoami` every direct chat would show its first member, often yourself: take the
     // GUID from the chat IDs and the name, photo and organization from the directory instead.
-    let (who, me_id) = match who.pointer("/UserInfo/Guid").and_then(Value::as_str).map(str::to_owned) {
-        Some(guid) => (who, UserId(guid)),
+    let (who, known_me) = match who.pointer("/UserInfo/Guid").and_then(Value::as_str).map(str::to_owned) {
+        Some(guid) => (who, Some(UserId(guid))),
         None => match convert::own_guid(&list) {
             Some(me) => {
                 let profile = web.rpc("get_users_data", json!({ "guids": [me.0] })).await;
@@ -3011,19 +3021,19 @@ async fn connect_inner(
                 let profile = profile
                     .ok()
                     .and_then(|v| convert::profiles(&v).into_iter().find(|p| p.id == me));
-                (convert::whoami_from_profile(&me, profile.as_ref()), me)
+                (convert::whoami_from_profile(&me, profile.as_ref()), Some(me))
             }
             None => {
                 probe["me_fallback"] = json!("unknown");
-                (Value::Null, UserId("me".into()))
+                (Value::Null, None)
             }
         },
     };
-    if me_id.0 != "me"
+    if let Some(me) = &known_me
         && let Ok(mut sh) = shared.lock()
     {
         // Known before the rest of the snapshot, so pushes arriving meanwhile recognise our own messages.
-        sh.me = Some(me_id.clone());
+        sh.me = Some(me.clone());
     }
     let me_name = who
         .pointer("/UserInfo/DisplayName")
@@ -3037,19 +3047,19 @@ async fn connect_inner(
         .unwrap_or("Telemost")
         .to_owned();
 
-    let mut data = convert::from_history(&list, Some(&me_id));
-    let service_chats = if me_id.0 == "me" {
-        vec![]
-    } else {
-        service::detect(app, &mut web, &list, &me_id).await
+    let mut data = convert::from_history(&list, known_me.as_ref());
+    let service_chats = match &known_me {
+        Some(me) => service::detect(app, &mut web, &list, me).await,
+        None => vec![],
     };
     probe["service_chats"] = json!(service_chats.len());
     // The chat with oneself, as in Slack: create it if it does not exist yet (the call is idempotent).
-    let notes_id = convert::notes_chat_id(&me_id);
-    if me_id.0 != "me" && !data.chats.iter().any(|c| c.id == notes_id) {
-        match web.rpc("create_private_chat", json!({ "guid": me_id.0 })).await {
+    if let Some(me) = &known_me
+        && !data.chats.iter().any(|c| c.id == convert::notes_chat_id(me))
+    {
+        match web.rpc("create_private_chat", json!({ "guid": me.0 })).await {
             Ok(v) if v.get("status").and_then(Value::as_str) == Some("ok") => {
-                data.chats.push(convert::notes_chat(&me_id));
+                data.chats.push(convert::notes_chat(me));
                 probe["notes"] = json!("created");
             }
             Ok(v) => probe["notes"] = json!({ "code": v.pointer("/data/code") }),
@@ -3059,6 +3069,9 @@ async fn connect_inner(
         probe["notes"] = json!("exists");
     }
     let last = std::mem::take(&mut data.last);
+    // The snapshot and the connection need an ID even for a user nothing named: one that
+    // matches nobody.
+    let me_id = known_me.clone().unwrap_or_else(|| UserId("me".into()));
     let me = User {
         id: me_id.clone(),
         display_name: me_name.unwrap_or_else(|| "You".into()),
@@ -3111,7 +3124,7 @@ async fn connect_inner(
     }
     let service_chats = service::hide(&mut snapshot, service_chats);
     if let Ok(mut sh) = shared.lock() {
-        sh.me = Some(me_id.clone());
+        sh.me = known_me.clone();
         sh.paused = snapshot.paused;
         sh.service = service_chats.iter().map(|s| s.id.clone()).collect();
         sh.service_chats = service_chats;
@@ -3144,7 +3157,7 @@ async fn connect_inner(
         "users": snapshot.users.len(),
         "messages": snapshot.messages.len(),
         "direct": snapshot.chats.iter().filter(|c| matches!(c.kind, ChatKind::Direct { .. })).count(),
-        "me_known": me_id.0 != "me",
+        "me_known": known_me.is_some(),
         "with_avatar": snapshot.users.iter().filter(|u| u.avatar.is_some()).count(),
         "org_avatar": snapshot.organization_avatar.is_some(),
     });

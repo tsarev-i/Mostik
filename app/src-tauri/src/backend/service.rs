@@ -10,15 +10,29 @@
 //! The sets and the emoji images are cached on disk: a start shows them at once and reads the chat
 //! again only when its last message or edit has changed.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use mostik_core::custom_emoji::{
     self as ce, EmojiSet, MAX_UPLOAD, SERVICE_CHAT_NAME, SERVICE_DESCRIPTION, SERVICE_MARKER, UPLOAD_SIDE,
 };
-use serde::Deserialize;
+use mostik_core::{ChatId, NotifyLevel, Snapshot, Timestamp, UserId};
+use mostik_yandex::convert::{self, LiveEvent};
+use mostik_yandex::diag::{id_pattern, shape};
+use mostik_yandex::web::WebClient;
+use mostik_yandex::wire::{self, HistoryRequest, request_id};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::Mutex;
 
-use super::*;
+use super::{
+    AppState, HISTORY_TIMEOUT_S, Live, PendingFile, Shared, allow_files, chat_info_raw, live, original_plain, push,
+    rpc_ok, text, update_bucket,
+};
 
 /// The custom emoji sets changed: the payload is the new list.
 pub const EMOJI_EVENT: &str = "mostik://emoji";
