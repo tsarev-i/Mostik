@@ -100,6 +100,7 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
+        clear_tray_dirs();
         tray = tray.temp_dir_path(tray_dir());
     }
     tray.build(app)?;
@@ -115,6 +116,24 @@ fn tray_dir() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join(format!("mostik-tray-{}", std::process::id()))
+}
+
+/// Removes the tray folders of copies that are gone: one stopped by a signal leaves its folder.
+#[cfg(target_os = "linux")]
+fn clear_tray_dirs() {
+    let dir = tray_dir();
+    let Some(Ok(entries)) = dir.parent().map(std::fs::read_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("mostik-tray-")) else {
+            continue;
+        };
+        if pid.parse::<u32>().is_ok() && !std::path::Path::new("/proc").join(pid).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// The main window, as `tauri.conf.json` describes it (`"create": false` there), kept on the
