@@ -471,17 +471,42 @@ pub(super) fn message_preview(s: &Snapshot, m: &Message) -> String {
     }
 }
 
+/// The delete dialog's quote, so the user sees which message goes: its text without markup, else
+/// its first attachment, else what it forwards (`↪ …`); `None` when there is nothing to show.
+pub(super) fn delete_preview(s: &Snapshot, m: &Message) -> Option<String> {
+    let text = s.plain(&m.text);
+    let line = if !text.trim().is_empty() {
+        text
+    } else if let Some(a) = attachment_line(&m.attachments) {
+        a
+    } else {
+        let f = m.forwarded.first()?;
+        let text = s.plain(&f.text);
+        let what = if text.trim().is_empty() {
+            attachment_line(&f.attachments)?
+        } else {
+            text
+        };
+        format!("↪ {what}")
+    };
+    Some(line.chars().take(200).collect())
+}
+
+/// The first attachment in one line: 🖼 or 📄 and its name.
+fn attachment_line(attachments: &[Attachment]) -> Option<String> {
+    attachments.first().map(|a| match a.kind {
+        AttachmentKind::Image => format!("🖼 {}", a.name),
+        AttachmentKind::File => format!("📄 {}", a.name),
+    })
+}
+
 /// One line about the message a reply answers: the quoted fragment, else its text without markup,
 /// else its first attachment; a deleted message has none of them.
 fn reply_snippet(s: &Snapshot, quote: Option<&str>, text: &str, attachments: &[Attachment]) -> String {
     let line = match quote.filter(|q| !q.trim().is_empty()) {
         Some(q) => q.to_owned(),
         None if !text.trim().is_empty() => s.mention_names().with(|who| mostik_core::markup::plain(text, who)),
-        None => match attachments.first() {
-            Some(a) if a.kind == AttachmentKind::Image => format!("🖼 {}", a.name),
-            Some(a) => format!("📄 {}", a.name),
-            None => tr().reply_deleted.to_owned(),
-        },
+        None => attachment_line(attachments).unwrap_or_else(|| tr().reply_deleted.to_owned()),
     };
     line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -726,4 +751,70 @@ pub(super) fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option
 /// A menu item with its icon, as in Slack's message menu.
 fn menu_item(icon: I, label: &'static str) -> impl IntoView {
     view! { <Icon icon=icon size=16/><span>{label}</span> }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(text: &str, attachments: Vec<Attachment>, forwarded: Vec<Forwarded>) -> Message {
+        Message {
+            chat_id: ChatId("general".into()),
+            ts: 1,
+            author: UserId("anna".into()),
+            text: text.into(),
+            thread_parent: None,
+            edited: false,
+            important: false,
+            reactions: vec![],
+            thread: None,
+            seq_no: 0,
+            attachments,
+            forwarded,
+            call: None,
+            system: None,
+            reads: None,
+        }
+    }
+
+    fn attachment(kind: AttachmentKind, name: &str) -> Attachment {
+        Attachment {
+            kind,
+            file_id: "f".into(),
+            name: name.into(),
+            size: 1,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    fn forwarded(text: &str, attachments: Vec<Attachment>) -> Forwarded {
+        Forwarded {
+            author: UserId("boris".into()),
+            author_name: "Boris".into(),
+            ts: 0,
+            chat_id: None,
+            text: text.into(),
+            attachments,
+            quote: None,
+            reply: false,
+        }
+    }
+
+    #[test]
+    fn delete_preview_describes_a_message_without_text() {
+        let s = mostik_core::mock::demo(1_794_300_000_000_000);
+        let preview = |m: Message| delete_preview(&s, &m);
+        let pdf = || vec![attachment(AttachmentKind::File, "report.pdf")];
+        assert_eq!(preview(message("**Hi**", pdf(), vec![])).as_deref(), Some("Hi"));
+        assert_eq!(preview(message("", pdf(), vec![])).as_deref(), Some("📄 report.pdf"));
+        let image = vec![attachment(AttachmentKind::Image, "image.png")];
+        assert_eq!(preview(message(" ", image, vec![])).as_deref(), Some("🖼 image.png"));
+        let fwd = vec![forwarded("Plan", vec![])];
+        assert_eq!(preview(message("", vec![], fwd)).as_deref(), Some("↪ Plan"));
+        let fwd = vec![forwarded("", pdf())];
+        assert_eq!(preview(message("", vec![], fwd)).as_deref(), Some("↪ 📄 report.pdf"));
+        assert_eq!(preview(message("", vec![], vec![forwarded("", vec![])])), None);
+        assert_eq!(preview(message("", vec![], vec![])), None);
+    }
 }

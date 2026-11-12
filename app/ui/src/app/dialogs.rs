@@ -15,7 +15,7 @@ use crate::modal::Modal;
 use crate::{bridge, folders, ops};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon};
-use super::message::ForwardedBlock;
+use super::message::{ForwardedBlock, delete_preview};
 use super::org::in_current_org;
 use super::scoped_window_listener;
 use super::state::{DetailsTab, FolderEdit, NewChannel, ViewMode, ctx};
@@ -764,13 +764,14 @@ pub(super) fn DeleteDialog() -> impl IntoView {
     let preview = move || {
         c.confirm_delete
             .get()
-            .map(|m| c.snap.with(|s| s.plain(&m.text)).chars().take(200).collect::<String>())
+            .and_then(|m| c.snap.with(|s| delete_preview(s, &m)))
+            .map(|line| view! { <blockquote class="quote">{line}</blockquote> })
     };
     view! {
         <Modal on_close=Callback::new(move |_| close())>
             <header><h2>{tr().delete_message}</h2></header>
             <p>{tr().delete_message_warning}</p>
-            <blockquote class="quote">{preview}</blockquote>
+            {preview}
             <div class="modal-actions">
                 <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
                 <button class="btn danger" on:click=confirm>{tr().delete}</button>
