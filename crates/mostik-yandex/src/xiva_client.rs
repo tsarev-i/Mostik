@@ -170,6 +170,11 @@ impl XivaClient {
                 match msg {
                     WsMessage::Binary(data) => match xiva::decode(&data) {
                         Ok(Frame::Rpc { seq, body, .. }) => {
+                            if crate::diag::traffic_logging() {
+                                crate::diag::traffic_log(
+                                    serde_json::json!({ "dir": "in", "via": "ws", "seq": seq, "body": body }),
+                                );
+                            }
                             if let Some(tx) = p.lock().ok().and_then(|mut m| m.remove(&seq)) {
                                 let _ = tx.send(body);
                             }
@@ -179,6 +184,11 @@ impl XivaClient {
                         // does not wait for the timeout. (Some pushes carry protobuf, not JSON:
                         // those are not read yet.)
                         Err(e) => {
+                            if let Some(seq) = xiva::rpc_seq(&data) {
+                                crate::diag::traffic_log(serde_json::json!({
+                                    "dir": "in", "via": "ws", "seq": seq, "error": e.to_string(), "hex": crate::diag::hex(&data)
+                                }));
+                            }
                             if let Some(tx) = xiva::rpc_seq(&data).and_then(|seq| p.lock().ok()?.remove(&seq)) {
                                 eprintln!("xiva: response of {} bytes not decoded: {e}", data.len());
                                 let _ = tx.send(serde_json::json!({ UNDECODED: e.to_string() }));
@@ -268,6 +278,11 @@ impl XivaClient {
             self.forget(seq);
             return Err(XivaError::Closed);
         }
+        if crate::diag::traffic_logging() {
+            crate::diag::traffic_log(serde_json::json!({
+                "dir": "out", "via": "ws", "seq": seq, "method": method, "body": serde_json::to_value(body).ok()
+            }));
+        }
         let sent = match xiva::encode_rpc(seq, method, body) {
             Ok(bytes) => self
                 .writer
@@ -289,6 +304,9 @@ impl XivaClient {
             },
             Ok(Err(_)) => Err(XivaError::Closed),
             Err(_) => {
+                crate::diag::traffic_log(
+                    serde_json::json!({ "dir": "in", "via": "ws", "seq": seq, "timeout": method }),
+                );
                 self.forget(seq);
                 // Maybe the connection is dead: then it is dropped and made again.
                 self.liveness.check();

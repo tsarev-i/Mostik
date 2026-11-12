@@ -20,13 +20,14 @@ use serde::{Deserialize, Serialize};
 use crate::model::{AttachmentKind, ChatId, Message, Timestamp, UserId};
 
 /// Name of the service chat that Mostik creates in an organization.
-pub const SERVICE_CHAT_NAME: &str = "mostik-shared";
-/// What marks the service chat in its description; the name alone could be anyone's group.
-pub const SERVICE_MARKER: &str = "mostik:shared:v1";
+pub const SERVICE_CHAT_NAME: &str = "mostik-service";
+/// What marks the service chat in its description; the name alone could be anyone's group. `v1`
+/// marked the chat `mostik-shared` with the alias `mostik-<org>`, which Mostik no longer uses.
+pub const SERVICE_MARKER: &str = "mostik:shared:v2";
 /// Description of a new service chat: a note for people who see it in the official client.
 pub const SERVICE_DESCRIPTION: &str = "Служебный чат Mostik: общие настройки и кастомные emoji. \
      Пожалуйста, не пишите сюда вручную. / Mostik service chat for shared settings and custom \
-     emoji. Please do not post here by hand. mostik:shared:v1";
+     emoji. Please do not post here by hand. mostik:shared:v2";
 
 /// The longest chat alias Telemost takes.
 pub const MAX_ALIAS: usize = 20;
@@ -35,7 +36,7 @@ pub const MAX_ALIAS: usize = 20;
 /// the public link of a chat), while its search finds only the chats the user is already in, so
 /// the alias is how colleagues find the chat.
 pub fn service_alias(org: u64) -> Option<String> {
-    Some(format!("mostik-{org}")).filter(|a| a.len() <= MAX_ALIAS)
+    Some(format!("mostiksvc-{org}")).filter(|a| a.len() <= MAX_ALIAS)
 }
 
 /// First reaction type of custom emoji ("M" in the high byte), far from Telemost's own types:
@@ -243,8 +244,8 @@ mod tests {
 
     #[test]
     fn aliases_fit_telemost() {
-        assert_eq!(service_alias(1234567).as_deref(), Some("mostik-1234567"));
-        assert_eq!(service_alias(9_999_999_999_999).map(|a| a.len()), Some(MAX_ALIAS));
+        assert_eq!(service_alias(1234567).as_deref(), Some("mostiksvc-1234567"));
+        assert_eq!(service_alias(9_999_999_999).map(|a| a.len()), Some(MAX_ALIAS));
         assert_eq!(service_alias(u64::MAX), None);
     }
 
