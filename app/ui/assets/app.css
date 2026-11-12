@@ -2047,19 +2047,12 @@ button.ws-tile { cursor: pointer; }
 .thread-meta { display: flex; gap: 10px; margin-top: 2px; font-size: 13px; color: var(--text-muted); }
 .thread-new { color: var(--badge); font-weight: 700; }
 
-/* ── Incoming call popup (its own window, like Slack's) ────────────── */
+/* ── Incoming call dialog (inside the main window, like the preferences) ── */
 
-.ring {
-  height: 100vh;
-  padding: 20px 20px 18px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  background: linear-gradient(160deg, var(--frame-a) 0%, var(--frame-b) 60%, var(--frame-c) 100%);
-  border: 1px solid var(--border-soft);
-  user-select: none;
-}
-.ring-caller { display: flex; align-items: center; gap: 14px; min-width: 0; }
+/* Above the other dialogs and the emoji picker: a ringing call comes first. */
+.modal-backdrop.ring-backdrop { z-index: 50; }
+.modal.ring-modal { width: min(400px, calc(100vw - 32px)); user-select: none; }
+.ring-caller { display: flex; align-items: center; gap: 14px; min-width: 0; margin: 20px 0 24px; }
 .ring-face { position: relative; flex: none; border-radius: 10px; }
 .ring-face::after {
   content: "";
@@ -2075,14 +2068,14 @@ button.ws-tile { cursor: pointer; }
 }
 .ring-text { min-width: 0; }
 .ring-name {
-  color: var(--chrome-strong);
+  color: var(--text-strong);
   font-size: 18px;
   font-weight: 900;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ring-sub { color: var(--sidebar-text); font-size: 14px; }
+.ring-sub { color: var(--text-muted); font-size: 14px; }
 .ring-actions { display: flex; gap: 10px; }
 .ring-btn {
   flex: 1;

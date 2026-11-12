@@ -1,23 +1,24 @@
-//! Incoming direct calls, like Slack's call popup: a small window on top of everything with the
-//! caller and "Decline" / "Accept", and a ringtone in a loop while the call rings.
+//! Incoming direct calls, like Slack's: a dialog in the main window with the caller and
+//! "Decline" / "Accept", and a ringtone in a loop while the call rings. The dialog stays inside
+//! the app, like the preferences, instead of popping up over other programs: a window out of
+//! focus asks for attention (a blinking taskbar button) instead.
 //!
 //! Telemost rings with a `MeetingCallingMessage.IncomingCall` push repeated every 5 s and stops
 //! with `RingingEnded` (the caller hung up, someone answered, maybe on another device, or nobody
-//! did in time). Mostik answers like the web client: `NotifyRinging` when the popup shows,
+//! did in time). Mostik answers like the web client: `NotifyRinging` when the dialog shows,
 //! `EndRinging` with "accepted" or "declined" on a button.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mostik_core::User;
 use mostik_yandex::wire::{self, EndRinging};
 use serde::Serialize;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, UserAttentionType};
 
-/// Label prefix of popup windows; each ringing gets a window of its own.
-pub const LABEL_PREFIX: &str = "ring-";
+/// The ringing call changed: [`Ring`] or `null`.
+pub const RING_EVENT: &str = "mostik://ring";
 
 /// Telemost repeats the ringing every 5 s: with no repeat for this long it has stopped ringing.
 const STALE: Duration = Duration::from_secs(12);
@@ -41,22 +42,20 @@ pub struct RingState(Mutex<Inner>);
 #[derive(Default)]
 struct Inner {
     current: Option<Ring>,
-    /// The popup of the current ringing.
-    window: Option<String>,
     last_push: Option<Instant>,
     /// Ringings already over: their late repeats must not ring again.
     over: VecDeque<String>,
 }
 
 impl Inner {
-    /// Ends the current ringing; returns it and its popup.
-    fn finish(&mut self) -> Option<(Ring, Option<String>)> {
+    /// Ends the current ringing and returns it.
+    fn finish(&mut self) -> Option<Ring> {
         let ring = self.current.take()?;
         self.over.push_back(ring.id.clone());
         if self.over.len() > 32 {
             self.over.pop_front();
         }
-        Some((ring, self.window.take()))
+        Some(ring)
     }
 
     fn rings(&self, id: &str) -> bool {
@@ -64,9 +63,7 @@ impl Inner {
     }
 }
 
-static WINDOWS: AtomicU64 = AtomicU64::new(0);
-
-/// A ringing push: the first one opens the popup and starts the ringtone, the repeats keep the
+/// A ringing push: the first one shows the dialog and starts the ringtone, the repeats keep the
 /// call ringing.
 pub fn incoming(app: &AppHandle, ring: Ring) {
     let state = app.state::<RingState>();
@@ -79,17 +76,13 @@ pub fn incoming(app: &AppHandle, ring: Ring) {
         return;
     }
     // Telemost rings one call at a time: a new one replaces the old.
-    let old = inner.finish().and_then(|(_, w)| w);
+    inner.finish();
     let id = ring.id.clone();
-    let label = format!("{LABEL_PREFIX}{}", WINDOWS.fetch_add(1, Ordering::SeqCst));
-    inner.current = Some(ring);
-    inner.window = Some(label.clone());
+    inner.current = Some(ring.clone());
     drop(inner);
-    if let Some(old) = old {
-        close(app, &old);
-    }
-    if let Err(e) = open_popup(app, &label) {
-        eprintln!("call popup not shown: {e}");
+    show(app, Some(&ring));
+    if ring.caller.avatar.is_none() {
+        complete_caller(app, ring);
     }
     let (ringer, rid) = (app.clone(), id.clone());
     std::thread::spawn(move || {
@@ -112,7 +105,7 @@ pub fn incoming(app: &AppHandle, ring: Ring) {
     });
 }
 
-/// The ringing `id` is over (`RingingEnded`): the popup closes, the ringtone stops.
+/// The ringing `id` is over (`RingingEnded`): the dialog closes, the ringtone stops.
 pub fn stop(app: &AppHandle, id: &str) {
     end_if(app, |r| r.id == id);
 }
@@ -124,20 +117,18 @@ pub fn call_ended(app: &AppHandle, url: &str) {
 
 fn end_if(app: &AppHandle, matches: impl Fn(&Ring) -> bool) -> Option<Ring> {
     let state = app.state::<RingState>();
-    let (ring, window) = {
+    let ring = {
         let mut inner = state.0.lock().ok()?;
         if !inner.current.as_ref().is_some_and(&matches) {
             return None;
         }
         inner.finish()?
     };
-    if let Some(w) = window {
-        close(app, &w);
-    }
+    show(app, None);
     Some(ring)
 }
 
-/// The user joins the call with link `url` (from the popup or "Join" in the chat): if that call
+/// The user joins the call with link `url` (from the dialog or "Join" in the chat): if that call
 /// is ringing, it stops ringing on all the user's devices.
 pub fn accept(app: &AppHandle, url: &str) {
     if let Some(ring) = end_if(app, |r| r.url == url) {
@@ -154,48 +145,41 @@ fn send_end(app: &AppHandle, id: String, reason: EndRinging) {
     });
 }
 
-fn open_popup(app: &AppHandle, label: &str) -> tauri::Result<()> {
-    let title = crate::backend::text(app, "Входящий звонок", "Incoming call");
-    let window = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html#ring".into()))
-        .title(title)
-        .inner_size(360.0, 196.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .visible_on_all_workspaces(true)
-        .center()
-        .focused(true)
-        .build()?;
-    crate::webview::harden(&window);
-    Ok(())
-}
-
-fn close(app: &AppHandle, label: &str) {
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.destroy();
+/// Shows the dialog of `ring` in the main window, or hides it. The window is not raised over other
+/// programs: out of focus, it asks for attention while the call rings.
+fn show(app: &AppHandle, ring: Option<&Ring>) {
+    let _ = app.emit(RING_EVENT, ring);
+    if let Some(w) = app.get_webview_window("main") {
+        let attention = ring.is_some() && !w.is_focused().unwrap_or(false);
+        let _ = w.request_user_attention(attention.then_some(UserAttentionType::Critical));
     }
 }
 
-/// The ringing call, for the popup that has just loaded. The caller's photo is looked up if the
-/// push did not bring it.
-#[tauri::command]
-pub async fn ring_info(app: AppHandle) -> Option<Ring> {
-    let mut ring = app.state::<RingState>().0.lock().ok()?.current.clone()?;
-    if ring.caller.avatar.is_none() {
-        ring.caller = crate::backend::with_profile(&app, ring.caller).await;
+/// The push may bring the caller without a name or photo: the dialog gets them from the directory.
+fn complete_caller(app: &AppHandle, ring: Ring) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let caller = crate::backend::with_profile(&app, ring.caller).await;
         let state = app.state::<RingState>();
-        if let Ok(mut inner) = state.0.lock()
-            && let Some(cur) = inner.current.as_mut().filter(|r| r.id == ring.id)
-        {
-            cur.caller = ring.caller.clone();
-        }
-    }
-    Some(ring)
+        let updated = {
+            let Ok(mut inner) = state.0.lock() else { return };
+            let Some(cur) = inner.current.as_mut().filter(|r| r.id == ring.id) else {
+                return;
+            };
+            cur.caller = caller;
+            cur.clone()
+        };
+        let _ = app.emit(RING_EVENT, Some(&updated));
+    });
 }
 
-/// "Accept" or "Decline" in the popup. Accepting opens the call like "Join" in the chat.
+/// The ringing call, for a main window that has just loaded.
+#[tauri::command]
+pub fn ring_info(app: AppHandle) -> Option<Ring> {
+    app.state::<RingState>().0.lock().ok()?.current.clone()
+}
+
+/// "Accept" or "Decline" in the dialog. Accepting opens the call like "Join" in the chat.
 #[tauri::command]
 pub async fn answer_ring(app: AppHandle, accept: bool) -> Result<(), String> {
     let ring = {
@@ -204,7 +188,7 @@ pub async fn answer_ring(app: AppHandle, accept: bool) -> Result<(), String> {
         inner.current.clone()
     };
     let Some(ring) = ring else {
-        // The caller hung up a moment ago: the popup is about to close anyway.
+        // The caller hung up a moment ago: the dialog is about to close anyway.
         return Ok(());
     };
     if !accept {

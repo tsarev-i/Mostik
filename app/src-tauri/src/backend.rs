@@ -1114,13 +1114,13 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             {
                 sh.my_availability = p.availability;
             }
-            // A call rings with a popup and a ringtone instead of a notification.
+            // A call rings with a dialog in the main window and a ringtone instead of a notification.
             if let LiveEvent::Upsert { message, author, .. } = &ev {
                 match (&message.call, &ringing) {
                     (Some(CallNote::Ringing { url }), Some(convert::Ringing::Incoming { id }))
                         if may_ring(app, shared, message) =>
                     {
-                        // The popup asks the directory for a name the push did not bring.
+                        // The dialog gets a name the push did not bring from the directory.
                         let caller = author.clone().unwrap_or_else(|| stand_in(message.author.clone()));
                         let ring = crate::ring::Ring {
                             id: id.clone(),

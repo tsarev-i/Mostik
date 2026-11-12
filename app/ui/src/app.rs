@@ -103,6 +103,8 @@ pub struct Ctx {
     pub now: RwSignal<f64>,
     /// The call window that is open now, shown at the bottom of the sidebar like a Slack huddle.
     pub call: RwSignal<Option<bridge::CallInfo>>,
+    /// A call ringing for the user: the incoming call dialog shows while it is set.
+    pub ring: RwSignal<Option<bridge::Ring>>,
     /// Calls going on in chats (from their call notes), with the meeting links.
     pub active_calls: Memo<std::collections::BTreeMap<ChatId, String>>,
     /// Followed threads with their unread replies, newest first.
@@ -464,6 +466,7 @@ pub fn App() -> impl IntoView {
         search: RwSignal::new(String::new()),
         now: RwSignal::new(js_sys::Date::now()),
         call: RwSignal::new(None),
+        ring: RwSignal::new(None),
         active_calls: Memo::new(move |_| snap.with(Snapshot::active_calls)),
         threads: RwSignal::new(vec![]),
         picked: RwSignal::new(Default::default()),
@@ -693,6 +696,11 @@ pub fn App() -> impl IntoView {
         if e.key() != "Escape" {
             return;
         }
+        // A ringing call is answered with its buttons; Esc must not close a dialog under it.
+        if c.ring.with_untracked(Option::is_some) {
+            e.prevent_default();
+            return;
+        }
         let popup = c.menu.get_untracked().is_some()
             || c.ctx_menu.with_untracked(Option::is_some)
             || c.picker.get_untracked().is_some()
@@ -818,6 +826,9 @@ pub fn App() -> impl IntoView {
         {move || c.confirm_leave.get().map(|id| view! { <LeaveDialog id=id/> })}
         {move || c.folder_edit.get().map(|edit| view! { <FolderDialog edit=edit/> })}
         {move || c.adding_emoji.get().then(|| view! { <AddEmojiDialog/> })}
+        <Show when=move || c.ring.with(Option::is_some)>
+            <crate::ring::RingDialog ring=c.ring/>
+        </Show>
         // Toasts stack at the bottom instead of covering each other.
         <div class="toasts">
             {move || c.error.get().map(|e| view! {

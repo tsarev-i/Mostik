@@ -1509,6 +1509,11 @@ pub fn subscribe(c: Ctx) {
         if let Ok(call) = bridge::current_call().await {
             c.call.set(call);
         }
+        bridge::listen(bridge::RING_EVENT, move |ring: Option<bridge::Ring>| c.ring.set(ring)).await;
+        // A call may have started ringing before the subscription.
+        if let Ok(ring) = bridge::ring_info().await {
+            c.ring.set(ring);
+        }
         bridge::listen(bridge::SIGNED_OUT_EVENT, move |reason: String| {
             c.phase.set(Phase::Login { reason: Some(reason) });
         })

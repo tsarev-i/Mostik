@@ -138,6 +138,8 @@ pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
 /// The current call changed: [`CallInfo`] or `null`.
 pub const CALL_EVENT: &str = "mostik://call";
+/// The call ringing for the user changed: [`Ring`] or `null`.
+pub const RING_EVENT: &str = "mostik://ring";
 
 /// Mirror of the backend `CallInfo`: the call window that is open now.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -836,7 +838,7 @@ pub async fn leave_call() -> Result<(), String> {
     call("leave_call", NoArgs {}).await
 }
 
-/// A call ringing for the user, for the popup (mirror of the backend `ring::Ring`).
+/// A call ringing for the user, for the incoming call dialog (mirror of the backend `ring::Ring`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ring {
@@ -852,7 +854,7 @@ struct AnswerArgs {
     accept: bool,
 }
 
-/// "Accept" or "Decline" in the popup.
+/// "Accept" or "Decline" in the incoming call dialog.
 pub async fn answer_ring(accept: bool) -> Result<(), String> {
     call("answer_ring", AnswerArgs { accept }).await
 }
