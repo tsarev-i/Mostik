@@ -78,27 +78,6 @@ pub fn id_pattern(id: &str) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn shape_hides_values_and_merges_items() {
-        let v = json!({"a": "secret", "list": [{"x": 1}, {"y": true}]});
-        assert_eq!(
-            shape(&v),
-            json!({"a": "string", "list": {"len": 2, "item": {"x": "number", "y": "bool"}}})
-        );
-    }
-
-    #[test]
-    fn id_patterns() {
-        assert_eq!(id_pattern("0/0/00000000-0000-4000-8000-000000000001"), "0/0/<hex36>");
-        assert_eq!(id_pattern("abc_def"), "<hex3>_<hex3>");
-        assert_eq!(id_pattern("chat_x9"), "<str4>_<str2>");
-    }
-}
-
 /// Whether `MOSTIK_PUSH_LOG=<file>` asks for a traffic log (protocol research only: the file
 /// holds message texts and names).
 pub fn traffic_logging() -> bool {
@@ -127,4 +106,25 @@ pub fn traffic_log(mut record: Value) {
 /// Bytes as a hex string, for bodies that are not JSON.
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shape_hides_values_and_merges_items() {
+        let v = json!({"a": "secret", "list": [{"x": 1}, {"y": true}]});
+        assert_eq!(
+            shape(&v),
+            json!({"a": "string", "list": {"len": 2, "item": {"x": "number", "y": "bool"}}})
+        );
+    }
+
+    #[test]
+    fn id_patterns() {
+        assert_eq!(id_pattern("0/0/00000000-0000-4000-8000-000000000001"), "0/0/<hex36>");
+        assert_eq!(id_pattern("abc_def"), "<hex3>_<hex3>");
+        assert_eq!(id_pattern("chat_x9"), "<str4>_<str2>");
+    }
 }
