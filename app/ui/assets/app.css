@@ -1172,8 +1172,10 @@ button:disabled { opacity: 0.4; cursor: default; }
 .me-menu > button { width: 100%; padding: 6px 20px; text-align: left; }
 .me-menu > button:hover { background: #1264a3; color: #fff; }
 
-.modal.prefs { width: min(760px, calc(100vw - 32px)); }
-.prefs-body { display: flex; gap: 24px; margin-top: 16px; min-height: 260px; }
+/* A long section (say, many custom emoji) scrolls inside the dialog instead of leaving the window. */
+.modal.prefs { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; }
+.prefs-body { display: flex; gap: 24px; margin-top: 16px; min-height: 260px; flex: 1 1 auto; }
+.modal.prefs .prefs-section { overflow-y: auto; }
 /* As wide as its longest item (Russian ones are longer), so that no item wraps. */
 .prefs-nav { min-width: 200px; flex: none; }
 .prefs-nav button {
