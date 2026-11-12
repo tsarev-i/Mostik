@@ -171,6 +171,14 @@ struct SendArgs<'a> {
     chat_id: &'a str,
     text: &'a str,
     thread: Option<Timestamp>,
+    reply: Option<ReplyRef<'a>>,
+}
+
+/// The message a sent one replies to, in the same chat or thread, and the quoted fragment.
+#[derive(Serialize)]
+pub struct ReplyRef<'a> {
+    pub ts: Timestamp,
+    pub quote: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -308,8 +316,22 @@ pub async fn mark_thread_read(chat_id: &str, parent: Timestamp, ts: Timestamp, s
     .await
 }
 
-pub async fn send_message(chat_id: &str, text: &str, thread: Option<Timestamp>) -> Result<Message, String> {
-    call("send_message", SendArgs { chat_id, text, thread }).await
+pub async fn send_message(
+    chat_id: &str,
+    text: &str,
+    thread: Option<Timestamp>,
+    reply: Option<ReplyRef<'_>>,
+) -> Result<Message, String> {
+    call(
+        "send_message",
+        SendArgs {
+            chat_id,
+            text,
+            thread,
+            reply,
+        },
+    )
+    .await
 }
 
 pub async fn edit_message(m: &Message, text: &str) -> Result<(), String> {

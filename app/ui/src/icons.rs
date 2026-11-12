@@ -55,6 +55,8 @@ pub enum I {
     Phone,
     PhoneOff,
     Download,
+    /// Reply to a message: an arrow turning back.
+    Reply,
 }
 
 fn paths(i: I) -> &'static str {
@@ -157,6 +159,7 @@ fn paths(i: I) -> &'static str {
         I::Download => {
             r#"<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>"#
         }
+        I::Reply => r#"<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>"#,
     }
 }
 

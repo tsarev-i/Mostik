@@ -188,6 +188,12 @@ pub struct Tr {
     pub unmark_important: &'static str,
     pub download_and_open: &'static str,
     pub copy_text: &'static str,
+    pub reply: &'static str,
+    pub quote_selection: &'static str,
+    pub copy_selection: &'static str,
+    pub cancel_reply: &'static str,
+    pub go_to_original: &'static str,
+    pub reply_deleted: &'static str,
     pub copy_name: &'static str,
     pub view_channel_details: &'static str,
     pub view_full_profile: &'static str,
@@ -571,6 +577,12 @@ pub static RU: Tr = Tr {
     unmark_important: "Снять отметку «Важное»",
     download_and_open: "Скачать и открыть",
     copy_text: "Скопировать текст",
+    reply: "Ответить",
+    quote_selection: "Цитировать выделенное",
+    copy_selection: "Скопировать выделенное",
+    cancel_reply: "Отменить ответ",
+    go_to_original: "Перейти к сообщению",
+    reply_deleted: "Сообщение удалено",
     copy_name: "Копировать название",
     view_channel_details: "Открыть сведения о канале",
     view_full_profile: "Открыть полный профиль",
@@ -952,6 +964,12 @@ pub static EN: Tr = Tr {
     unmark_important: "Remove “Important”",
     download_and_open: "Download and open",
     copy_text: "Copy text",
+    reply: "Reply",
+    quote_selection: "Quote selection",
+    copy_selection: "Copy selection",
+    cancel_reply: "Cancel reply",
+    go_to_original: "Go to message",
+    reply_deleted: "Message deleted",
     copy_name: "Copy name",
     view_channel_details: "View channel details",
     view_full_profile: "View full profile",
@@ -1319,6 +1337,21 @@ impl Tr {
                 format!("{n} {word}")
             }
             Lang::En => format!("{n} member{}", if n == 1 { "" } else { "s" }),
+        }
+    }
+
+    /// The reply bar above the message field.
+    pub fn replying_to(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Ответ: {name}"),
+            Lang::En => format!("Replying to {name}"),
+        }
+    }
+
+    pub fn quoting(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Цитата: {name}"),
+            Lang::En => format!("Quoting {name}"),
         }
     }
 

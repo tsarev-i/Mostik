@@ -205,6 +205,14 @@ impl Message {
     pub fn is_ringing(&self) -> bool {
         matches!(self.call, Some(CallNote::Ringing { .. }))
     }
+
+    /// The message this one replies to, with the quoted fragment if there is one.
+    pub fn reply_to(&self) -> Option<&Forwarded> {
+        match self.forwarded.as_slice() {
+            [f] if f.reply => Some(f),
+            _ => None,
+        }
+    }
 }
 
 /// A call in the chat started or ended, like Slack's huddle messages. `url` is the meeting link.
@@ -295,6 +303,13 @@ pub struct Forwarded {
     pub text: String,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// The fragment of the original the sender quoted (`ForwardedMessageStyles[].Quote`).
+    #[serde(default)]
+    pub quote: Option<String>,
+    /// The message replies to this one rather than forwards it: Telemost sends a reply as the
+    /// only forwarded message from the same chat or thread, or as a quoted one.
+    #[serde(default)]
+    pub reply: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,6 +664,28 @@ mod tests {
             forwarded: vec![],
             call: None,
         }
+    }
+
+    #[test]
+    fn reply_is_the_only_forwarded_message_marked_as_reply() {
+        let fwd = |reply: bool| Forwarded {
+            author: UserId("u2".into()),
+            author_name: String::new(),
+            ts: 5,
+            chat_id: Some(ChatId("c".into())),
+            text: "original".into(),
+            attachments: vec![],
+            quote: None,
+            reply,
+        };
+        let with = |forwarded| Message {
+            forwarded,
+            ..msg("u1", 10)
+        };
+        assert_eq!(with(vec![fwd(true)]).reply_to().map(|f| f.ts), Some(5));
+        assert!(with(vec![fwd(false)]).reply_to().is_none());
+        assert!(with(vec![fwd(true), fwd(true)]).reply_to().is_none());
+        assert!(msg("u1", 10).reply_to().is_none());
     }
 
     #[test]
