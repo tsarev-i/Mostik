@@ -2013,7 +2013,6 @@ button.ws-tile { cursor: pointer; }
 .msg.editing .msg-head { display: none; }
 /* Markup in a message field shows as it will look; markers are hidden but stay in the text. */
 .editor .mk { display: none; }
-.editor .mk.shown { display: inline; color: var(--text-muted); }
 .editor .f-bold { font-weight: 700; color: var(--text-strong); }
 .editor .f-italic { font-style: italic; }
 .editor .f-strike { text-decoration: line-through; }
@@ -2021,6 +2020,18 @@ button.ws-tile { cursor: pointer; }
 .editor .f-code, .editor .f-code-block { font-family: var(--mono); font-size: 0.9em; color: var(--code-text); }
 .editor .f-code { padding: 1px 3px; border-radius: 3px; background: var(--border-soft); }
 .editor .f-link { color: var(--link); }
+/* A code block, as in Slack: a grey monospace block, like the one in a message. */
+.editor .f-code-block {
+  display: block;
+  margin: 4px 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  line-height: 1.5;
+}
+:root[data-mode="light"] .editor .f-code-block { background: #f8f8f8; }
 .btn.small { height: 28px; padding: 0 12px; font-size: 13px; }
 /* “Mentions” (Activity). */
 .act-tabs { display: flex; gap: 4px; padding: 4px 12px 8px; flex-wrap: wrap; }

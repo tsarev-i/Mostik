@@ -386,6 +386,10 @@ const EDIT_PAIRS: &[(&str, Mark)] = &[
 
 /// Splits the text of the message field into plain text and marked spans, the same markup as
 /// [`parse_blocks`] and [`parse_inline`] read.
+///
+/// The markers of a code block take the line breaks a message drops around its code: after the
+/// opening fence, before the closing one and after it, so the block shown in the field neither
+/// starts nor ends with an empty line. A break that is all the block holds stays in it.
 pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
     let mut out = Vec::new();
     let mut plain_start = 0;
@@ -396,7 +400,11 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
         if let Some(after) = rest.strip_prefix("```")
             && let Some(end) = after.find("```")
         {
-            found = Some((Mark::CodeBlock, "```", end, "```"));
+            let body = &after[..end];
+            let lead = usize::from(body.len() > 1 && body.starts_with('\n'));
+            let trail = usize::from(body.len() - lead > 1 && body.ends_with('\n'));
+            let next = usize::from(after[end + 3..].starts_with('\n'));
+            found = Some((Mark::CodeBlock, 3 + lead, end - lead - trail, trail + 3 + next));
         }
         if found.is_none() {
             for (marker, kind) in EDIT_PAIRS {
@@ -404,15 +412,13 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
                     && let Some(end) = after.find(marker)
                     && end > 0
                 {
-                    found = Some((*kind, *marker, end, *marker));
+                    found = Some((*kind, marker.len(), end, marker.len()));
                     break;
                 }
             }
         }
-        let span = match found {
-            Some((kind, open, end, close)) => Some((kind, open, &rest[open.len()..open.len() + end], close)),
-            None => md_link(rest).map(|(t, _, len)| (Mark::Link, "[", &rest[1..1 + t.len()], &rest[1 + t.len()..len])),
-        };
+        // Lengths in bytes of the opening marker, the text and the closing marker.
+        let span = found.or_else(|| md_link(rest).map(|(t, _, len)| (Mark::Link, 1, t.len(), len - 1 - t.len())));
         let Some((kind, open, inner, close)) = span else {
             i += rest.chars().next().map_or(1, char::len_utf8);
             continue;
@@ -420,15 +426,13 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
         if plain_start < i {
             out.push(EditSpan::Plain(&text[plain_start..i]));
         }
-        let open = &rest[..open.len()];
-        let close = &rest[open.len() + inner.len()..open.len() + inner.len() + close.len()];
         out.push(EditSpan::Marked {
             kind,
-            open,
-            inner,
-            close,
+            open: &rest[..open],
+            inner: &rest[open..open + inner],
+            close: &rest[open + inner..open + inner + close],
         });
-        i += open.len() + inner.len() + close.len();
+        i += open + inner + close;
         plain_start = i;
     }
     if plain_start < text.len() {
@@ -509,6 +513,7 @@ mod tests {
         for text in [
             "a **b** c __d__ ~~e~~ ++f++ `g` [h](https://x.y) i",
             "```\nfn x() {}\n``` after",
+            "a\n```\nx\n\n```\nb ```\n``` ``````",
             "**** ** unclosed __x",
             "Привет, **мир** 👋",
             "",
@@ -547,6 +552,33 @@ mod tests {
             }
         );
         assert_eq!(edit_spans("****"), vec![EditSpan::Plain("****")]);
+    }
+
+    #[test]
+    fn code_block_markers_take_its_line_breaks() {
+        let block = |open, inner, close| EditSpan::Marked {
+            kind: Mark::CodeBlock,
+            open,
+            inner,
+            close,
+        };
+        assert_eq!(
+            edit_spans("a\n```\nlet x;\n```\nb"),
+            vec![
+                EditSpan::Plain("a\n"),
+                block("```\n", "let x;", "\n```\n"),
+                EditSpan::Plain("b")
+            ]
+        );
+        // An empty line typed at the end of the code stays in it.
+        assert_eq!(edit_spans("```\nx\n\n```"), vec![block("```\n", "x\n", "\n```")]);
+        // A block of one empty line (the button with nothing selected) keeps it for the caret.
+        assert_eq!(edit_spans("```\n\n```"), vec![block("```\n", "\n", "```")]);
+        assert_eq!(edit_spans("```\n```"), vec![block("```", "\n", "```")]);
+        assert_eq!(
+            edit_spans("```a``` b"),
+            vec![block("```", "a", "```"), EditSpan::Plain(" b")]
+        );
     }
 
     use super::Inline::*;

@@ -1,6 +1,7 @@
 //! The message field: a plain-text `contenteditable` block that shows custom emoji as images and
-//! markup as it will look (bold as bold, markers hidden), as Slack's composer does, while its text
-//! keeps them as `:name:` and `**…**`. A textarea cannot show either.
+//! markup as it will look (bold as bold, a link as its caption, a code block as a grey block,
+//! markers hidden), as Slack's composer does, while its text keeps them as `:name:`, `**…**` and
+//! `[caption](address)`. A textarea cannot show either.
 //!
 //! The field's text is what [`value`] reads back: text as is, an emoji image as its code, a line
 //! break as `\n`. Offsets are UTF-16 units of that text, the same units a textarea's selection uses.
@@ -100,7 +101,7 @@ pub fn selection(el: &HtmlElement) -> (Option<u32>, Option<u32>) {
     )
 }
 
-/// Class of the hidden markers of bold, italic and the like.
+/// Class of the hidden markers: `**` of bold, the address of a link, the fences of a code block.
 const MARKER: &str = "mk";
 
 /// Appends `text` to `parent`, with the codes for which `emoji` gives an image URL as images.
@@ -138,20 +139,46 @@ fn mark_class(kind: Mark) -> &'static str {
     }
 }
 
-/// Markers that stay visible: code block fences and link addresses, which are edited by hand.
-fn marker_class(kind: Mark) -> &'static str {
-    match kind {
-        Mark::CodeBlock | Mark::Link => "mk shown",
-        _ => MARKER,
+/// Whether a marked text ends with a tail `<br>`: code whose last line is empty, which shows only
+/// with something after it. A lone line break is the one empty line of a new block.
+fn inner_tail(kind: Mark, inner: &str) -> bool {
+    kind == Mark::CodeBlock && inner.len() > 1 && inner.ends_with('\n')
+}
+
+/// Whether the field ends with a tail `<br>`: after a line break, which shows only with something
+/// after it, and after a code block, to give the caret a line under the block.
+fn field_tail(text: &str, spans: &[EditSpan]) -> bool {
+    text.ends_with('\n')
+        || matches!(
+            spans.last(),
+            Some(EditSpan::Marked {
+                kind: Mark::CodeBlock,
+                ..
+            })
+        )
+}
+
+fn append_tail(doc: &web_sys::Document, parent: &Node) {
+    if let Ok(br) = doc.create_element("br") {
+        let _ = br.set_attribute("class", TAIL);
+        let _ = parent.append_child(&br);
     }
 }
 
-/// Fills the field with `text`: markup shows as it will look (bold as bold and so on) with its
-/// markers hidden, and the codes for which `emoji` gives an image URL show as images.
+/// Fills the field with `text`: markup shows as it will look (bold as bold, a link as its caption
+/// with the address in its tooltip and so on) with its markers hidden, and the codes for which
+/// `emoji` gives an image URL show as images.
 pub fn render(el: &HtmlElement, text: &str, emoji: &dyn Fn(&str) -> Option<String>) {
     el.set_inner_html("");
     let Some(doc) = el.owner_document() else { return };
     let spans = edit_spans(text);
+    let span_of = |class: &str, part: &str| {
+        let span = doc.create_element("span").ok()?;
+        let _ = span.set_attribute("class", class);
+        append_text(&doc, &span, part, emoji);
+        let _ = el.append_child(&span);
+        Some(span)
+    };
     for (i, span) in spans.iter().enumerate() {
         match *span {
             EditSpan::Plain(t) => append_text(&doc, el, t, emoji),
@@ -161,19 +188,24 @@ pub fn render(el: &HtmlElement, text: &str, emoji: &dyn Fn(&str) -> Option<Strin
                 inner,
                 close,
             } => {
-                for (class, part) in [
-                    (marker_class(kind), open),
-                    (mark_class(kind), inner),
-                    (marker_class(kind), close),
-                ] {
-                    if let Ok(span) = doc.create_element("span") {
-                        let _ = span.set_attribute("class", class);
-                        append_text(&doc, &span, part, emoji);
-                        let _ = el.append_child(&span);
+                span_of(MARKER, open);
+                if let Some(shown) = span_of(mark_class(kind), inner) {
+                    if kind == Mark::Link
+                        && let Some(address) = close.strip_prefix("](").and_then(|c| c.strip_suffix(')'))
+                    {
+                        let _ = shown.set_attribute("title", address);
+                    }
+                    if inner_tail(kind, inner) {
+                        append_tail(&doc, &shown);
                     }
                 }
+                span_of(MARKER, close);
+                // A code block is a block: the caret has its own lines around it.
                 let plain_next = matches!(spans.get(i + 1), Some(EditSpan::Plain(t)) if !t.starts_with('\n'));
-                if !plain_next && let Ok(gap) = doc.create_element("span") {
+                if kind != Mark::CodeBlock
+                    && !plain_next
+                    && let Ok(gap) = doc.create_element("span")
+                {
                     let _ = gap.set_attribute("class", GAP);
                     gap.set_text_content(Some(&ZWSP.to_string()));
                     let _ = el.append_child(&gap);
@@ -181,18 +213,19 @@ pub fn render(el: &HtmlElement, text: &str, emoji: &dyn Fn(&str) -> Option<Strin
             }
         }
     }
-    if text.ends_with('\n')
-        && let Ok(br) = doc.create_element("br")
-    {
-        let _ = br.set_attribute("class", TAIL);
-        let _ = el.append_child(&br);
+    if field_tail(text, &spans) {
+        append_tail(&doc, el);
     }
 }
 
-/// What the field is made of: plain runs and spans as `(class, text)`, in order; `None` when the
-/// browser added something of its own (blocks, line breaks), so it needs rendering again.
-fn shape(el: &HtmlElement) -> Option<Vec<(String, String)>> {
-    let mut out: Vec<(String, String)> = Vec::new();
+/// A plain run or a span of the field: its class (empty for plain text), its text and whether it
+/// ends with a tail `<br>`.
+type Piece = (String, String, bool);
+
+/// What the field is made of: plain runs and spans, in order; `None` when the browser added
+/// something of its own (blocks, line breaks), so it needs rendering again.
+fn shape(el: &HtmlElement) -> Option<Vec<Piece>> {
+    let mut out: Vec<Piece> = Vec::new();
     let mut plain = String::new();
     let children = el.child_nodes();
     for i in 0..children.length() {
@@ -209,11 +242,14 @@ fn shape(el: &HtmlElement) -> Option<Vec<(String, String)>> {
                     }
                     "SPAN" => {
                         if !plain.is_empty() {
-                            out.push((String::new(), std::mem::take(&mut plain)));
+                            out.push((String::new(), std::mem::take(&mut plain), false));
                         }
                         let mut t = String::new();
                         text_of(&n, &mut t);
-                        out.push((e.class_name(), t));
+                        let tail = e
+                            .last_element_child()
+                            .is_some_and(|b| b.tag_name() == "BR" && b.class_list().contains(TAIL));
+                        out.push((e.class_name(), t, tail));
                     }
                     _ => return None,
                 }
@@ -222,26 +258,26 @@ fn shape(el: &HtmlElement) -> Option<Vec<(String, String)>> {
         }
     }
     if !plain.is_empty() {
-        out.push((String::new(), plain));
+        out.push((String::new(), plain, false));
     }
     Some(out)
 }
 
-/// The shape [`render`] gives `text`.
-fn shape_of(text: &str) -> Vec<(String, String)> {
+/// The shape [`render`] gives `spans`.
+fn shape_of(spans: &[EditSpan]) -> Vec<Piece> {
     let mut out = Vec::new();
-    for span in edit_spans(text) {
-        match span {
-            EditSpan::Plain(t) => out.push((String::new(), t.to_owned())),
+    for span in spans {
+        match *span {
+            EditSpan::Plain(t) => out.push((String::new(), t.to_owned(), false)),
             EditSpan::Marked {
                 kind,
                 open,
                 inner,
                 close,
             } => {
-                out.push((marker_class(kind).to_owned(), open.to_owned()));
-                out.push((mark_class(kind).to_owned(), inner.to_owned()));
-                out.push((marker_class(kind).to_owned(), close.to_owned()));
+                out.push((MARKER.to_owned(), open.to_owned(), false));
+                out.push((mark_class(kind).to_owned(), inner.to_owned(), inner_tail(kind, inner)));
+                out.push((MARKER.to_owned(), close.to_owned(), false));
             }
         }
     }
@@ -278,14 +314,20 @@ fn leaves(node: &Node, hidden: bool, out: &mut Vec<(Node, u32, bool, u32)>) {
                     "BR" if e.class_list().contains(TAIL) => out.push((n, 0, hidden, 0)),
                     "BR" => out.push((n, 1, hidden, 0)),
                     _ => {
-                        let hide = hidden || (e.class_list().contains(MARKER) && !e.class_list().contains("shown"));
-                        leaves(&n, hide, out);
+                        leaves(&n, hidden || e.class_list().contains(MARKER), out);
                     }
                 }
             }
             _ => {}
         }
     }
+}
+
+/// Whether `node` is the tail `<br>` of the field itself, which takes the offsets past the end; the
+/// tail of a code block is in its span.
+fn is_field_tail(el: &HtmlElement, node: &Node) -> bool {
+    node.unchecked_ref::<Element>().class_list().contains(TAIL)
+        && node.parent_node().is_some_and(|p| el.is_same_node(Some(&p)))
 }
 
 /// The DOM position of text offset `at` in a field filled by [`render`]: never inside a hidden
@@ -303,7 +345,7 @@ fn position(el: &HtmlElement, at: u32) -> Option<(Node, u32)> {
             if at <= acc + len {
                 return Some((n, at.saturating_sub(acc) + skew));
             }
-        } else if at <= acc || n.unchecked_ref::<Element>().class_list().contains(TAIL) {
+        } else if at <= acc || is_field_tail(el, &n) {
             let parent = n.parent_node()?;
             let children = parent.child_nodes();
             let index = (0..children.length()).find(|&i| children.item(i).as_ref() == Some(&n))?;
@@ -373,12 +415,12 @@ pub fn tidy(el: &HtmlElement, emoji: &dyn Fn(&str) -> Option<String>) -> String 
                 .iter()
                 .any(|p| matches!(p, mostik_core::custom_emoji::Piece::Emoji(_)))
     });
-    // A trailing line break shows only with the tail `<br>` after it.
     let children = el.child_nodes();
     let tail = children.item(children.length().saturating_sub(1)).is_some_and(|n| {
         n.node_type() == Node::ELEMENT_NODE && n.unchecked_ref::<Element>().class_list().contains(TAIL)
     });
-    if !codes && text.ends_with('\n') == tail && shape(el).is_some_and(|s| s == shape_of(&text)) {
+    let spans = edit_spans(&text);
+    if !codes && field_tail(&text, &spans) == tail && shape(el).is_some_and(|s| s == shape_of(&spans)) {
         return text;
     }
     let caret = selection(el).0;
