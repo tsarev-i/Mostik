@@ -59,6 +59,10 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                         </button>
                     })}
                     {move || {
+                        // There is no one to call in the chat with oneself.
+                        if info.with(|i| i.as_ref().is_some_and(|(ch, _, _)| matches!(ch.kind, ChatKind::Notes))) {
+                            return None;
+                        }
                         // A call going on in the chat turns the button into "Join", as in Slack,
                         // unless the user is already in it.
                         let current = c.current.get();
@@ -69,7 +73,7 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                             (true, None) => tr().call_live_hint.to_owned(),
                             _ => tr().call_hint.to_owned(),
                         };
-                        view! {
+                        Some(view! {
                             <button class="huddle-btn" class:live=live class:active=joined
                                 title=title
                                 on:click=move |_| ops::start_call(c, c.current.get_untracked())>
@@ -80,7 +84,7 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                                 }}
                                 <span>{if live { tr().call_join } else { tr().call }}</span>
                             </button>
-                        }
+                        })
                     }}
                 </div>
             </div>
