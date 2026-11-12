@@ -120,7 +120,8 @@ until then Noto Sans is used.
   `/j/<id>`), without the messenger and the Yandex 360 bar. Leaving the meeting closes the window, and a
   leftover "In meeting" status is cleared. WebKitGTK has no WebRTC, so on Linux the window is an
   installed Chromium-based browser in app mode driven over a DevTools pipe (`call.rs`, `cdp.rs`); on Windows
-  it is a WebView2 window.
+  it is a WebView2 window. On macOS, and on Linux without such a browser, the call opens in the default
+  browser instead, with no call window or sidebar call line.
 - A call is one line in its chat, as a huddle is in Slack: who started it, how many are in it now
   (`StateSync` `meeting_updated`) and "Join"; once over, how long it lasted (`DurationSeconds` of a direct
   call, the time since the start for a group one). A group call started outside a chat gets a temporary

@@ -32,8 +32,9 @@ use crate::{call, login, store};
 
 pub mod service;
 
-/// UA of the embedded WebKitGTK; the unofficial client label is appended to it.
-const WEBVIEW_UA: &str =
+/// The browser `User-Agent` of every request, the same on all platforms (that of WebKitGTK on
+/// Linux); the unofficial client label is appended to it.
+const BROWSER_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/60.5 Safari/605.1.15";
 
 /// Live event for the UI.
@@ -370,7 +371,7 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
     let jar = live.as_ref().map(|l| l.web.jar().clone()).or_else(store::load);
     drop(live);
     let revoked = match jar {
-        Some(jar) => passport::logout(&jar, &identity::user_agent(WEBVIEW_UA))
+        Some(jar) => passport::logout(&jar, &identity::user_agent(BROWSER_UA))
             .await
             .map_err(|e| {
                 format!(
@@ -2954,7 +2955,7 @@ async fn connect_inner(
     generation: u64,
     probe: &mut Value,
 ) -> Result<(Snapshot, Live), ConnectError> {
-    let ua = identity::user_agent(WEBVIEW_UA);
+    let ua = identity::user_agent(BROWSER_UA);
     probe["cookies"] = json!(
         jar.cookies
             .iter()

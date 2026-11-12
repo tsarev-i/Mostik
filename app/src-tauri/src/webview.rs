@@ -7,8 +7,9 @@
 //! Linux and Windows; on macOS the system menu stays as it is, and [`is_app_url`] keeps its
 //! "Open Link" from taking over the window (new windows and downloads are refused there anyway).
 //!
-//! Developer tools are enabled only in debug builds with `MOSTIK_DEVTOOLS=1`
-//! (Slack's `SLACK_DEVELOPER_MENU` works the same way): then "Inspect Element" returns to the menu.
+//! Developer tools exist only in debug builds; with `MOSTIK_DEVTOOLS=1` (Slack's
+//! `SLACK_DEVELOPER_MENU` works the same way) "Inspect Element" returns to the menu on Linux and
+//! Windows.
 
 use tauri::{Runtime, Url, WebviewWindow};
 

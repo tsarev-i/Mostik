@@ -5,9 +5,10 @@
 //! Linux Mostik starts an installed Chromium-based browser in app mode: a window without tabs
 //! or an address bar, with a throwaway profile, driven over a DevTools pipe (`cdp.rs`). The
 //! session cookies are put into that profile, so the user does not sign in again. The profile
-//! lives in memory (`$XDG_RUNTIME_DIR`) and is deleted when the call ends, at sign-out and when
-//! Mostik exits. On Windows the call window is a private WebView2 window, whose cookies never
-//! reach the disk. Without such a browser the call opens in the default browser, as before.
+//! lives in memory (`$XDG_RUNTIME_DIR`; on disk only on a system without one) and is deleted when
+//! the call ends, at sign-out and when Mostik exits. On Windows the call window is a private
+//! WebView2 window, whose cookies never reach the disk. On macOS, and on Linux without such a
+//! browser, the call opens in the default browser.
 //!
 //! One call at a time, as in Slack. The UI learns about the current call from [`CALL_EVENT`]
 //! and shows it at the bottom of the sidebar.

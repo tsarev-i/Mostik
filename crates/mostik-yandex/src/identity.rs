@@ -1,7 +1,7 @@
 //! How Mostik introduces itself to Yandex servers.
 //!
-//! The client does not hide itself: its name and version are always appended to the `User-Agent`
-//! of the embedded webview, the way desktop clients like Slack do.
+//! The client does not hide itself: its name and version are always appended to the browser
+//! `User-Agent` it sends, the way desktop clients like Slack do.
 
 pub const CLIENT_NAME: &str = "Mostik";
 pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -11,7 +11,7 @@ pub fn ua_suffix() -> String {
     format!("{CLIENT_NAME}/{CLIENT_VERSION}")
 }
 
-/// `User-Agent` for requests: the embedded webview UA plus the Mostik suffix.
+/// `User-Agent` for requests: the browser UA plus the Mostik suffix.
 pub fn user_agent(webview_ua: &str) -> String {
     let base = webview_ua.trim();
     if base.is_empty() {
