@@ -14,7 +14,7 @@ use crate::{bridge, ops, time};
 
 use super::avatar::{Avatar, display_title, status_badge};
 use super::composer::InlineEditor;
-use super::feed::{FeedCtx, feed_names};
+use super::feed::feed_names;
 use super::state::{Ctx, CtxMenu, CtxTarget, close_menus, ctx, selected_in_message, wants_native_menu};
 use super::text::render_text;
 
@@ -98,11 +98,21 @@ pub(super) fn MessageRow(
             target: CtxTarget::User(author_id.clone()),
         }));
     };
+    // The full time on hover, as in Slack, and whether an own message has been read: written into
+    // `data-tip` as the pointer comes, so the rows do not follow every change of the reads.
+    let time_tip = move |e: ev::MouseEvent| {
+        if let Some(el) = e
+            .current_target()
+            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
+        {
+            let _ = el.set_attribute("data-tip", &time_tip_text(c, &msg.get_untracked()));
+        }
+    };
     let gutter = {
         let (show_profile, user_ctx) = (show_profile.clone(), user_ctx.clone());
         move || {
             if grouped.get() {
-                return view! { <span class="msg-hover-time">{time::hm(ts)}</span> }.into_any();
+                return view! { <span class="msg-hover-time" on:mouseover=time_tip>{time::hm(ts)}</span> }.into_any();
             }
             match author.get() {
                 Some(u) => view! { <button class="face-btn" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()><Avatar user=u size=36/></button> }.into_any(),
@@ -122,7 +132,7 @@ pub(super) fn MessageRow(
                     <button class="msg-author" on:click=show_profile.clone() on:contextmenu=user_ctx.clone()>{name}</button>
                     {author.as_ref().and_then(status_badge)}
                     {robot.then(|| view! { <span class="app-tag">{tr().bot}</span> })}
-                    <span class="msg-time">{time::hm(ts)}</span>
+                    <span class="msg-time" on:mouseover=time_tip>{time::hm(ts)}</span>
                 </div>
             }
         })
@@ -243,14 +253,6 @@ pub(super) fn MessageRow(
             })
         }
     };
-    // The read line of the chat, under the user's own message it reaches.
-    let read_view = use_context::<FeedCtx>()
-        .and_then(|f| f.read_line)
-        .filter(|_| mine && !in_thread)
-        .map(|line| {
-            let status = Memo::new(move |_| line.with(|l| l.as_ref().filter(|l| l.ts == ts).map(|l| l.status.clone())));
-            move || status.get().map(|status| view! { <ReadMark status=status/> })
-        });
     let reply_btn = (!in_thread && threads_supported(&chat_id)).then(|| {
         view! { <button title=tr().reply_in_thread on:click=open_thread><Icon icon=I::Threads size=16/></button> }
     });
@@ -314,7 +316,6 @@ pub(super) fn MessageRow(
                     {move || view! { <Attachments list=attachments.get()/> }}
                     {reactions_view}
                     {thread_view}
-                    {read_view}
                 </div>
             </div>
             <div class="msg-actions">
@@ -349,50 +350,36 @@ pub(super) fn MessageRow(
     }
 }
 
-/// The read line under an own message, in the spirit of Slack: muted, with a double check in a
-/// direct chat and the faces of the latest readers in a group; the names show on hover.
-#[component]
-fn ReadMark(status: receipts::ReadStatus) -> impl IntoView {
-    let c = ctx();
-    match status {
-        receipts::ReadStatus::Seen { at, .. } => view! {
-            <div class="read-line">
-                <Icon icon=I::CheckCheck size=14/>
-                <span>{tr().seen(at.map(time::relative).as_deref())}</span>
-            </div>
+/// The hover tip of a message's time, as in Slack: the full date and time and, for an own message
+/// someone has read, a double check saying so. When it was read does not matter.
+fn time_tip_text(c: Ctx, msg: &Message) -> String {
+    let full = time::full(msg.ts);
+    match read_status(c, msg).filter(receipts::ReadStatus::is_read) {
+        Some(receipts::ReadStatus::Read { count, everyone, .. }) => {
+            format!("{full}\n✓✓ {}", tr().read_by(count, everyone))
         }
-        .into_any(),
-        receipts::ReadStatus::Read {
-            count,
-            recent,
-            everyone,
-        } => {
-            let (faces, title) = c.snap.with_untracked(|s| {
-                let faces: Vec<User> = recent.iter().filter_map(|id| s.user(id).cloned()).collect();
-                (faces, readers(s, count, &recent))
-            });
-            let mark = if faces.is_empty() {
-                view! { <Icon icon=I::CheckCheck size=14/> }.into_any()
-            } else {
-                view! {
-                    <span class="read-faces">
-                        {faces.into_iter().map(|u| view! { <Avatar user=u size=16/> }).collect_view()}
-                    </span>
-                }
-                .into_any()
-            };
-            view! {
-                <div class="read-line" title=title>
-                    {mark}
-                    <span>{tr().read_by(count, everyone)}</span>
-                </div>
-            }
-            .into_any()
-        }
+        Some(receipts::ReadStatus::Seen { .. }) => format!("{full}\n✓✓ {}", tr().read),
+        None => full,
     }
 }
 
-/// Who read a message, for the hover of the read line: "Anna, Boris, Vera and 2 more".
+/// What can be told about the reads of an own message, when the user wants read receipts. The
+/// loaded copy is the fresher one: counters change while a menu or a tip is not shown.
+fn read_status(c: Ctx, msg: &Message) -> Option<receipts::ReadStatus> {
+    if !c.settings.with_untracked(|s| s.show_read_receipts) {
+        return None;
+    }
+    c.snap.with_untracked(|s| {
+        let m = s
+            .messages
+            .iter()
+            .find(|m| m.chat_id == msg.chat_id && m.ts == msg.ts)
+            .unwrap_or(msg);
+        receipts::read_status(s.chat(&msg.chat_id)?, &s.me, m)
+    })
+}
+
+/// Who read a message, for its menu: "Anna, Boris, Vera and 2 more".
 fn readers(s: &Snapshot, count: u32, recent: &[UserId]) -> String {
     let names: Vec<String> = recent
         .iter()
@@ -403,32 +390,21 @@ fn readers(s: &Snapshot, count: u32, recent: &[UserId]) -> String {
 
 /// What the message menu says about the reads of an own message, if anything.
 fn read_info(c: Ctx, msg: &Message) -> Option<String> {
-    if !c.settings.with_untracked(|s| s.show_read_receipts) {
-        return None;
-    }
-    c.snap.with_untracked(|s| {
-        // The loaded copy is the fresher one: counters change while the menu is not open.
-        let m = s
-            .messages
-            .iter()
-            .find(|m| m.chat_id == msg.chat_id && m.ts == msg.ts)
-            .unwrap_or(msg);
-        match receipts::read_status(s.chat(&msg.chat_id)?, &s.me, m)? {
-            receipts::ReadStatus::Seen { seen: false, .. } => Some(tr().not_seen_yet.to_owned()),
-            receipts::ReadStatus::Seen { at, .. } => Some(tr().seen(at.map(time::relative).as_deref())),
-            receipts::ReadStatus::Read { count: 0, .. } => Some(tr().not_read_yet.to_owned()),
-            receipts::ReadStatus::Read {
-                count,
-                recent,
-                everyone,
-            } => {
-                let head = tr().read_by(count, everyone);
-                let names = readers(s, count, &recent);
-                Some(if names.is_empty() {
-                    head
-                } else {
-                    format!("{head}: {names}")
-                })
+    Some(match read_status(c, msg)? {
+        receipts::ReadStatus::Seen { seen: false, .. } => tr().not_seen_yet.to_owned(),
+        receipts::ReadStatus::Seen { .. } => tr().read.to_owned(),
+        receipts::ReadStatus::Read { count: 0, .. } => tr().not_read_yet.to_owned(),
+        receipts::ReadStatus::Read {
+            count,
+            recent,
+            everyone,
+        } => {
+            let head = tr().read_by(count, everyone);
+            let names = c.snap.with_untracked(|s| readers(s, count, &recent));
+            if names.is_empty() {
+                head
+            } else {
+                format!("{head}: {names}")
             }
         }
     })

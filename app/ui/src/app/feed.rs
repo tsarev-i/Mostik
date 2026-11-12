@@ -131,21 +131,6 @@ pub(super) fn MessageList() -> impl IntoView {
         let id = c.current.get();
         c.snap.with(|s| s.channel_messages(&id))
     });
-    let chat = Memo::new(move |_| {
-        let id = c.current.get();
-        c.snap.with(|s| s.chat(&id).cloned())
-    });
-    // The read line: a reading of the chat moves it, and only the lines it leaves and reaches change.
-    let read_line = Memo::new(move |_| {
-        if !c.settings.with(|s| s.show_read_receipts) {
-            return None;
-        }
-        let me = c.snap.with_untracked(|s| s.me.clone());
-        chat.with(|ch| {
-            let ch = ch.as_ref()?;
-            messages.with(|list| receipts::read_line(ch, &me, list))
-        })
-    });
     // Scrolling: to the bottom when the chat changes or new messages arrive, if the user is at the bottom;
     // when older messages load, keep the visible position.
     let stick = RwSignal::new(true);
@@ -238,7 +223,7 @@ pub(super) fn MessageList() -> impl IntoView {
                     view! { <div class="loading-older"></div> }.into_any()
                 }
             }}
-            <Feed messages=messages read_line=read_line/>
+            <Feed messages=messages/>
         </div>
     }
 }
@@ -337,11 +322,10 @@ fn ChannelIntro() -> impl IntoView {
     }
 }
 
-/// What the lines of a feed share: the names that mentions show, and where the read line goes.
+/// What the lines of a feed share: the names that mentions show.
 #[derive(Clone, Copy)]
-pub(super) struct FeedCtx {
+struct FeedCtx {
     names: Memo<mostik_core::markup::MentionNames>,
-    pub(super) read_line: Option<Memo<Option<receipts::ReadLine>>>,
 }
 
 /// Mention names for a message line: those of its feed; a line outside a feed (a pinned message,
@@ -360,17 +344,12 @@ type FeedDayKey = (ChatId, (u32, u32, u32), Timestamp);
 /// built once and follows its message: a new message, a reaction or an edit elsewhere keeps the
 /// text selected, the open reaction picker with its search and the editor of a message.
 #[component]
-pub(super) fn Feed(
-    messages: Memo<Vec<Message>>,
-    #[prop(optional)] in_thread: bool,
-    #[prop(optional)] read_line: Option<Memo<Option<receipts::ReadLine>>>,
-) -> impl IntoView {
+pub(super) fn Feed(messages: Memo<Vec<Message>>, #[prop(optional)] in_thread: bool) -> impl IntoView {
     let c = ctx();
     // For the lines only, through an owner of their own: what replaces the feed (a pinned message
     // shown in its place, the parent of the next thread) must not find it once it is disposed.
     let shared = FeedCtx {
         names: Memo::new(move |_| c.snap.with(Snapshot::mention_names)),
-        read_line,
     };
     let days = Memo::new(move |_| messages.with(|list| feed::layout(list, time::day_key)));
     let line = move |key: (ChatId, Timestamp)| view! { <FeedRow days=days ts=key.1 in_thread=in_thread/> };

@@ -1,5 +1,5 @@
-//! Read receipts of the user's own messages, in the spirit of Slack: one muted line under a
-//! message, "Seen" in a direct chat and "Seen by N" in a group. Telemost counts reads from the
+//! Read receipts of the user's own messages, in the spirit of Slack: the hover tip of a message's
+//! time says "Read" in a direct chat and "Read by N" in a group. Telemost counts reads from the
 //! `SeenMarker`s people send; it shows them only for the author's own messages.
 
 use crate::model::*;
@@ -28,13 +28,6 @@ impl ReadStatus {
     }
 }
 
-/// The read line of a chat: under which own message it goes and what it says.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadLine {
-    pub ts: Timestamp,
-    pub status: ReadStatus,
-}
-
 /// What can be told about the reads of message `m` in `chat`; `None` where there are no
 /// receipts: others' messages, notes, thread replies, "Notes", channels, and group messages
 /// Telemost sent without counters.
@@ -59,16 +52,6 @@ pub fn read_status(chat: &Chat, me: &UserId, m: &Message) -> Option<ReadStatus> 
         }),
         ChatKind::Notes | ChatKind::Broadcast => None,
     }
-}
-
-/// Where the read line of a chat goes: under the latest own message someone has read (`feed` is
-/// the chat's feed, oldest first). As the peer reads on, the line moves down.
-pub fn read_line(chat: &Chat, me: &UserId, feed: &[Message]) -> Option<ReadLine> {
-    feed.iter().rev().find_map(|m| {
-        read_status(chat, me, m)
-            .filter(ReadStatus::is_read)
-            .map(|status| ReadLine { ts: m.ts, status })
-    })
 }
 
 /// What a read by someone else changed.
@@ -252,11 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_line_goes_under_the_last_message_the_peer_saw() {
-        let call = Message {
-            call: Some(CallNote::Started { url: "u".into() }),
-            ..msg(ME, 25)
-        };
+    fn direct_status_follows_what_the_peer_saw() {
         let feed = [
             with_reads(
                 msg(ME, 10),
@@ -267,32 +246,31 @@ mod tests {
             ),
             msg(ME, 20),
             msg("peer", 22),
-            call,
             msg(ME, 30),
         ];
-        // The peer read up to 26: the last own message is unread, the call note is skipped.
-        let line = read_line(&direct(26), &id(ME), &feed).unwrap();
-        assert_eq!(line.ts, 20);
-        assert_eq!(line.status, ReadStatus::Seen { seen: true, at: None });
+        // The peer read up to 26: what came before is seen, the last own message is not.
         assert_eq!(
-            read_line(&direct(15), &id(ME), &feed).map(|l| l.status),
+            read_status(&direct(26), &id(ME), &feed[1]),
+            Some(ReadStatus::Seen { seen: true, at: None })
+        );
+        assert_eq!(
+            read_status(&direct(26), &id(ME), &feed[3]),
+            Some(ReadStatus::Seen { seen: false, at: None })
+        );
+        // The message's own counters say it too, with the time.
+        assert_eq!(
+            read_status(&direct(5), &id(ME), &feed[0]),
             Some(ReadStatus::Seen {
                 seen: true,
                 at: Some(12)
             })
-        );
-        // Nothing the peer saw among the loaded messages: no line.
-        assert_eq!(read_line(&direct(5), &id(ME), &feed[1..]), None);
-        assert_eq!(
-            read_status(&direct(5), &id(ME), &feed[4]),
-            Some(ReadStatus::Seen { seen: false, at: None })
         );
         // Others' messages have no receipts.
         assert_eq!(read_status(&direct(26), &id(ME), &feed[2]), None);
     }
 
     #[test]
-    fn group_line_goes_under_the_last_message_someone_read() {
+    fn group_status_counts_the_readers() {
         let feed = [
             with_reads(msg(ME, 10), read(5, &["a", "b", "c"])),
             with_reads(msg(ME, 20), read(2, &["a", "b"])),
@@ -300,15 +278,13 @@ mod tests {
             // Telemost sent no counters: nothing to say.
             msg(ME, 40),
         ];
-        let line = read_line(&group(6), &id(ME), &feed).unwrap();
-        assert_eq!(line.ts, 20);
         assert_eq!(
-            line.status,
-            ReadStatus::Read {
+            read_status(&group(6), &id(ME), &feed[1]),
+            Some(ReadStatus::Read {
                 count: 2,
                 recent: vec![id("a"), id("b")],
                 everyone: false
-            }
+            })
         );
         assert_eq!(
             read_status(&group(6), &id(ME), &feed[0]),
@@ -332,7 +308,6 @@ mod tests {
             ..m.clone()
         };
         assert_eq!(read_status(&group(6), &id(ME), &reply), None);
-        assert_eq!(read_line(&group(6), &id(ME), &[reply]), None);
     }
 
     #[test]

@@ -85,6 +85,50 @@ pub fn hm(ts: Timestamp) -> String {
     }
 }
 
+/// `10:42:05` or `10:42:05 AM`.
+fn hms(ts: Timestamp) -> String {
+    let d = date(ts);
+    let (h, m, s) = (d.get_hours(), d.get_minutes(), d.get_seconds());
+    if format().1 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        let suffix = if h < 12 { "AM" } else { "PM" };
+        let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+        format!("{h12}:{m:02}:{s:02} {suffix}")
+    }
+}
+
+/// The full date and time for the hover of a message time, as in Slack: "Thursday, November 12th
+/// at 01:02:45", the year only when it is not this one (and the Russian equivalent).
+pub fn full(ts: Timestamp) -> String {
+    let d = date(ts);
+    let lang = format().0;
+    let year = d.get_full_year();
+    let this_year = year == Date::new_0().get_full_year();
+    let day = match lang {
+        Lang::Ru => format!(
+            "{}, {} {}{}",
+            WEEKDAYS_RU[d.get_day() as usize],
+            d.get_date(),
+            MONTHS_RU[d.get_month() as usize],
+            if this_year {
+                String::new()
+            } else {
+                format!(" {year} г.")
+            }
+        ),
+        Lang::En => format!(
+            "{}, {} {}{}{}",
+            WEEKDAYS_EN[d.get_day() as usize],
+            MONTHS_EN[d.get_month() as usize],
+            d.get_date(),
+            ordinal(d.get_date()),
+            if this_year { String::new() } else { format!(", {year}") }
+        ),
+    };
+    crate::i18n::for_lang(lang).day_at(&day, &hms(ts))
+}
+
 /// Calendar day key for the feed separators.
 pub fn day_key(ts: Timestamp) -> (u32, u32, u32) {
     let d = date(ts);

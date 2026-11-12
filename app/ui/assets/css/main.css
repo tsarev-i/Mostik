@@ -255,9 +255,6 @@
 .mention.person:hover { text-decoration: underline; }
 .edited { margin-left: 4px; font-family: var(--font); font-size: 13px; color: var(--text-muted); }
 
-/* The read line under an own message: muted, with a double check or the latest readers' faces. */
-.read-line { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; color: var(--text-muted); }
-.read-faces { display: flex; gap: 2px; }
 .reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .reaction {
   height: 24px;

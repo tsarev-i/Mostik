@@ -116,6 +116,7 @@ pub struct Tr {
     pub link_copied: &'static str,
     pub copy_link: &'static str,
     pub mark_unread: &'static str,
+    pub read: &'static str,
     pub not_seen_yet: &'static str,
     pub not_read_yet: &'static str,
     pub read_by_all: &'static str,
@@ -517,7 +518,8 @@ pub static RU: Tr = Tr {
     link_copied: "Ссылка скопирована",
     copy_link: "Копировать ссылку",
     mark_unread: "Пометить непрочитанным",
-    not_seen_yet: "Ещё не просмотрено",
+    read: "Прочитано",
+    not_seen_yet: "Ещё не прочитано",
     not_read_yet: "Ещё никто не прочитал",
     read_by_all: "Прочитали все",
     notify_label: "Уведомления",
@@ -921,9 +923,10 @@ pub static EN: Tr = Tr {
     link_copied: "Link copied",
     copy_link: "Copy link",
     mark_unread: "Mark unread",
-    not_seen_yet: "Not seen yet",
+    read: "Read",
+    not_seen_yet: "Not read yet",
     not_read_yet: "Not read yet",
-    read_by_all: "Seen by everyone",
+    read_by_all: "Read by everyone",
     notify_label: "Notifications",
     notify_all: "All messages",
     notify_mentions: "Mentions only",
@@ -1487,22 +1490,12 @@ impl Tr {
         }
     }
 
-    /// The read line of a direct chat: "Seen", or "Seen today at 19:00".
-    pub fn seen(&self, when: Option<&str>) -> String {
-        match (self.lang, when) {
-            (Lang::Ru, None) => "Просмотрено".to_owned(),
-            (Lang::Ru, Some(when)) => format!("Просмотрено {when}"),
-            (Lang::En, None) => "Seen".to_owned(),
-            (Lang::En, Some(when)) => format!("Seen {when}"),
-        }
-    }
-
-    /// The read line of a group: "Seen by 5", or "Seen by everyone".
+    /// The reads of an own message in a group: "Read by 5", or "Read by everyone".
     pub fn read_by(&self, n: u32, everyone: bool) -> String {
         match self.lang {
             _ if everyone => self.read_by_all.to_owned(),
             Lang::Ru => format!("{} {n}", ru_plural(n, "Прочитал(а)", "Прочитали", "Прочитали")),
-            Lang::En => format!("Seen by {n}"),
+            Lang::En => format!("Read by {n}"),
         }
     }
 
@@ -1728,10 +1721,9 @@ mod tests {
     fn read_receipts() {
         assert_eq!(RU.read_by(1, false), "Прочитал(а) 1");
         assert_eq!(RU.read_by(5, false), "Прочитали 5");
-        assert_eq!(EN.read_by(3, false), "Seen by 3");
+        assert_eq!(EN.read_by(3, false), "Read by 3");
         assert_eq!(RU.read_by(9, true), "Прочитали все");
-        assert_eq!(RU.seen(Some("сегодня в 19:00")), "Просмотрено сегодня в 19:00");
-        assert_eq!(EN.seen(None), "Seen");
+        assert_eq!(EN.read_by(9, true), "Read by everyone");
         let names = ["Anna".to_owned(), "Boris".to_owned(), "Vera".to_owned()];
         assert_eq!(RU.readers(&names, 2), "Anna, Boris, Vera и ещё 2");
         assert_eq!(EN.readers(&names[..1], 0), "Anna");
