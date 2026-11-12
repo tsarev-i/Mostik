@@ -2,6 +2,7 @@
 
 mod app;
 mod bridge;
+mod compose;
 mod custom;
 mod editor;
 mod emoji;

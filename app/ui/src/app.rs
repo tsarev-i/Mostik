@@ -3313,6 +3313,7 @@ fn InlineEditor(msg: Message) -> impl IntoView {
         }
     };
     let save_key = save.clone();
+    let field = crate::compose::Field::new(area, move |t| text.set(t));
     view! {
         <div class="inline-edit" on:click=|e| e.stop_propagation()>
             <div class="inline-edit-box">
@@ -3323,8 +3324,9 @@ fn InlineEditor(msg: Message) -> impl IntoView {
                             reveal_editor(&el);
                         }
                     }
+                    on:paste=move |e: ev::ClipboardEvent| { field.paste_link(&e); }
                     on:keydown=move |e: ev::KeyboardEvent| {
-                        if e.is_composing() { return; }
+                        if e.is_composing() || field.hotkey(&e) { return; }
                         match e.key().as_str() {
                             "Escape" => { e.prevent_default(); e.stop_propagation(); cancel(); }
                             "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
@@ -3340,11 +3342,7 @@ fn InlineEditor(msg: Message) -> impl IntoView {
                             _ => {}
                         }
                     }></div>
-                <FormatBar on_fmt=Callback::new(move |(before, after)| {
-                    if let Some(el) = area.get_untracked() {
-                        text.set(wrap_selection(&el, before, after));
-                    }
-                })/>
+                <crate::compose::FormatBar field emoji=true/>
             </div>
             <div class="inline-edit-actions">
                 <button class="btn small" on:click=move |_| cancel()>{tr().cancel}</button>
@@ -3352,26 +3350,6 @@ fn InlineEditor(msg: Message) -> impl IntoView {
                     <Icon icon=I::Enter size=14/>{tr().save_changes}
                 </button>
             </div>
-        </div>
-    }
-}
-
-/// Formatting buttons of a message field: each wraps the selection in Telemost markup markers or
-/// takes them off. A press keeps the focus and selection in the field.
-#[component]
-fn FormatBar(on_fmt: Callback<(&'static str, &'static str)>) -> impl IntoView {
-    let fmt = move |before: &'static str, after: &'static str| move |_| on_fmt.run((before, after));
-    view! {
-        <div class="composer-toolbar" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
-            <button class="fmt" title=tr().fmt_bold on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
-            <button class="fmt" title=tr().fmt_italic on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
-            <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
-            <button class="fmt" title=tr().fmt_strike on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
-            <span class="sep"></span>
-            <button class="fmt" title=tr().fmt_link on:click=fmt("[", "](https://)")><Icon icon=I::Link size=16/></button>
-            <span class="sep"></span>
-            <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
-            <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>
         </div>
     }
 }
@@ -4343,18 +4321,18 @@ fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -
 }
 
 /// Selection of the message field as UTF-16 offsets of its text (see [`crate::editor`]).
-fn selection(area: &web_sys::HtmlElement) -> (Option<u32>, Option<u32>) {
+pub(crate) fn selection(area: &web_sys::HtmlElement) -> (Option<u32>, Option<u32>) {
     crate::editor::selection(area)
 }
 
 /// Sets the text of the message field and puts the caret at UTF-16 offset `caret`.
-fn place_caret(area: &web_sys::HtmlElement, value: &str, caret: u32) {
+pub(crate) fn place_caret(area: &web_sys::HtmlElement, value: &str, caret: u32) {
     crate::editor::set_text(area, value, caret, &crate::custom::lookup(ctx()));
 }
 
 /// Byte index in `s` of a UTF-16 offset; a missing or out-of-range offset means the end of the text.
 /// An offset inside a surrogate pair moves to the end of that character.
-fn utf16_to_byte(s: &str, offset: Option<u32>) -> usize {
+pub(crate) fn utf16_to_byte(s: &str, offset: Option<u32>) -> usize {
     let Some(offset) = offset else { return s.len() };
     let mut units = 0;
     for (i, ch) in s.char_indices() {
@@ -4366,7 +4344,7 @@ fn utf16_to_byte(s: &str, offset: Option<u32>) -> usize {
     s.len()
 }
 
-fn utf16_len(s: &str) -> u32 {
+pub(crate) fn utf16_len(s: &str) -> u32 {
     s.encode_utf16().count() as u32
 }
 
@@ -4404,7 +4382,13 @@ fn wrap_text(value: &str, start: Option<u32>, end: Option<u32>, before: &str, af
 
 /// `value` with `text` in place of the `start..end` selection; `drop_before` characters before the
 /// selection are removed too. Returns the new value and the caret after the inserted text.
-fn insert_into(value: &str, start: Option<u32>, end: Option<u32>, text: &str, drop_before: usize) -> (String, u32) {
+pub(crate) fn insert_into(
+    value: &str,
+    start: Option<u32>,
+    end: Option<u32>,
+    text: &str,
+    drop_before: usize,
+) -> (String, u32) {
     let end = utf16_to_byte(value, end);
     let selected = utf16_to_byte(value, start).min(end);
     let start = value[..selected]
@@ -4431,7 +4415,7 @@ fn emoji_code_before(value: &str, caret: u32) -> Option<String> {
 }
 
 /// Wraps the composer selection in Telemost markup markers.
-fn wrap_selection(area: &web_sys::HtmlElement, before: &str, after: &str) -> String {
+pub(crate) fn wrap_selection(area: &web_sys::HtmlElement, before: &str, after: &str) -> String {
     let (start, end) = selection(area);
     let (value, from, to) = wrap_text(&crate::editor::value(area), start, end, before, after);
     place_caret(area, &value, to);
@@ -4728,8 +4712,12 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         }
         suggestions.set(vec![]);
     };
+    let field = crate::compose::Field::new(area, move |text| {
+        remember(&text);
+        set_draft.set(text);
+    });
     let on_key = move |ev: web_sys::KeyboardEvent| {
-        if ev.is_composing() {
+        if ev.is_composing() || field.hotkey(&ev) {
             return;
         }
         let n = suggestions.with_untracked(Vec::len);
@@ -4789,13 +4777,6 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             _ => {}
         }
     };
-    let fmt = move |(before, after): (&'static str, &'static str)| {
-        if let Some(el) = area.get_untracked() {
-            let text = wrap_selection(&el, before, after);
-            remember(&text);
-            set_draft.set(text);
-        }
-    };
     let typing_text = move || if thread { None } else { typing_line(c, &c.current.get()) };
     view! {
         <div class=if thread { "composer-wrap in-thread" } else { "composer-wrap" }>
@@ -4823,7 +4804,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         </div>
                     </Show>
                 })}
-                <FormatBar on_fmt=Callback::new(fmt)/>
+                <crate::compose::FormatBar field/>
                 <div
                     class="editor"
                     node_ref=area
@@ -4856,6 +4837,7 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         suggestions.set(found);
                     }
                     on:keydown=on_key
+                    on:paste=move |e: ev::ClipboardEvent| { field.paste_link(&e); }
                     on:blur=move |_| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
                 ></div>
                 <Show when=move || !suggestions.with(Vec::is_empty)>
