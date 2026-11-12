@@ -115,7 +115,7 @@ pub struct Ctx {
     /// People picked from `@` suggestions or named in an edited message, by the name the
     /// text shows: sending turns `@Name` into their `@<guid>` even when the name is not unique.
     pub picked: RwSignal<std::collections::HashMap<String, UserId>>,
-    /// The latest messages removed as deleted, so a deletion is counted once (see `ops::remove`).
+    /// The latest messages removed as deleted, so a deletion is counted once (see `ops::snapshot::remove`).
     pub deleted: RwSignal<VecDeque<(ChatId, Timestamp)>>,
     /// Chats hidden from the sidebar with "×", kept between runs.
     pub hidden: RwSignal<hidden::Hidden>,
