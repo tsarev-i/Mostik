@@ -46,7 +46,6 @@ pub struct Ctx {
     pub picker: RwSignal<Option<(ChatId, Timestamp)>>,
     /// Where to open the reaction picker: the top right corner of the clicked button.
     pub picker_at: RwSignal<(f64, f64)>,
-    pub menu: RwSignal<Option<(ChatId, Timestamp)>>,
     /// Right-click menu (as in Slack, at the cursor).
     pub ctx_menu: RwSignal<Option<CtxMenu>>,
     pub error: RwSignal<Option<String>>,
@@ -256,9 +255,8 @@ fn selected_in_message(ts: Timestamp) -> Option<String> {
     (!quote.is_empty()).then_some(quote)
 }
 
-/// Closes the message menu and the right-click menu.
+/// Closes the right-click menu.
 fn close_menus(c: Ctx) {
-    c.menu.set(None);
     c.ctx_menu.set(None);
 }
 
@@ -433,7 +431,6 @@ pub fn App() -> impl IntoView {
         confirm_leave: RwSignal::new(None),
         picker: RwSignal::new(None),
         picker_at: RwSignal::new((0.0, 0.0)),
-        menu: RwSignal::new(None),
         ctx_menu: RwSignal::new(None),
         error: RwSignal::new(None),
         notice: RwSignal::new(None),
@@ -708,13 +705,11 @@ pub fn App() -> impl IntoView {
             e.prevent_default();
             return;
         }
-        let popup = c.menu.get_untracked().is_some()
-            || c.ctx_menu.with_untracked(Option::is_some)
+        let popup = c.ctx_menu.with_untracked(Option::is_some)
             || c.picker.get_untracked().is_some()
             || c.lightbox.with_untracked(Option::is_some)
             || c.me_menu.get_untracked();
         if popup {
-            c.menu.set(None);
             c.ctx_menu.set(None);
             c.picker.set(None);
             c.lightbox.set(None);
@@ -3896,7 +3891,6 @@ fn MessageRow(
     let user_ctx = move |e: ev::MouseEvent| {
         e.prevent_default();
         e.stop_propagation();
-        c.menu.set(None);
         c.picker.set(None);
         c.ctx_menu.set(Some(CtxMenu {
             x: e.client_x() as f64,
@@ -4081,7 +4075,6 @@ fn MessageRow(
             return;
         }
         e.prevent_default();
-        c.menu.set(None);
         c.picker.set(None);
         c.ctx_menu.set(Some(CtxMenu {
             x: e.client_x() as f64,

@@ -199,10 +199,6 @@ impl WebClient {
         &self.jar
     }
 
-    pub fn user_agent(&self) -> &str {
-        &self.user_agent
-    }
-
     fn headers(&self, host: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         if let Ok(v) = HeaderValue::from_str(&self.jar.header_for(host)) {

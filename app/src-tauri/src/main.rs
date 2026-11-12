@@ -158,7 +158,7 @@ fn main() {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let files = backend::allow_files(window.app_handle(), paths);
                 if !files.is_empty() {
-                    let _ = window.app_handle().emit("mostik://files", &files);
+                    let _ = window.app_handle().emit(backend::FILES_EVENT, &files);
                 }
             }
         })

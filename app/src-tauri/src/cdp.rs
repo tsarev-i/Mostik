@@ -21,12 +21,11 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 /// How long to wait for a reply before giving up on a command.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// A protocol event: `method`, `params` and the page session it came from.
+/// A protocol event: `method` and `params`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub method: String,
     pub params: Value,
-    pub session: Option<String>,
 }
 
 pub struct Cdp {
@@ -161,7 +160,6 @@ fn parse(bytes: &[u8]) -> Option<Incoming> {
     Some(Incoming::Event(Event {
         method: msg.get("method")?.as_str()?.to_owned(),
         params: msg.get("params").cloned().unwrap_or(Value::Null),
-        session: msg.get("sessionId").and_then(Value::as_str).map(str::to_owned),
     }))
 }
 
@@ -188,14 +186,14 @@ mod tests {
     }
 
     #[test]
-    fn events_carry_their_session() {
+    fn events_carry_method_and_params() {
         let Some(Incoming::Event(e)) =
             parse(br#"{"method":"Page.frameNavigated","params":{"frame":{}},"sessionId":"S"}"#)
         else {
             panic!("not an event");
         };
         assert_eq!(e.method, "Page.frameNavigated");
-        assert_eq!(e.session.as_deref(), Some("S"));
+        assert_eq!(e.params, json!({"frame": {}}));
         assert!(parse(b"not json").is_none());
         assert!(parse(br#"{"params":{}}"#).is_none());
     }

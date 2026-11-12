@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use mostik_core::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 fn s<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -660,7 +660,7 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
 }
 
 /// UI event built from a Xiva push.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveEvent {
     /// New or changed message; `author` in case the UI does not know the sender, `mentioned`
@@ -668,14 +668,12 @@ pub enum LiveEvent {
     Upsert {
         message: Box<Message>,
         author: Option<User>,
-        #[serde(default)]
         mentioned: Vec<User>,
     },
     /// A message was deleted; `thread_parent` is set for a thread reply.
     Deleted {
         chat_id: ChatId,
         ts: Timestamp,
-        #[serde(default)]
         thread_parent: Option<Timestamp>,
     },
     Typing {
@@ -688,7 +686,6 @@ pub enum LiveEvent {
         chat_id: ChatId,
         ts: Timestamp,
         reactions: Vec<Reaction>,
-        #[serde(default)]
         users: Vec<User>,
     },
     /// The user read the chat (possibly on another device).
@@ -711,7 +708,6 @@ pub enum LiveEvent {
     /// A person came online (their `Heartbeat` arrived).
     Online {
         user: UserId,
-        online: bool,
     },
     /// A person changed their availability or custom status.
     Status(PresenceInfo),
@@ -794,10 +790,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
     }
     let from = s(sm, &["ServerMessageInfo", "From", "Guid"]).map(|g| UserId(g.to_owned()));
     if cm.get("Heartbeat").is_some() {
-        return Some(LiveEvent::Online {
-            user: from?,
-            online: true,
-        });
+        return Some(LiveEvent::Online { user: from? });
     }
     if let Some(us) = cm.get("UserStatus") {
         let (availability, status) = user_status(us);
@@ -2339,8 +2332,7 @@ mod tests {
         assert_eq!(
             from_push(&heartbeat, Some(&me)),
             Some(LiveEvent::Online {
-                user: UserId("u1".into()),
-                online: true
+                user: UserId("u1".into())
             })
         );
         let status = json!({"ClientMessage": {"UserStatus": {"Availability": 3, "CustomStatus": {"Emoji": "🏖", "Text": "Vacation"}}}, "ServerMessageInfo": {"From": {"Guid": "u1"}}});

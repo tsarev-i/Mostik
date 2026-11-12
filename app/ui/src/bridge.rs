@@ -100,7 +100,6 @@ pub enum LiveEvent {
     },
     Online {
         user: UserId,
-        online: bool,
     },
     Status(mostik_core::PresenceInfo),
     Pinned {

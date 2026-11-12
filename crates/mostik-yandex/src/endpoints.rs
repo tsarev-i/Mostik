@@ -18,9 +18,6 @@ pub const XIVA_SERVICE: &str = "messenger-prod";
 /// Host of private files (uploads, previews, voice messages).
 pub const FILES_HOST: &str = "files.messenger.yandex.ru";
 
-/// Public feature configuration: reactions, intervals, flags.
-pub const CLIENT_CONFIG_URL: &str = "https://tools.messenger.yandex.net/config.json";
-
 /// Yandex ID login page that returns to the web client.
 pub fn passport_login_url() -> String {
     format!("https://passport.yandex.ru/auth?retpath={WEB_ORIGIN}%2F")

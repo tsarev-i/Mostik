@@ -228,6 +228,9 @@ fn pending_file(path: &std::path::Path) -> Option<PendingFile> {
     })
 }
 
+/// Files dropped onto the window: the [`PendingFile`]s to attach.
+pub const FILES_EVENT: &str = "mostik://files";
+
 /// Allows sending the files (dialog, drag and drop) and returns their description for the UI.
 pub fn allow_files(app: &AppHandle, paths: &[std::path::PathBuf]) -> Vec<PendingFile> {
     let files: Vec<PendingFile> = paths.iter().filter_map(|p| pending_file(p)).collect();

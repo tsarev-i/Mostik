@@ -290,13 +290,11 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
                 t.push((chat_id, user, until));
             });
         }
-        LiveEvent::Online { user, online } => {
-            if online {
-                LAST_HEARTBEAT.with_borrow_mut(|m| m.insert(user.clone(), js_sys::Date::now()));
-            }
+        LiveEvent::Online { user } => {
+            LAST_HEARTBEAT.with_borrow_mut(|m| m.insert(user.clone(), js_sys::Date::now()));
             c.snap.update(|s| {
                 if let Some(u) = s.users.iter_mut().find(|u| u.id == user) {
-                    u.presence = if online { Presence::Online } else { Presence::Offline };
+                    u.presence = Presence::Online;
                 }
             })
         }

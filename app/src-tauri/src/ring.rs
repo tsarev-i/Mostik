@@ -23,15 +23,16 @@ pub const RING_EVENT: &str = "mostik://ring";
 /// Telemost repeats the ringing every 5 s: with no repeat for this long it has stopped ringing.
 const STALE: Duration = Duration::from_secs(12);
 
-/// A call ringing for the user.
+/// A call ringing for the user. The dialog shows only the caller.
 #[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Ring {
     /// `RingingId`.
     #[serde(skip)]
     pub id: String,
+    #[serde(skip)]
     pub chat_id: String,
     /// The meeting link.
+    #[serde(skip)]
     pub url: String,
     pub caller: User,
 }

@@ -124,10 +124,7 @@ impl Settings {
             .and_then(|s| s.get_item(KEY).ok().flatten())
             .and_then(|v| serde_json::from_str(&v).ok())
             .unwrap_or_default();
-        // Themes an older version offered: Twilight took Aubergine's place, the others fall back to the default.
-        if s.theme == "aubergine" {
-            s.theme = "twilight".to_owned();
-        }
+        // A theme an older version offered falls back to the default.
         if !THEMES.contains(&s.theme.as_str()) {
             s.theme = Self::default().theme;
         }

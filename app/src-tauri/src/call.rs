@@ -62,9 +62,8 @@ pub struct CallState {
     /// Held while a window is being opened, so that two clicks do not open two windows.
     opening: Mutex<()>,
     active: StdMutex<Option<Active>>,
+    /// Calls opened so far, in the window or in the default browser: the latest call's number.
     generation: AtomicU64,
-    /// Calls opened so far, in the window or in the default browser.
-    opens: AtomicU64,
 }
 
 fn is_meeting_host(u: &Url) -> bool {
@@ -189,7 +188,6 @@ where
 /// The opening itself; the caller holds `CallState::opening` and has seen no open call.
 async fn open_locked(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar) -> Result<(), String> {
     let state = app.state::<CallState>();
-    state.opens.fetch_add(1, Ordering::SeqCst);
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let title = window_title(app, &info.label);
     let english = crate::backend::text(app, "ru", "en") == "en";
@@ -218,7 +216,7 @@ async fn open_locked(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar
 /// Calls opened so far (in the window or in the default browser): a status clean-up scheduled
 /// before a newer call must leave that call's status alone.
 pub fn opens(app: &AppHandle) -> u64 {
-    app.state::<CallState>().opens.load(Ordering::SeqCst)
+    app.state::<CallState>().generation.load(Ordering::SeqCst)
 }
 
 /// Brings the call window to the front.
@@ -944,7 +942,6 @@ b{{color:#f8f8f8;font-size:17px}}
             let ev = |method: &str, params: Value| Event {
                 method: method.into(),
                 params,
-                session: Some("S".into()),
             };
             let nav = ev(
                 "Page.frameNavigated",

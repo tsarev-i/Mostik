@@ -21,11 +21,8 @@ pub struct HistoryRequest {
     pub limit: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_timestamp: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_timestamp: Option<u64>,
+    /// Always 0, as the web client sends it.
     pub offset: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub threads: Option<bool>,
 }
 
 impl HistoryRequest {
@@ -36,9 +33,7 @@ impl HistoryRequest {
             chat_id: Some(chat_id.to_owned()),
             limit,
             max_timestamp: before,
-            min_timestamp: None,
             offset: 0,
-            threads: None,
         }
     }
 }
