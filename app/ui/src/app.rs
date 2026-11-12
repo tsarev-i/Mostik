@@ -834,6 +834,24 @@ fn LoginScreen(reason: Option<String>) -> impl IntoView {
 #[component]
 fn Workspace() -> impl IntoView {
     let c = ctx();
+    let inner_width = || window().inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1280.0);
+    let win_w = RwSignal::new(inner_width());
+    let _resize = window_event_listener(ev::resize, move |_| win_w.set(inner_width()));
+    // The right pane gives way to the messages down to MAIN_MIN, then down to THREAD_MIN itself;
+    // when even that does not fit (a narrow window), it takes the whole column in place of the chat.
+    let pane_w = Memo::new(move |_| {
+        // The card's margin and the two resizers.
+        let room = win_w.get() - RAIL_W - c.sidebar_w.get() - 12.0;
+        let wanted = c.thread_w.get();
+        if room - wanted >= MAIN_MIN {
+            Some(wanted)
+        } else if room - MAIN_MIN >= THREAD_MIN {
+            Some(room - MAIN_MIN)
+        } else {
+            None
+        }
+    });
+    let pane_open = move || c.thread.get().is_some() || c.profile.get().is_some();
     view! {
         <div class=move || {
             if c.dragging.get().is_some() {
@@ -847,7 +865,8 @@ fn Workspace() -> impl IntoView {
             <TopBar/>
             <div class="body">
                 <Rail/>
-                <div class="card">
+                <div class=move || if pane_open() && pane_w.get().is_none() { "card pane-full" } else { "card" }
+                    style=move || pane_w.get().map(|w| format!("--pane-w:{w:.0}px")).unwrap_or_default()>
                     <Sidebar/>
                     <div class="resizer" title=tr().drag_to_resize
                         on:mousedown=move |e| { e.prevent_default(); c.dragging.set(Some(Drag::Sidebar)); }></div>
@@ -870,8 +889,8 @@ fn Workspace() -> impl IntoView {
                             }.into_any()
                         }}
                     </main>
-                    <Show when=move || c.thread.get().is_some() || c.profile.get().is_some()>
-                        <div class="resizer" title=tr().drag_to_resize
+                    <Show when=pane_open>
+                        <div class="resizer pane-resizer" title=tr().drag_to_resize
                             on:mousedown=move |e| { e.prevent_default(); c.dragging.set(Some(Drag::Thread)); }></div>
                         {move || if c.profile.get().is_some() {
                             view! { <ProfilePane/> }.into_any()
@@ -4638,7 +4657,7 @@ fn ThreadPane() -> impl IntoView {
         })
     });
     view! {
-        <aside class="thread-pane" style=move || format!("width:{:.0}px", c.thread_w.get())>
+        <aside class="thread-pane">
             <header class="tp-header">
                 <div>
                     <div class="tp-title">{tr().thread}</div>
@@ -6569,7 +6588,7 @@ fn ProfilePane() -> impl IntoView {
         Some((id, user, profile, me))
     });
     view! {
-        <aside class="thread-pane profile-pane" style=move || format!("width:{:.0}px", c.thread_w.get())>
+        <aside class="thread-pane profile-pane">
             <header class="tp-header">
                 <div class="tp-title">{tr().profile}</div>
                 <button class="icon-btn" title=tr().close on:click=move |_| c.profile.set(None)><Icon icon=I::X/></button>

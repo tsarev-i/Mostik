@@ -466,7 +466,7 @@ pub static RU: Tr = Tr {
     act_threads: "Треды",
     act_mentions: "Упоминания",
     act_all: "Все",
-    rail_activity: "Упоминания",
+    rail_activity: "События",
     organizations: "Организации",
     switch_org: "Переключить организацию",
     browse_channels: "Найти каналы",

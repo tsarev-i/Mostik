@@ -293,7 +293,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 64px 0 20px;
+  padding: 0 12px 0 20px;
   border-radius: 6px;
   color: rgba(var(--chrome-ink), 0.72);
   font-size: 14px;
@@ -302,6 +302,10 @@ button:disabled { opacity: 0.4; cursor: default; }
   text-align: left;
 }
 .sb-section-head:hover .sb-section-title { background: var(--sidebar-hover); color: var(--chrome-strong); }
+/* Room for "+" and "⋮" only while they show, so that a long name is not cut short for nothing. */
+.sb-section-head:hover .sb-section-title,
+.sb-section-head.menu-open .sb-section-title,
+.sb-section-head:focus-within .sb-section-title { padding-right: 64px; }
 .sb-section-name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* An icon-less title starts at the chat icon column; its caret sits in the gap on the left. */
 .sb-section-slot { position: absolute; left: 2px; top: 6px; width: 16px; height: 16px; display: grid; place-items: center; }
@@ -819,8 +823,12 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 /* ── Thread panel ───────────────────────────────────────────────── */
 
+/* A window too narrow for both: the thread or profile takes the chat's place. */
+.card.pane-full .main, .card.pane-full .pane-resizer { display: none; }
+.card.pane-full .thread-pane { flex: 1; width: auto; min-width: 0; border-left: 0; }
+
 .thread-pane {
-  width: var(--thread-w);
+  width: var(--pane-w, var(--thread-w));
   flex: none;
   display: flex;
   flex-direction: column;
@@ -1166,9 +1174,11 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .modal.prefs { width: min(760px, calc(100vw - 32px)); }
 .prefs-body { display: flex; gap: 24px; margin-top: 16px; min-height: 260px; }
-.prefs-nav { width: 200px; flex: none; }
+/* As wide as its longest item (Russian ones are longer), so that no item wraps. */
+.prefs-nav { min-width: 200px; flex: none; }
 .prefs-nav button {
   width: 100%;
+  white-space: nowrap;
   display: flex;
   align-items: center;
   gap: 8px;
