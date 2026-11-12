@@ -2079,7 +2079,7 @@ mod tests {
 
     /// The demo data with only the given messages in chat `general`.
     fn snapshot(messages: Vec<Message>) -> Snapshot {
-        let mut s = mostik_core::mock::demo();
+        let mut s = mostik_core::mock::demo(1_794_300_000_000_000);
         s.messages = messages;
         for ch in &mut s.chats {
             (ch.unread, ch.mentions) = (0, 0);

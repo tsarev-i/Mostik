@@ -1,8 +1,9 @@
 //! Commands for the UI: connection, history, writes and live events.
 //!
-//! On connect `probe.json` is written, and the first socket events go to `probe-events.jsonl`
-//! (in the app data dir). They hold only structure (keys and types) and identifier
-//! patterns: no message text, names or tokens.
+//! Connection diagnostics, in a debug build or with [`PROBE_ENV`] set: every connection writes
+//! `probe.json`, and the first socket events go to `probe-events.jsonl` (in the app data dir).
+//! They hold only structure (keys and types) and identifier patterns: no message text, names
+//! or tokens.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -69,7 +70,10 @@ const OLDER_PAGE: u32 = 40;
 const THREAD_PAGE: u32 = 50;
 /// Seconds a history page may take: twice that with the repeat, about what one wait used to be.
 const HISTORY_TIMEOUT_S: u64 = 12;
+/// Socket events written to `probe-events.jsonl` per run.
 const MAX_DIAG_EVENTS: usize = 300;
+/// Turns on the connection diagnostics (`probe*.json`, `probe-events.jsonl`) in a release build.
+const PROBE_ENV: &str = "MOSTIK_PROBE";
 
 /// Result of `bootstrap` and `login`: either the login screen or a ready snapshot.
 #[derive(Serialize)]
@@ -1015,7 +1019,18 @@ fn err_json(e: impl ToString) -> Value {
     json!({ "error": e.to_string() })
 }
 
+/// Whether the connection diagnostics are on: in a debug build, or with `MOSTIK_PROBE=1`.
+pub(crate) fn probing() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| cfg!(debug_assertions) || std::env::var(PROBE_ENV).is_ok_and(|v| v == "1"));
+    *ON
+}
+
+/// Writes diagnostics file `name` into the app data dir, when they are on ([`probing`]).
 pub(crate) fn write_probe(app: &AppHandle, name: &str, probe: &Value) {
+    if !probing() {
+        return;
+    }
     if let Ok(dir) = app.path().app_data_dir() {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(name), serde_json::to_string_pretty(probe).unwrap_or_default());
@@ -1031,10 +1046,7 @@ async fn connect(
     signed_in: bool,
     generation: u64,
 ) -> Result<Boot, String> {
-    let mut probe = json!({ "client": identity::ua_suffix() });
-    let result = connect_inner(app, state, jar, generation, &mut probe).await;
-    write_probe(app, "probe.json", &probe);
-    match result {
+    match connect_probed(app, state, jar, generation).await {
         Ok((snapshot, live)) => {
             let live = Arc::new(live);
             if !install(state, generation, live.clone()).await {
@@ -1084,7 +1096,9 @@ pub struct Threads {
 pub async fn followed_threads(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Threads, String> {
     let live = live(&state).await?;
     let v = live.xiva.call("history", &wire::thread_list(0), 30).await;
-    if let Ok(v) = &v {
+    if probing()
+        && let Ok(v) = &v
+    {
         write_probe(&app, "probe-threads.json", &{
             let mut entry = id_patterns(v);
             entry["shape"] = shape(v);
@@ -1242,7 +1256,8 @@ fn handle_incoming(
     log_push(&incoming, shared.lock().ok().and_then(|sh| sh.me.clone()).as_ref());
     match incoming {
         Incoming::Push { event, body } => {
-            if diag.fetch_add(1, Ordering::SeqCst) < MAX_DIAG_EVENTS
+            if probing()
+                && diag.fetch_add(1, Ordering::SeqCst) < MAX_DIAG_EVENTS
                 && let Ok(dir) = app.path().app_data_dir()
                 && let Ok(mut f) = std::fs::OpenOptions::new()
                     .create(true)
@@ -2837,8 +2852,7 @@ async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
             return false;
         }
         let Some(jar) = store::load() else { return false };
-        let mut probe = json!({});
-        match connect_inner(app, state, jar, generation, &mut probe).await {
+        match connect_probed(app, state, jar, generation).await {
             // Its close went to a reconnection that this loop turned away: try again.
             Ok((_, live)) if live.xiva.is_closed() => eprintln!("reconnect: the new connection closed at once"),
             Ok((snapshot, live)) => {
@@ -2918,6 +2932,19 @@ async fn whoami(xiva: &XivaClient, probe: &mut Value) -> Value {
     }
     probe["ws_whoami"] = json!(attempts);
     Value::Null
+}
+
+/// [`connect_inner`], with what it found out written to `probe.json` (see [`probing`]).
+async fn connect_probed(
+    app: &AppHandle,
+    state: &AppState,
+    jar: CookieJar,
+    generation: u64,
+) -> Result<(Snapshot, Live), ConnectError> {
+    let mut probe = json!({ "client": identity::ua_suffix() });
+    let result = connect_inner(app, state, jar, generation, &mut probe).await;
+    write_probe(app, "probe.json", &probe);
+    result
 }
 
 async fn connect_inner(

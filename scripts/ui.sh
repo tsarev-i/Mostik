@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the UI without trunk: cargo → wasm-bindgen → app/ui/dist.
-#   scripts/ui.sh build [--release]   build dist
-#   scripts/ui.sh serve [--release]   build and serve on http://127.0.0.1:1420
+#   scripts/ui.sh build [--release]   build dist for the app
+#   scripts/ui.sh serve [--release]   build with the demo data and serve on http://127.0.0.1:1420
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,6 +11,10 @@ CARGO_FLAGS=()
 if [[ "${2:-}" == "--release" ]]; then
   PROFILE=release
   CARGO_FLAGS=(--release)
+fi
+# Only the browser demo carries the demo data.
+if [[ "$CMD" == "serve" ]]; then
+  CARGO_FLAGS+=(--features demo)
 fi
 
 DIST="$ROOT/app/ui/dist"

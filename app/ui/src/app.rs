@@ -255,6 +255,21 @@ fn selected_in_message(ts: Timestamp) -> Option<String> {
     (!quote.is_empty()).then_some(quote)
 }
 
+/// Outside the app (`scripts/ui.sh serve`, a build with the `demo` feature): the demo data,
+/// with `#dev` open.
+#[cfg(feature = "demo")]
+fn show_demo(c: Ctx) {
+    let mut demo = mostik_core::mock::demo((js_sys::Date::now() * 1000.0) as Timestamp);
+    if let Some(ch) = demo.chats.iter_mut().find(|ch| ch.id.0 == "dev") {
+        ch.unread = 0;
+        ch.mentions = 0;
+    }
+    c.snap.set(demo);
+    c.phase.set(Phase::Ready);
+    ops::load_threads(c);
+    ops::open_chat(c, ChatId("dev".into()));
+}
+
 /// Closes the right-click menu.
 fn close_menus(c: Ctx) {
     c.ctx_menu.set(None);
@@ -785,15 +800,8 @@ pub fn App() -> impl IntoView {
         ops::subscribe(c);
         spawn_local(async move { ops::apply_boot(c, bridge::bootstrap().await) });
     } else {
-        let mut demo = mostik_core::mock::demo();
-        if let Some(ch) = demo.chats.iter_mut().find(|ch| ch.id.0 == "dev") {
-            ch.unread = 0;
-            ch.mentions = 0;
-        }
-        c.snap.set(demo);
-        c.phase.set(Phase::Ready);
-        ops::load_threads(c);
-        ops::open_chat(c, ChatId("dev".into()));
+        #[cfg(feature = "demo")]
+        show_demo(c);
     }
     // Only these two settings rebuild the whole view; the others are read where they apply.
     let lang_clock = Memo::new(move |_| c.settings.with(|s| (s.lang, s.clock24)));
@@ -7562,7 +7570,7 @@ mod tests {
 
     #[test]
     fn mention_suggestions_order() {
-        let mut s = mostik_core::mock::demo();
+        let mut s = mostik_core::mock::demo(1_794_300_000_000_000);
         let general = s
             .chats
             .iter()

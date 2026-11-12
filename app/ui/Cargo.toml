@@ -7,6 +7,10 @@ authors.workspace = true
 license.workspace = true
 description = "Mostik user interface (Leptos, wasm)"
 
+[features]
+# The demo data the UI shows in a plain browser (`scripts/ui.sh serve`); the app's UI goes without it.
+demo = ["mostik-core/mock"]
+
 [dependencies]
 mostik-core.workspace = true
 leptos = { version = "0.8", features = ["csr"] }
@@ -19,3 +23,6 @@ wasm-bindgen-futures = "0.4"
 serde.workspace = true
 serde_json.workspace = true
 emojis.workspace = true
+
+[dev-dependencies]
+mostik-core = { workspace = true, features = ["mock"] }

@@ -894,7 +894,11 @@ mod tests {
 
     #[test]
     fn mock_snapshot_is_consistent() {
-        let s = crate::mock::demo();
+        let now: Timestamp = 1_794_300_000 * 1_000_000;
+        let s = crate::mock::demo(now);
+        // Seen from `now`, the newest message is five minutes old.
+        let newest = s.messages.iter().map(|m| m.ts).max();
+        assert_eq!(newest, Some(now - 5 * 60 * 1_000_000));
         for m in &s.messages {
             assert!(s.chat(&m.chat_id).is_some(), "message in an unknown chat");
             assert!(s.user(&m.author).is_some(), "unknown author");
