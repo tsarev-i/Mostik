@@ -107,6 +107,9 @@ pub struct Ctx {
     pub ring: RwSignal<Option<bridge::Ring>>,
     /// Calls going on in chats (from their call notes), with the meeting links.
     pub active_calls: Memo<std::collections::BTreeMap<ChatId, String>>,
+    /// The latest call of every chat Telemost reported since the connection, with its start and
+    /// the number of people in it.
+    pub meetings: RwSignal<std::collections::HashMap<ChatId, Meeting>>,
     /// Followed threads with their unread replies, newest first.
     pub threads: RwSignal<Vec<FollowedThread>>,
     /// People picked from `@` suggestions or named in an edited message, by the name the
@@ -408,6 +411,7 @@ pub fn App() -> impl IntoView {
                 .collect::<folders::Folders>()
         })
     });
+    let settings = RwSignal::new(Settings::load());
     let c = Ctx {
         snap,
         current: RwSignal::new(ChatId(String::new())),
@@ -445,7 +449,7 @@ pub fn App() -> impl IntoView {
         replying: RwSignal::new(None),
         pins_tab: RwSignal::new(false),
         browsing: RwSignal::new(false),
-        settings: RwSignal::new(Settings::load()),
+        settings,
         status_dialog: RwSignal::new(false),
         dnd_until: RwSignal::new(None),
         pending_files: RwSignal::new(vec![]),
@@ -468,12 +472,16 @@ pub fn App() -> impl IntoView {
         call: RwSignal::new(None),
         ring: RwSignal::new(None),
         active_calls: Memo::new(move |_| snap.with(Snapshot::active_calls)),
+        meetings: RwSignal::new(Default::default()),
         threads: RwSignal::new(vec![]),
         picked: RwSignal::new(Default::default()),
         deleted: RwSignal::new(Default::default()),
         hidden: RwSignal::new(hidden::load()),
         folders: folder_list,
-        sections: Memo::new(move |_| snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f)))),
+        sections: Memo::new(move |_| {
+            let apart = settings.with(|s| s.group_calls_apart);
+            snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f, apart)))
+        }),
         folder_edit: RwSignal::new(None),
         custom: RwSignal::new(vec![]),
         adding_emoji: RwSignal::new(false),
@@ -1489,9 +1497,10 @@ fn chat_menu_items(c: Ctx, id: ChatId) -> impl IntoView {
 /// "Move to section" submenu of a chat: its own Telemost section, the folders and a new one.
 fn move_to_section_items(c: Ctx, id: ChatId) -> impl IntoView {
     let sub_open = RwSignal::new(false);
+    let apart = c.settings.with_untracked(|s| s.group_calls_apart);
     let home = c
         .snap
-        .with_untracked(|s| s.chat(&id).map(folders::home_section))
+        .with_untracked(|s| s.chat(&id).map(|ch| folders::shown_section(ch, apart)))
         .unwrap_or("channels");
     let (list, current) = c.folders.with_untracked(|f| {
         (
@@ -2654,9 +2663,12 @@ fn accepts(c: Ctx, d: &ChatDrag, to: &str) -> bool {
     if d.section == "starred" || to == "starred" {
         return false;
     }
+    let apart = c.settings.with_untracked(|s| s.group_calls_apart);
     folders::is_folder(to)
         || (folders::is_folder(&d.section)
-            && c.snap.with_untracked(|s| s.chat(&d.chat).map(folders::home_section)) == Some(to))
+            && c.snap
+                .with_untracked(|s| s.chat(&d.chat).map(|ch| folders::shown_section(ch, apart)))
+                == Some(to))
 }
 
 /// Where a dragged chat would land: the section under the pointer and, among its rows, next to
@@ -3067,9 +3079,14 @@ fn ChannelHeader() -> impl IntoView {
                         let current = c.current.get();
                         let joined = c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_deref() == Some(current.0.as_str())));
                         let live = !joined && c.active_calls.with(|a| a.contains_key(&current));
+                        let title = match (live, in_call(c, &current)) {
+                            (true, Some(n)) => format!("{} · {}", tr().call_live_hint, tr().in_call(n)),
+                            (true, None) => tr().call_live_hint.to_owned(),
+                            _ => tr().call_hint.to_owned(),
+                        };
                         view! {
                             <button class="huddle-btn" class:live=live class:active=joined
-                                title=if live { tr().call_live_hint } else { tr().call_hint }
+                                title=title
                                 on:click=move |_| ops::start_call(c, c.current.get_untracked())>
                                 {if live {
                                     view! { <Icon icon=I::Headphones size=16/> }.into_any()
@@ -3485,7 +3502,8 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
                 open.insert(note.url(), m.ts);
             }
             Some(note @ CallNote::Ended { .. }) => {
-                if let Some(start) = open.remove(note.url()) {
+                // The first call of a group call chat starts without a link.
+                if let Some(start) = open.remove(note.url()).or_else(|| open.remove("")) {
                     ends.insert(start, m.clone());
                     paired.insert(m.ts);
                 }
@@ -3525,6 +3543,15 @@ fn render_feed(list: Vec<Message>, in_thread: bool) -> Vec<AnyView> {
     }
     flush(&mut out, &mut day, day_ts);
     out
+}
+
+/// How many people are in the call going on in the chat, as Telemost last reported.
+fn in_call(c: Ctx, chat: &ChatId) -> Option<u32> {
+    c.meetings.with(|m| {
+        m.get(chat)
+            .filter(|m| !m.ended && m.participants > 0)
+            .map(|m| m.participants)
+    })
 }
 
 /// What a call line says, and whether it is a missed call. `anchor` is the note the line stands
@@ -3576,11 +3603,22 @@ fn CallRow(msg: Message, end: Option<Message>, live: bool) -> impl IntoView {
     let unanswered = end
         .as_ref()
         .is_some_and(|e| matches!(&e.call, Some(CallNote::Ended { reason: Some(r), .. }) if r.unanswered()));
+    let start = (!matches!(anchor, CallNote::Ended { .. })).then_some(msg.ts);
     let lasted = end
         .as_ref()
-        .filter(|e| e.ts != msg.ts && !unanswered)
-        .map(|e| tr().call_lasted(e.ts.saturating_sub(msg.ts) / 60_000_000));
+        .filter(|_| !unanswered)
+        .and_then(|e| call_seconds(e, start))
+        .map(|s| tr().call_lasted(s / 60));
     let chat = msg.chat_id.clone();
+    // How many are in the call while it goes on, as Telemost last reported.
+    let people = live.then(|| {
+        let chat = chat.clone();
+        view! {
+            {move || in_call(c, &chat).map(|n| view! {
+                <span class="call-note-sep">"·"</span><span class="call-note-meta">{tr().in_call(n)}</span>
+            })}
+        }
+    });
     // The button stays while the call goes on: a later end note removes it.
     let join = live.then(|| {
         view! {
@@ -3607,6 +3645,7 @@ fn CallRow(msg: Message, end: Option<Message>, live: bool) -> impl IntoView {
                 {who.map(|w| view! { <span class="call-note-sep">"·"</span>{w} })}
                 <span class="msg-time">{time::hm(msg.ts)}</span>
                 {lasted.map(|l| view! { <span class="call-note-sep">"·"</span><span class="call-note-meta">{l}</span> })}
+                {people}
             </div>
             {join}
         </div>
@@ -6540,6 +6579,9 @@ fn PrefHome() -> impl IntoView {
         {radio(c, "sb-sort", tr().s_custom, SidebarSort::Custom, gs, ss)}
         <h3 class="pref-h">{tr().p_muted}</h3>
         {checkbox(c, tr().hide_muted, |s| s.hide_muted, |s, v| s.hide_muted = v)}
+        <h3 class="pref-h">{tr().p_sections}</h3>
+        {checkbox(c, tr().p_group_calls_apart, |s| s.group_calls_apart, |s, v| s.group_calls_apart = v)}
+        <p class="pref-hint">{tr().p_group_calls_hint}</p>
     }
 }
 

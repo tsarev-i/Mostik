@@ -86,12 +86,28 @@ pub fn new_id(folders: &Folders, random: u64) -> String {
         .unwrap_or_default()
 }
 
+/// The section of group call chats when the setting puts them apart from the other meeting
+/// chats. Like "Meeting chats", it is Mostik's own and not a Telemost folder: every new group
+/// call goes there by its chat namespace, with nothing written to Telemost, and the setting
+/// stays on this device.
+pub const GROUP_CALLS: &str = "calls";
+
 /// The Telemost section a chat belongs to by its kind.
 pub fn home_section(ch: &Chat) -> &'static str {
     match ch.kind {
         ChatKind::Direct { .. } | ChatKind::Notes => "dms",
-        _ if ch.id.0.starts_with("0/22/") || ch.id.0.starts_with("0/32/") => "meetings",
+        _ if ch.id.is_meeting() => "meetings",
         _ => "channels",
+    }
+}
+
+/// The section a chat shows in by its kind: its Telemost section, or [`GROUP_CALLS`] for a group
+/// call with `calls_apart`.
+pub fn shown_section(ch: &Chat, calls_apart: bool) -> &'static str {
+    if calls_apart && ch.id.is_group_call() {
+        GROUP_CALLS
+    } else {
+        home_section(ch)
     }
 }
 
@@ -109,8 +125,9 @@ pub fn folder_of<'a>(folders: &'a Folders, chat: &ChatId) -> Option<&'a Folder> 
 }
 
 /// The sidebar sections: "Starred", then the folders in their order, then the Telemost sections
-/// without the chats taken into folders. Folders show only chats the sections know.
-pub fn arrange(sections: &[Section], folders: &Folders) -> Vec<Section> {
+/// without the chats taken into folders. Folders show only chats the sections know. With
+/// `calls_apart` the group calls leave "Meeting chats" for [`GROUP_CALLS`] right after it.
+pub fn arrange(sections: &[Section], folders: &Folders, calls_apart: bool) -> Vec<Section> {
     let starred: &[ChatId] = sections
         .iter()
         .find(|s| s.id == "starred")
@@ -130,11 +147,23 @@ pub fn arrange(sections: &[Section], folders: &Folders) -> Vec<Section> {
                 .collect(),
         }
     }));
-    out.extend(sections.iter().filter(|s| s.id != "starred").map(|s| Section {
-        id: s.id.clone(),
-        title: s.title.clone(),
-        chats: s.chats.iter().filter(|id| !filed(id)).cloned().collect(),
-    }));
+    for s in sections.iter().filter(|s| s.id != "starred") {
+        let chats: Vec<ChatId> = s.chats.iter().filter(|id| !filed(id)).cloned().collect();
+        if calls_apart && s.id == "meetings" {
+            let (calls, meetings) = chats.into_iter().partition(ChatId::is_group_call);
+            out.push(Section {
+                chats: meetings,
+                ..s.clone()
+            });
+            out.push(Section {
+                id: GROUP_CALLS.into(),
+                title: "Group calls".into(),
+                chats: calls,
+            });
+        } else {
+            out.push(Section { chats, ..s.clone() });
+        }
+    }
     out
 }
 
@@ -217,7 +246,7 @@ mod tests {
         ];
         // "s" is starred and stays there; "gone" is unknown and is not shown.
         let folders = vec![folder("folder:1", &["c", "s", "gone", "d"]), folder("folder:2", &[])];
-        let out = arrange(&sections, &folders);
+        let out = arrange(&sections, &folders, false);
         let got: Vec<(&str, Vec<ChatId>)> = out.iter().map(|s| (s.id.as_str(), s.chats.clone())).collect();
         assert_eq!(
             got,
@@ -230,7 +259,59 @@ mod tests {
             ]
         );
         assert_eq!(out[1].title, "FOLDER:1");
-        assert_eq!(arrange(&sections, &vec![]), sections);
+        assert_eq!(arrange(&sections, &vec![], false), sections);
+    }
+
+    #[test]
+    fn group_calls_go_apart_only_when_asked() {
+        let sections = vec![
+            section("channels", &["a"]),
+            section("meetings", &["0/22/m", "0/58/g1", "0/58/g2"]),
+        ];
+        let folders = vec![folder("folder:1", &["0/58/g2"])];
+        let got = |apart| -> Vec<(String, Vec<ChatId>)> {
+            arrange(&sections, &folders, apart)
+                .into_iter()
+                .map(|s| (s.id, s.chats))
+                .collect()
+        };
+        assert_eq!(
+            got(false),
+            vec![
+                ("folder:1".into(), ids(&["0/58/g2"])),
+                ("channels".into(), ids(&["a"])),
+                ("meetings".into(), ids(&["0/22/m", "0/58/g1"])),
+            ]
+        );
+        // A group call put into a folder stays there.
+        assert_eq!(
+            got(true),
+            vec![
+                ("folder:1".into(), ids(&["0/58/g2"])),
+                ("channels".into(), ids(&["a"])),
+                ("meetings".into(), ids(&["0/22/m"])),
+                (GROUP_CALLS.into(), ids(&["0/58/g1"])),
+            ]
+        );
+        let chat = |id: &str| Chat {
+            id: ChatId(id.into()),
+            kind: ChatKind::Group { public: false },
+            name: String::new(),
+            description: None,
+            member_count: 3,
+            unread: 0,
+            mentions: 0,
+            muted: false,
+            mute_mentions: false,
+            last_ts: 0,
+            pinned: None,
+            organizations: vec![],
+        };
+        assert_eq!(home_section(&chat("0/58/g1")), "meetings");
+        assert_eq!(shown_section(&chat("0/58/g1"), true), GROUP_CALLS);
+        assert_eq!(shown_section(&chat("0/58/g1"), false), "meetings");
+        assert_eq!(shown_section(&chat("0/22/m"), true), "meetings");
+        assert_eq!(shown_section(&chat("0/0/a"), true), "channels");
     }
 
     #[test]

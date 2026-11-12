@@ -115,3 +115,9 @@ until then Noto Sans is used.
   leftover "In meeting" status is cleared. WebKitGTK has no WebRTC, so on Linux the window is an
   installed Chromium-based browser in app mode driven over a DevTools pipe (`call.rs`, `cdp.rs`); on Windows
   it is a WebView2 window.
+- A call is one line in its chat, as a huddle is in Slack: who started it, how many are in it now
+  (`StateSync` `meeting_updated`) and "Join"; once over, how long it lasted (`DurationSeconds` of a direct
+  call, the time since the start for a group one). A group call started outside a chat gets a temporary
+  chat of its own (`0/58/…`, "Групповой звонок 01.02 в 10:00") whose creation starts its first call; these
+  chats are meeting chats, or with Preferences → Home → "Group calls in a section of their own" a
+  "Group calls" section of Mostik's own (not a Telemost folder, so nothing is written to Telemost).

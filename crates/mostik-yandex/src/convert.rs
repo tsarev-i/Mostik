@@ -18,11 +18,6 @@ fn n(v: &Value, path: &[&str]) -> Option<u64> {
     x.as_u64().or_else(|| x.as_f64().map(|f| f as u64))
 }
 
-/// Telemost meeting chat: namespaces 22 and 32 (`namespace_aliases.telemost` in config.json).
-pub fn is_meeting_chat(chat_id: &str) -> bool {
-    chat_id.starts_with("0/22/") || chat_id.starts_with("0/32/")
-}
-
 /// Thread chat for message `ts` of chat `chat_id`: `0/<ns>/<uuid>` → `100/<ns>/<uuid>_<ts>`.
 /// Verified on a live session for `0/0/…` groups; other chats do not support threads.
 pub fn thread_chat_id(chat_id: &str, ts: Timestamp) -> Option<String> {
@@ -259,8 +254,11 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
 
 /// Telemost's note about a call in the chat:
 /// - `SystemMessage{ChatId, MeetingStartedMessage | MeetingEndedMessage: {MeetingId}}` for a
-///   group call, `PersonalMeetingEndedMessage: {MeetingId, CallType, Reason}` for a direct one;
-///   the author is whoever started or ended the call;
+///   group call, `PersonalMeetingEndedMessage: {MeetingId, CallType, Reason, DurationSeconds}`
+///   for a direct one; the author is whoever started or ended the call;
+/// - `SystemMessage{ChatId, ChatCreatedInfo}` in a group call chat (`0/58/…`): the chat is made
+///   for a call, so its creation is the start of its first call, which has no start note and
+///   no link until it ends;
 /// - `MeetingCallingMessage{IncomingCall: {MeetingInfo: {ChatId, MeetingId, CreateTimestamp}}}`:
 ///   a direct call ringing. It repeats every 5 s while the call rings and history never has it;
 ///   all repeats become one note at the meeting's creation time, without a sequence number.
@@ -275,6 +273,14 @@ fn call_note(sm: &Value) -> Option<Message> {
     }
     let info = &sm["ServerMessageInfo"];
     let (chat, ts, kind, meeting) = if let Some(sys) = sm.pointer("/ClientMessage/SystemMessage") {
+        let chat = s(sys, &["ChatId"])?;
+        let ts = n(info, &["Timestamp"])?;
+        if sys.get("ChatCreatedInfo").is_some() && ChatId(chat.to_owned()).is_group_call() {
+            return Some(Message {
+                call: Some(CallNote::Started { url: String::new() }),
+                ..system_note(chat, ts, info)
+            });
+        }
         let (kind, meeting) = [
             ("MeetingStartedMessage", Kind::Started),
             ("PersonalMeetingStartedMessage", Kind::Started),
@@ -283,7 +289,7 @@ fn call_note(sm: &Value) -> Option<Message> {
         ]
         .into_iter()
         .find_map(|(name, kind)| sys.get(name).map(|m| (kind, m)))?;
-        (s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, kind, meeting)
+        (chat, ts, kind, meeting)
     } else {
         let meeting = sm.pointer("/ClientMessage/MeetingCallingMessage/IncomingCall/MeetingInfo")?;
         (
@@ -294,7 +300,31 @@ fn call_note(sm: &Value) -> Option<Message> {
         )
     };
     let url = meeting_url(s(meeting, &["MeetingId"])?);
+    let seconds = n(meeting, &["DurationSeconds"]);
     Some(Message {
+        call: Some(match kind {
+            Kind::Started => CallNote::Started { url },
+            Kind::Ringing => CallNote::Ringing { url },
+            Kind::Ended => CallNote::Ended {
+                url,
+                reason: None,
+                seconds,
+            },
+            // Zero is left out of the JSON: no `Reason` is 0, "declined" (the web client reads
+            // it as `Reason || 0` too).
+            Kind::PersonalEnded => CallNote::Ended {
+                url,
+                reason: CallEndReason::from_code(n(meeting, &["Reason"]).unwrap_or(0)),
+                seconds,
+            },
+        }),
+        ..system_note(chat, ts, info)
+    })
+}
+
+/// An empty message of Telemost's in `chat` at `ts`, from whoever `info` says it is from.
+fn system_note(chat: &str, ts: Timestamp, info: &Value) -> Message {
+    Message {
         chat_id: ChatId(chat.to_owned()),
         ts,
         author: UserId(s(info, &["From", "Guid"]).unwrap_or_default().to_owned()),
@@ -307,18 +337,8 @@ fn call_note(sm: &Value) -> Option<Message> {
         seq_no: n(info, &["SeqNo"]).unwrap_or(0),
         attachments: vec![],
         forwarded: vec![],
-        call: Some(match kind {
-            Kind::Started => CallNote::Started { url },
-            Kind::Ringing => CallNote::Ringing { url },
-            Kind::Ended => CallNote::Ended { url, reason: None },
-            // Zero is left out of the JSON: no `Reason` is 0, "declined" (the web client reads
-            // it as `Reason || 0` too).
-            Kind::PersonalEnded => CallNote::Ended {
-                url,
-                reason: CallEndReason::from_code(n(meeting, &["Reason"]).unwrap_or(0)),
-            },
-        }),
-    })
+        call: None,
+    }
 }
 
 /// A push about a direct call ringing for the user:
@@ -633,6 +653,8 @@ pub enum LiveEvent {
     Mutings {
         chats: Vec<(ChatId, NotifyLevel)>,
     },
+    /// A call in a chat changed: people joined or left, or it ended.
+    Meeting(Meeting),
 }
 
 /// Parses the body of a `delivery` push. `None` means the event is not of interest yet.
@@ -720,8 +742,9 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
 }
 
 /// A `StateSync` push: `Data` is base64 JSON `{"type": …, "data": {…}}`, a change of the
-/// user's chats or synced settings. Types seen: `you_added`, `you_removed`, `chat_info_changed`,
-/// `members_changed_v2`, `user_bucket`; `roles_changed` and `meeting_updated` are not used.
+/// user's chats, synced settings or calls. Types seen: `you_added`, `you_removed`,
+/// `chat_info_changed`, `members_changed_v2`, `user_bucket`, `meeting_updated`; `roles_changed`
+/// is not used.
 fn state_sync(sync: &Value) -> Option<LiveEvent> {
     let data: Value = serde_json::from_slice(&base64(s(sync, &["Data"])?)?).ok()?;
     let d = &data["data"];
@@ -747,6 +770,15 @@ fn state_sync(sync: &Value) -> Option<LiveEvent> {
             description: None,
             member_count: Some(count()?),
         }),
+        // `{meeting_id, chat_id, create_timestamp, participants_count, max_participants_count,
+        // status, version}`, for every chat the user is in, whether or not they are in the call.
+        "meeting_updated" => Some(LiveEvent::Meeting(Meeting {
+            chat_id: chat_id()?,
+            url: meeting_url(s(d, &["meeting_id"])?),
+            started: n(d, &["create_timestamp"])?,
+            participants: n(d, &["participants_count"]).unwrap_or(0) as u32,
+            ended: n(d, &["status"]) == Some(2),
+        })),
         "user_bucket" => {
             let value = &d["bucket_value"];
             match s(d, &["bucket_name"])? {
@@ -822,7 +854,7 @@ fn chat_mutings(value: &Value) -> Vec<(ChatId, NotifyLevel)> {
 pub fn section_of(chat: &Chat) -> &'static str {
     match chat.kind {
         ChatKind::Direct { .. } | ChatKind::Notes => "dms",
-        _ if is_meeting_chat(&chat.id.0) => "meetings",
+        _ if chat.id.is_meeting() => "meetings",
         _ => "channels",
     }
 }
@@ -1337,6 +1369,8 @@ mod tests {
         assert_eq!(section_of(&ch), "dms");
         let meeting = json!({"chat_id": "0/22/m", "name": "Sync"});
         assert_eq!(section_of(&chat_from_info(&meeting, Some(&me)).unwrap()), "meetings");
+        let group_call = json!({"chat_id": "0/58/m", "name": "Group call 01.02 at 10:00"});
+        assert_eq!(section_of(&chat_from_info(&group_call, Some(&me)).unwrap()), "meetings");
     }
 
     #[test]
@@ -1369,6 +1403,7 @@ mod tests {
                 Some(CallNote::Ended {
                     url: "https://telemost.360.yandex.ru/j/123".into(),
                     reason: None,
+                    seconds: None,
                 })
             ),
             other => panic!("{other:?}"),
@@ -1418,6 +1453,7 @@ mod tests {
                     Some(CallNote::Ended {
                         url: url.into(),
                         reason: Some(CallEndReason::Timeout),
+                        seconds: None,
                     })
                 );
                 assert!(!message.is_ringing());
@@ -1434,6 +1470,7 @@ mod tests {
                 Some(CallNote::Ended {
                     url: url.into(),
                     reason: Some(CallEndReason::Declined),
+                    seconds: None,
                 })
             ),
             other => panic!("{other:?}"),
@@ -1443,6 +1480,70 @@ mod tests {
         assert_eq!(from_push(&rang_off, None), None);
         assert_eq!(ringing(&rang_off), Some(Ringing::Ended { id: "r1".into() }));
         assert_eq!(ringing(&ended), None);
+        // A call that was answered says how long it lasted.
+        let talked = json!({"ClientMessage": {"SystemMessage": {"ChatId": chat, "PayloadId": "p",
+                "PersonalMeetingEndedMessage": {"DurationSeconds": 150, "MeetingId": url, "Reason": 2}}},
+            "ServerMessageInfo": {"From": {"Guid": "aa"}, "SeqNo": 52, "Timestamp": 2_000}});
+        match from_push(&talked, None) {
+            Some(LiveEvent::Upsert { message, .. }) => assert_eq!(
+                message.call,
+                Some(CallNote::Ended {
+                    url: url.into(),
+                    reason: Some(CallEndReason::Disconnected),
+                    seconds: Some(150),
+                })
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A group call chat (`0/58/…`) as its history page has it: Telemost's note that the chat is
+    /// temporary, the chat created by whoever started the call, the first call's end without a
+    /// start, then a second call with both notes.
+    #[test]
+    fn group_call_chat_starts_with_its_call() {
+        let url = "https://telemost.360.yandex.ru/j/555";
+        let sys = |ts: u64, from: &str, body: Value| {
+            let mut sys = json!({"ChatId": "0/58/g1", "PayloadId": "p"});
+            for (k, v) in body.as_object().unwrap() {
+                sys[k] = v.clone();
+            }
+            json!({"ServerMessage": {"ClientMessage": {"SystemMessage": sys},
+                "ServerMessageInfo": {"From": {"Guid": from}, "Timestamp": ts}}})
+        };
+        let page = json!({"Chats": [{"ChatId": "0/58/g1", "LastSeqNo": 3, "Messages": [
+            sys(10, "11111111-1111-1111-1111-111111111111",
+                json!({"GenericMessage": {"LocKey": "meetings.extended_chat_delete_alert"}})),
+            sys(11, "u1", json!({"ChatCreatedInfo": {"InitialInfo": {"Name": "Group call 01.02 at 10:00"}}})),
+            sys(12, "u1", json!({"ParticipantsChangedDiff": {"AddedUsers": [{"Guid": "u2"}]}})),
+            sys(500, "u1", json!({"MeetingEndedMessage": {"CallType": 1, "MeetingId": url}})),
+            sys(700, "u2", json!({"MeetingStartedMessage": {"MeetingId": url}})),
+            sys(900, "u2", json!({"MeetingEndedMessage": {"MeetingId": url}})),
+        ]}]});
+        let data = from_history(&page, None);
+        let notes: Vec<(Timestamp, &str, Option<&CallNote>)> = data
+            .messages
+            .iter()
+            .map(|m| (m.ts, m.author.0.as_str(), m.call.as_ref()))
+            .collect();
+        let ended = CallNote::Ended {
+            url: url.into(),
+            reason: None,
+            seconds: None,
+        };
+        assert_eq!(
+            notes,
+            vec![
+                (11, "u1", Some(&CallNote::Started { url: String::new() })),
+                (500, "u1", Some(&ended)),
+                (700, "u2", Some(&CallNote::Started { url: url.into() })),
+                (900, "u2", Some(&ended)),
+            ]
+        );
+        // An ordinary group made by someone is not a call.
+        let made = json!({"ClientMessage": {"SystemMessage": {"ChatId": "0/0/g2", "ChatCreatedInfo": {}}},
+            "ServerMessageInfo": {"From": {"Guid": "u1"}, "Timestamp": 5}});
+        assert_eq!(from_push(&made, None), None);
     }
 
     #[test]
@@ -1585,7 +1686,6 @@ mod tests {
         );
         assert_eq!(chat_kind("aa_aa", Some(&me), false), ChatKind::Notes);
         assert_eq!(chat_kind("1/0/x", Some(&me), true), ChatKind::Broadcast);
-        assert!(is_meeting_chat("0/22/x") && !is_meeting_chat("0/0/x"));
         assert_eq!(thread_chat_id("0/0/abc-1", 42).as_deref(), Some("100/0/abc-1_42"));
         assert_eq!(thread_chat_id("aa_bb", 42), None);
         assert_eq!(thread_parent("100/0/abc-1_42"), Some(("0/0/abc-1".into(), 42)));
@@ -2041,6 +2141,31 @@ mod tests {
         );
         let status = sync_push(json!({"type": "user_bucket", "data": {"bucket_name": "status", "bucket_value": {}}}));
         assert_eq!(from_push(&status, Some(&me)), None);
+        let meeting = |status: u64, count: u64| {
+            sync_push(json!({"type": "meeting_updated", "data": {
+                "meeting_id": "https://telemost.360.yandex.ru/j/555", "chat_id": "0/58/g1",
+                "create_timestamp": 1_000, "participants_count": count, "max_participants_count": 300,
+                "status": status, "version": 2_000}}))
+        };
+        let going = Meeting {
+            chat_id: ChatId("0/58/g1".into()),
+            url: "https://telemost.360.yandex.ru/j/555".into(),
+            started: 1_000,
+            participants: 3,
+            ended: false,
+        };
+        assert_eq!(
+            from_push(&meeting(1, 3), Some(&me)),
+            Some(LiveEvent::Meeting(going.clone()))
+        );
+        assert_eq!(
+            from_push(&meeting(2, 0), Some(&me)),
+            Some(LiveEvent::Meeting(Meeting {
+                participants: 0,
+                ended: true,
+                ..going
+            }))
+        );
         assert_eq!(base64("aGk"), Some(b"hi".to_vec()));
         assert_eq!(base64("aGk="), Some(b"hi".to_vec()));
         assert_eq!(base64("a*"), None);

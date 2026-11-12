@@ -12,6 +12,20 @@ pub struct UserId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChatId(pub String);
 
+impl ChatId {
+    /// A chat of Telemost meetings: namespaces 22 and 32 (`namespace_aliases.telemost` in
+    /// config.json) and the group call chats of namespace 58.
+    pub fn is_meeting(&self) -> bool {
+        ["0/22/", "0/32/"].iter().any(|ns| self.0.starts_with(ns)) || self.is_group_call()
+    }
+
+    /// The chat Telemost makes for a group call started outside any chat, named like
+    /// "Групповой звонок 01.02 в 10:00": namespace 58, `0/58/<uuid>`.
+    pub fn is_group_call(&self) -> bool {
+        self.0.starts_with("0/58/")
+    }
+}
+
 /// Coarse presence shown as the dot on an avatar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Presence {
@@ -219,18 +233,20 @@ impl Message {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CallNote {
-    Started {
-        url: String,
-    },
+    /// The call started. `url` is empty when Telemost does not say: the first call of a group
+    /// call chat starts with the chat itself, and nothing in it has the link until the call ends.
+    Started { url: String },
     /// Someone is calling the user in a direct chat; it ends with `Ended` like a started call.
-    Ringing {
-        url: String,
-    },
+    Ringing { url: String },
     Ended {
         url: String,
         /// Why a direct call ended; group calls do not say.
         #[serde(default)]
         reason: Option<CallEndReason>,
+        /// How long the call lasted, in seconds: `DurationSeconds` of a direct call. Group calls
+        /// do not say; the UI fills it in from the meeting's start when it saw the call end.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seconds: Option<u64>,
     },
 }
 
@@ -241,6 +257,36 @@ impl CallNote {
             CallNote::Started { url } | CallNote::Ringing { url } | CallNote::Ended { url, .. } => url,
         }
     }
+}
+
+/// How long a call lasted, in seconds, from its end note: Telemost's own count for a direct call,
+/// else the time since `start`, the call's start note or its meeting's creation.
+pub fn call_seconds(end: &Message, start: Option<Timestamp>) -> Option<u64> {
+    match &end.call {
+        Some(CallNote::Ended {
+            seconds: Some(seconds), ..
+        }) => Some(*seconds),
+        Some(CallNote::Ended { .. }) => start
+            .filter(|start| *start < end.ts)
+            .map(|start| (end.ts - start) / 1_000_000),
+        _ => None,
+    }
+}
+
+/// A call in a chat as Telemost reports it in `StateSync` `meeting_updated`: on every change while
+/// it goes on (people join or leave) and once more when it ends, right before its end note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Meeting {
+    pub chat_id: ChatId,
+    /// The meeting link, as in the chat's call notes.
+    pub url: String,
+    /// When the meeting was created (`create_timestamp`): the start of a group call even when its
+    /// start note is not loaded or there is none.
+    pub started: Timestamp,
+    /// How many people are in the call (`participants_count`).
+    pub participants: u32,
+    /// The call is over: `status` 2 (0 is "nobody joined yet", 1 "going on").
+    pub ended: bool,
 }
 
 /// Why a direct call ended: Telemost's `MeetingEndedReason`.
@@ -698,6 +744,34 @@ mod tests {
     }
 
     #[test]
+    fn meeting_chats_by_namespace() {
+        let id = |s: &str| ChatId(s.into());
+        assert!(id("0/22/a").is_meeting() && id("0/32/a").is_meeting());
+        assert!(id("0/58/a").is_meeting() && id("0/58/a").is_group_call());
+        assert!(!id("0/22/a").is_group_call());
+        assert!(!id("0/0/a").is_meeting() && !id("100/58/a_1").is_group_call());
+    }
+
+    #[test]
+    fn call_lengths() {
+        let end = |seconds| Message {
+            call: Some(CallNote::Ended {
+                url: "u".into(),
+                reason: None,
+                seconds,
+            }),
+            ..msg("u1", 100_000_000)
+        };
+        // Telemost's own count wins over the start.
+        assert_eq!(call_seconds(&end(Some(42)), Some(1_000_000)), Some(42));
+        assert_eq!(call_seconds(&end(None), Some(40_000_000)), Some(60));
+        assert_eq!(call_seconds(&end(None), None), None);
+        // A start after the end is someone else's call.
+        assert_eq!(call_seconds(&end(None), Some(200_000_000)), None);
+        assert_eq!(call_seconds(&msg("u1", 100_000_000), Some(1)), None);
+    }
+
+    #[test]
     fn active_calls_follow_the_latest_note() {
         let note = |chat: &str, ts, started: bool| Message {
             chat_id: ChatId(chat.into()),
@@ -709,6 +783,7 @@ mod tests {
                 CallNote::Ended {
                     url: format!("u-{chat}"),
                     reason: None,
+                    seconds: None,
                 }
             }),
             ..msg("u1", ts)

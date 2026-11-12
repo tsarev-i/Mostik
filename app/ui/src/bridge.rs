@@ -130,6 +130,7 @@ pub enum LiveEvent {
     Mutings {
         chats: Vec<(ChatId, mostik_core::NotifyLevel)>,
     },
+    Meeting(mostik_core::Meeting),
 }
 
 pub const EVENT: &str = "mostik://event";

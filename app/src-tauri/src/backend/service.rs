@@ -303,6 +303,7 @@ fn event_chat(ev: &LiveEvent) -> Option<(&str, bool)> {
         | LiveEvent::ChatRemoved { chat_id }
         | LiveEvent::ChatChanged { chat_id, .. } => (chat_id.0.as_str(), false),
         LiveEvent::ChatAdded { chat, .. } => (chat.id.0.as_str(), false),
+        LiveEvent::Meeting(m) => (m.chat_id.0.as_str(), false),
         _ => return None,
     })
 }

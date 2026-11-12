@@ -215,7 +215,8 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             if !mentioned.is_empty() {
                 c.snap.update(|s| learn_users(s, mentioned));
             }
-            upsert(c, *message, author)
+            let message = c.meetings.with_untracked(|m| with_call_length(*message, m));
+            upsert(c, message, author)
         }
         LiveEvent::Deleted {
             chat_id,
@@ -282,6 +283,8 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
         LiveEvent::Connection { online } => {
             if !online {
                 forget_fresh();
+                // Telemost reports a call when it changes: one going on may change unseen now.
+                c.meetings.update(|m| m.retain(|_, m| m.ended));
             }
             c.online.set(online)
         }
@@ -333,6 +336,9 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
                 c.snap.update(|s| apply_starred(s, chats));
             }
         }
+        LiveEvent::Meeting(m) => c.meetings.update(|list| {
+            list.insert(m.chat_id.clone(), m);
+        }),
         LiveEvent::Mutings { chats } => c.snap.update(|s| {
             for ch in &mut s.chats {
                 let level = chats
@@ -765,15 +771,40 @@ pub fn load_threads(c: Ctx) {
     });
 }
 
-/// A message Telemost sent again, with the thread details this session knows from `old`.
+/// A message Telemost sent again, with the thread details and the call length this session
+/// knows from `old`.
 fn keep_known(mut m: Message, old: &[Message]) -> Message {
+    let Some(known) = old.iter().find(|o| o.chat_id == m.chat_id && o.ts == m.ts) else {
+        return m;
+    };
     if let Some(t) = m.thread.as_mut()
-        && let Some(known) = old
-            .iter()
-            .find(|o| o.chat_id == m.chat_id && o.ts == m.ts)
-            .and_then(|o| o.thread.as_ref())
+        && let Some(known) = known.thread.as_ref()
     {
         t.keep_known(known);
+    }
+    if let Some(CallNote::Ended { seconds: s @ None, .. }) = m.call.as_mut()
+        && let Some(CallNote::Ended {
+            seconds: Some(lasted), ..
+        }) = known.call
+    {
+        *s = Some(lasted);
+    }
+    m
+}
+
+/// The end of a group call with its length: Telemost reports the call ended, with its start,
+/// a moment before the end note comes, which does not say how long it went.
+fn with_call_length(mut m: Message, meetings: &std::collections::HashMap<ChatId, Meeting>) -> Message {
+    let Some(meeting) = meetings.get(&m.chat_id).filter(|meeting| meeting.ended) else {
+        return m;
+    };
+    let lasted = call_seconds(&m, Some(meeting.started));
+    if let Some(CallNote::Ended {
+        url, seconds: s @ None, ..
+    }) = m.call.as_mut()
+        && *url == meeting.url
+    {
+        *s = lasted;
     }
     m
 }
@@ -1164,7 +1195,19 @@ pub fn start_call(c: Ctx, chat: ChatId) {
             }
         })
     });
-    let url = c.active_calls.with_untracked(|a| a.get(&chat).cloned());
+    // The first call of a group call chat has no link in its notes: Telemost's report of the call
+    // has it, or `create_meeting` finds it.
+    let url = c
+        .active_calls
+        .with_untracked(|a| a.get(&chat).cloned())
+        .and_then(|url| {
+            if url.is_empty() {
+                c.meetings
+                    .with_untracked(|m| m.get(&chat).filter(|m| !m.ended).map(|m| m.url.clone()))
+            } else {
+                Some(url)
+            }
+        });
     c.notice.set(Some(tr().call_opening.into()));
     spawn_local(async move {
         if let Err(e) = bridge::start_call(&chat.0, &label, url.as_deref()).await {

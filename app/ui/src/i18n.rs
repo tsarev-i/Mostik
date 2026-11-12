@@ -157,6 +157,7 @@ pub struct Tr {
     pub sec_channels: &'static str,
     pub sec_dms: &'static str,
     pub sec_meetings: &'static str,
+    pub sec_group_calls: &'static str,
     // Chat header
     pub members: &'static str,
     pub call: &'static str,
@@ -295,6 +296,9 @@ pub struct Tr {
     pub p_home: &'static str,
     pub p_active_hint: &'static str,
     pub p_muted: &'static str,
+    pub p_sections: &'static str,
+    pub p_group_calls_apart: &'static str,
+    pub p_group_calls_hint: &'static str,
     // Preferences
     pub p_notifications: &'static str,
     pub p_appearance: &'static str,
@@ -538,6 +542,7 @@ pub static RU: Tr = Tr {
     sec_channels: "Каналы",
     sec_dms: "Личные сообщения",
     sec_meetings: "Чаты встреч",
+    sec_group_calls: "Групповые звонки",
     members: "Участники",
     call: "Созвон",
     call_hint: "Созвон в Телемосте",
@@ -680,6 +685,9 @@ pub static RU: Tr = Tr {
     p_home: "Главная",
     p_active_hint: "Скрывает беседы без новых сообщений за последние 30 дней.",
     p_muted: "Беседы без звука",
+    p_sections: "Секции",
+    p_group_calls_apart: "Групповые звонки в отдельной секции",
+    p_group_calls_hint: "Чаты групповых звонков попадают в секцию «Групповые звонки», а не в «Чаты встреч».",
     p_notifications: "Уведомления",
     p_appearance: "Оформление",
     p_messages_media: "Сообщения и медиа",
@@ -925,6 +933,7 @@ pub static EN: Tr = Tr {
     sec_channels: "Channels",
     sec_dms: "Direct messages",
     sec_meetings: "Meeting chats",
+    sec_group_calls: "Group calls",
     members: "Members",
     call: "Call",
     call_hint: "Telemost call",
@@ -1067,6 +1076,9 @@ pub static EN: Tr = Tr {
     p_home: "Home",
     p_active_hint: "Hides conversations with no new activity in the past 30 days.",
     p_muted: "Muted conversations",
+    p_sections: "Sections",
+    p_group_calls_apart: "Group calls in a section of their own",
+    p_group_calls_hint: "Group call chats go into “Group calls” instead of “Meeting chats”.",
     p_notifications: "Notifications",
     p_appearance: "Appearance",
     p_messages_media: "Messages & media",
@@ -1227,6 +1239,7 @@ impl Tr {
             "channels" => self.sec_channels,
             "dms" => self.sec_dms,
             "meetings" => self.sec_meetings,
+            crate::folders::GROUP_CALLS => self.sec_group_calls,
             _ => fallback,
         }
         .to_owned()
@@ -1323,6 +1336,14 @@ impl Tr {
         match self.lang {
             Lang::Ru => format!("на ваше сообщение в {chat}"),
             Lang::En => format!("on your message in {chat}"),
+        }
+    }
+
+    /// How many people are in a call now.
+    pub fn in_call(&self, n: u32) -> String {
+        match self.lang {
+            Lang::Ru => format!("{n} {} в звонке", ru_plural(n, "человек", "человека", "человек")),
+            Lang::En => format!("{n} in the call"),
         }
     }
 
@@ -1536,6 +1557,10 @@ mod tests {
         assert_eq!(RU.replies(21), "21 ответ");
         assert_eq!(EN.replies(1), "1 reply");
         assert_eq!(EN.replies(2), "2 replies");
+        assert_eq!(RU.in_call(1), "1 человек в звонке");
+        assert_eq!(RU.in_call(3), "3 человека в звонке");
+        assert_eq!(RU.in_call(5), "5 человек в звонке");
+        assert_eq!(EN.in_call(2), "2 in the call");
     }
 
     #[test]
