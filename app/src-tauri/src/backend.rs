@@ -1458,7 +1458,7 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
                 };
                 sh.note_chat(&chat, title);
                 sh.learn_names(&users);
-                let section = convert::section_of(&chat).to_owned();
+                let section = chat.home_section().to_owned();
                 let _ = app.emit(EVENT, &LiveEvent::ChatAdded { chat, section, users });
             }
             // Known from now on even if the fetch failed: its messages are not held again.

@@ -1545,7 +1545,7 @@ fn apply_starred(s: &mut Snapshot, starred: Vec<ChatId>) {
     // Unstarred chats return to their own section.
     for id in old.iter().filter(|id| !starred.contains(id)) {
         let Some(ch) = s.chat(id) else { continue };
-        let target = crate::folders::home_section(ch);
+        let target = ch.home_section();
         if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == target)
             && !sec.chats.contains(id)
         {

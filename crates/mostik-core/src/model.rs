@@ -701,6 +701,16 @@ impl Chat {
         }
     }
 
+    /// The Telemost sidebar section the chat belongs to by its kind: `dms`, `meetings` or
+    /// `channels`.
+    pub fn home_section(&self) -> &'static str {
+        match self.kind {
+            ChatKind::Direct { .. } | ChatKind::Notes => "dms",
+            _ if self.id.is_meeting() => "meetings",
+            _ => "channels",
+        }
+    }
+
     pub fn notify_level(&self) -> NotifyLevel {
         NotifyLevel::from_flags(self.muted, self.mute_mentions)
     }

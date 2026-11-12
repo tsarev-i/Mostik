@@ -975,15 +975,6 @@ fn chat_mutings(value: &Value) -> Vec<(ChatId, NotifyLevel)> {
         .collect()
 }
 
-/// The sidebar section of a chat: `dms`, `meetings` or `channels`.
-pub fn section_of(chat: &Chat) -> &'static str {
-    match chat.kind {
-        ChatKind::Direct { .. } | ChatKind::Notes => "dms",
-        _ if chat.id.is_meeting() => "meetings",
-        _ => "channels",
-    }
-}
-
 /// A chat from a `get_chats_info` item: `{chat_id, name, description, is_public, members_count,
 /// organization_ids}`. Counters and times are left for the messages to fill in.
 pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
@@ -1018,7 +1009,7 @@ pub fn snapshot(me: User, organization: String, mut data: HistoryData) -> Snapsh
         dms.push(notes.id.clone());
     }
     for ch in data.chats.iter().filter(|ch| ch.kind != ChatKind::Notes) {
-        match section_of(ch) {
+        match ch.home_section() {
             "dms" => dms.push(ch.id.clone()),
             "meetings" => meetings.push(ch.id.clone()),
             _ => channels.push(ch.id.clone()),
@@ -1453,7 +1444,7 @@ mod tests {
             (ch.name.as_str(), ch.description.as_deref(), ch.member_count),
             ("dev", None, 19)
         );
-        assert_eq!(section_of(&ch), "channels");
+        assert_eq!(ch.home_section(), "channels");
         assert_eq!(ch.organizations, vec![7]);
         let dm = json!({"chat_id": "bb_aa", "members_count": 2, "organization_ids": [7], "public": false});
         let ch = chat_from_info(&dm, Some(&me)).unwrap();
@@ -1464,11 +1455,14 @@ mod tests {
             }
         );
         assert!(ch.organizations.is_empty());
-        assert_eq!(section_of(&ch), "dms");
+        assert_eq!(ch.home_section(), "dms");
         let meeting = json!({"chat_id": "0/22/m", "name": "Sync"});
-        assert_eq!(section_of(&chat_from_info(&meeting, Some(&me)).unwrap()), "meetings");
+        assert_eq!(chat_from_info(&meeting, Some(&me)).unwrap().home_section(), "meetings");
         let group_call = json!({"chat_id": "0/58/m", "name": "Group call 01.02 at 10:00"});
-        assert_eq!(section_of(&chat_from_info(&group_call, Some(&me)).unwrap()), "meetings");
+        assert_eq!(
+            chat_from_info(&group_call, Some(&me)).unwrap().home_section(),
+            "meetings"
+        );
     }
 
     #[test]

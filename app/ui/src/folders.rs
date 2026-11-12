@@ -3,7 +3,7 @@
 //! device. A chat put into a folder leaves its own section; a starred chat stays in "Starred".
 //! The section emoji lives in the folder name, as `⚠️|Test`: Telemost folders have none.
 
-use mostik_core::{Chat, ChatFolder, ChatId, ChatKind, Section, split_chat_icon};
+use mostik_core::{Chat, ChatFolder, ChatId, Section, split_chat_icon};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -84,22 +84,13 @@ pub fn new_id(folders: &Folders, random: u64) -> String {
 /// stays on this device.
 pub const GROUP_CALLS: &str = "calls";
 
-/// The Telemost section a chat belongs to by its kind.
-pub fn home_section(ch: &Chat) -> &'static str {
-    match ch.kind {
-        ChatKind::Direct { .. } | ChatKind::Notes => "dms",
-        _ if ch.id.is_meeting() => "meetings",
-        _ => "channels",
-    }
-}
-
-/// The section a chat shows in by its kind: its Telemost section, or [`GROUP_CALLS`] for a group
-/// call with `calls_apart`.
+/// The section a chat shows in by its kind: its Telemost section ([`Chat::home_section`]), or
+/// [`GROUP_CALLS`] for a group call with `calls_apart`.
 pub fn shown_section(ch: &Chat, calls_apart: bool) -> &'static str {
     if calls_apart && ch.id.is_group_call() {
         GROUP_CALLS
     } else {
-        home_section(ch)
+        ch.home_section()
     }
 }
 
@@ -185,6 +176,7 @@ pub fn reorder(folders: &mut Folders, id: &str, shown: &[ChatId]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mostik_core::ChatKind;
 
     #[test]
     fn section_emoji_lives_in_the_folder_name() {
@@ -289,7 +281,7 @@ mod tests {
             member_count: 3,
             ..Chat::new(ChatId(id.into()), ChatKind::Group { public: false })
         };
-        assert_eq!(home_section(&chat("0/58/g1")), "meetings");
+        assert_eq!(chat("0/58/g1").home_section(), "meetings");
         assert_eq!(shown_section(&chat("0/58/g1"), true), GROUP_CALLS);
         assert_eq!(shown_section(&chat("0/58/g1"), false), "meetings");
         assert_eq!(shown_section(&chat("0/22/m"), true), "meetings");
