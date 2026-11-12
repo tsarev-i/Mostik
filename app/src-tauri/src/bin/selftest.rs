@@ -10,14 +10,11 @@
 //! `-- --dump [list | <chat id>]` prints the raw chat list or the latest page of a chat (read-only).
 //! `-- --buckets` prints the synced settings, `get_buckets` (read-only).
 
-#[allow(dead_code)]
-#[path = "../store.rs"]
-mod store;
-
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use mostik_app::store;
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
 use mostik_yandex::web::WebClient;

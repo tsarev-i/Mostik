@@ -12,10 +12,10 @@ mod downloads;
 mod login;
 mod ring;
 mod sound;
-mod store;
 mod update;
 mod webview;
 
+use mostik_app::store;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;

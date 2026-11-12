@@ -12,8 +12,8 @@ default-run = "mostik"
 name = "mostik"
 path = "src/main.rs"
 
-# Live write self-test for development, kept out of the release bundles.
-# No tests of its own: the store.rs tests it includes already run with the main binary.
+# Live write self-test for development, kept out of the release bundles. It shares the session
+# store with the app through the library (src/lib.rs).
 [[bin]]
 name = "mostik-selftest"
 path = "src/bin/selftest.rs"

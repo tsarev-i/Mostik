@@ -12,13 +12,13 @@
 //! One call at a time, as in Slack. The UI learns about the current call from [`CALL_EVENT`]
 //! and shows it at the bottom of the sidebar.
 
-// Elsewhere (macOS) calls open in the default browser, so the window and end-of-call helpers
-// are used only by the Linux and Windows `imp` (and by the tests).
-#![cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+// Elsewhere (macOS) calls open in the default browser: the window and end-of-call helpers,
+// used only by the Linux and Windows `imp`, are left out there.
 
 use std::future::Future;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use std::time::{Duration, Instant};
 
 use mostik_yandex::session::CookieJar;
@@ -36,7 +36,9 @@ pub const BUSY: &str = "another call is already open, leave it first";
 const MEETING_HOSTS: [&str; 2] = ["telemost.360.yandex.ru", "telemost.yandex.ru"];
 
 /// Initial size of the call window: compact, like the Slack huddle window.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const WIDTH: f64 = 960.0;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const HEIGHT: f64 = 680.0;
 
 /// What the UI shows about the current call.
@@ -52,6 +54,7 @@ pub struct CallInfo {
 struct Active {
     info: CallInfo,
     url: String,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     generation: u64,
     handle: imp::Handle,
 }
@@ -85,27 +88,32 @@ pub fn is_meeting_url(url: &str) -> bool {
 /// Cookie domain as it reaches the call window: a domain cookie (`.yandex.ru`), so that
 /// `Session_id` of `yandex.ru` also goes to `telemost.360.yandex.ru`. The jar keeps the domain
 /// without the dot, and the HTTP client matches subdomains too.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn cookie_domain(domain: &str) -> String {
     format!(".{}", domain.trim_start_matches('.'))
 }
 
 /// A `__Host-` cookie must stay on its own host: browsers refuse it with a `Domain`.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn host_only(name: &str) -> bool {
     name.starts_with("__Host-")
 }
 
 /// How long the meeting page must be open before leaving it counts as the end of the call.
 /// Redirects right after the load (language, sign-in, the server's own routing) are not "Leave".
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const ARM_AFTER: Duration = Duration::from_secs(5);
 
 /// Watches the call window's navigations for the end of the call, the same way on Linux (CDP
 /// events) and Windows (`on_navigation`).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[derive(Default)]
 struct EndWatch {
     /// When the window first reached the meeting page.
     meeting_since: Option<Instant>,
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl EndWatch {
     /// Whether the window going to `url` at `now` ends the call. `same_document` marks the page
     /// changing its own address (the single-page app's routing) rather than loading a new one.
@@ -129,6 +137,7 @@ impl EndWatch {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn is_yandex(u: &Url) -> bool {
     u.host_str().is_some_and(|h| {
         ["yandex.ru", "yandex.com", "yandex.net"]
@@ -139,6 +148,7 @@ fn is_yandex(u: &Url) -> bool {
 
 /// Yandex ID and other sign-in pages: `passport.yandex.ru` and its regional twins, `id.`,
 /// `oauth.`, `sso.` and `auth.` hosts.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn is_sign_in(u: &Url) -> bool {
     u.host_str().is_some_and(|h| {
         h.contains(".passport.")
@@ -202,6 +212,7 @@ async fn open_locked(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar
                 *a = Some(Active {
                     info: info.clone(),
                     url: url.to_owned(),
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
                     generation,
                     handle,
                 });
@@ -280,6 +291,7 @@ fn current(app: &AppHandle) -> Option<(Current, imp::Handle)> {
 }
 
 /// The window of call `generation` has closed: forget the call, unless a newer one replaced it.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn ended(app: &AppHandle, generation: u64) {
     let state = app.state::<CallState>();
     let Ok(mut active) = state.active.lock() else { return };
@@ -292,6 +304,7 @@ fn ended(app: &AppHandle, generation: u64) {
 }
 
 /// Where the page script sends the window once the call is over; the window then closes.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 const ENDED_URL: &str = "about:blank#mostik-call-ended";
 
 /// The meeting page for the call window. On `telemost.360.yandex.ru` the `/j/<id>` link opens the
@@ -323,6 +336,7 @@ pub fn meeting_page(url: &str, english: bool) -> String {
 /// has shown something, has no WebRTC connection left and stays blank for two seconds, it goes
 /// to [`ENDED_URL`] and the window closes. While any connection is open the window stays, even
 /// if the page hides all its controls.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn page_script(title: &str) -> String {
     let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
     let ended = serde_json::to_string(ENDED_URL).unwrap_or_default();
@@ -1319,6 +1333,7 @@ mod tests {
         assert!(!is_meeting_url("https://telemost.360.yandex.ru/private-join/"));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn what_ends_the_call() {
         let t0 = Instant::now();
