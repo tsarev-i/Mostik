@@ -9,6 +9,7 @@ use crate::app::Avatar;
 use crate::bridge;
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::modal::Modal;
 
 #[component]
 pub fn RingDialog(
@@ -27,29 +28,27 @@ pub fn RingDialog(
     };
     view! {
         // Only the buttons close it: a stray click beside the dialog must not decline the call.
-        <div class="modal-backdrop ring-backdrop">
-            <div class="modal ring-modal" role="alertdialog" aria-label=tr().call_incoming>
-                <header>
-                    <h2>{tr().call_incoming}</h2>
-                </header>
-                {move || ring.get().map(|r| view! {
-                    <div class="ring-caller">
-                        <span class="ring-face"><Avatar user=r.caller.clone() size=56/></span>
-                        <div class="ring-text">
-                            <div class="ring-name">{r.caller.display_name.clone()}</div>
-                            <div class="ring-sub">{tr().ring_calling}</div>
-                        </div>
+        <Modal class="ring-modal" backdrop_class="ring-backdrop" alert=tr().call_incoming>
+            <header>
+                <h2>{tr().call_incoming}</h2>
+            </header>
+            {move || ring.get().map(|r| view! {
+                <div class="ring-caller">
+                    <span class="ring-face"><Avatar user=r.caller.clone() size=56/></span>
+                    <div class="ring-text">
+                        <div class="ring-name">{r.caller.display_name.clone()}</div>
+                        <div class="ring-sub">{tr().ring_calling}</div>
                     </div>
-                })}
-                <div class="ring-actions">
-                    <button class="ring-btn decline" disabled=move || busy.get() on:click=move |_| answer(false)>
-                        <Icon icon=I::PhoneOff size=18/><span>{tr().ring_decline}</span>
-                    </button>
-                    <button class="ring-btn accept" disabled=move || busy.get() on:click=move |_| answer(true)>
-                        <Icon icon=I::Phone size=18/><span>{tr().ring_accept}</span>
-                    </button>
                 </div>
+            })}
+            <div class="ring-actions">
+                <button class="ring-btn decline" disabled=move || busy.get() on:click=move |_| answer(false)>
+                    <Icon icon=I::PhoneOff size=18/><span>{tr().ring_decline}</span>
+                </button>
+                <button class="ring-btn accept" disabled=move || busy.get() on:click=move |_| answer(true)>
+                    <Icon icon=I::Phone size=18/><span>{tr().ring_accept}</span>
+                </button>
             </div>
-        </div>
+        </Modal>
     }
 }

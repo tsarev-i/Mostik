@@ -17,6 +17,7 @@ use crate::app::{
 };
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::modal::Modal;
 use crate::{bridge, editor};
 
 /// A message field as its toolbar, hotkeys and dialogs see it.
@@ -295,30 +296,28 @@ fn LinkDialog(field: Field, target: LinkTarget) -> impl IntoView {
     });
     view! {
         <Portal>
-            <div class="modal-backdrop nested" on:click=move |_| field.close_link(None)>
-                <div class="modal" on:click=|e| e.stop_propagation()>
-                    <header>
-                        <h2>{if existing { tr().link_edit } else { tr().link_add }}</h2>
-                        <button class="icon-btn" title=tr().close on:click=move |_| field.close_link(None)><Icon icon=I::X/></button>
-                    </header>
-                    <label class="field-label">{tr().link_text}</label>
-                    <input class="text-input" node_ref=caption_ref prop:value=move || caption.get()
-                        on:input=move |e| caption.set(event_target_value(&e)) on:keydown=enter/>
-                    <label class="field-label">{tr().link_address}</label>
-                    <input class="text-input" node_ref=address_ref placeholder="https://" prop:value=move || address.get()
-                        on:input=move |e| address.set(event_target_value(&e)) on:keydown=enter/>
-                    <div class="modal-actions">
-                        {existing.then(|| view! {
-                            <button class="btn" on:click=move |_| field.close_link(Some(target.with_value(LinkTarget::remove)))>
-                                {tr().link_remove}
-                            </button>
-                            <span class="spacer"></span>
-                        })}
-                        <button class="btn" on:click=move |_| field.close_link(None)>{tr().cancel}</button>
-                        <button class="btn primary" disabled=move || made().is_none() on:click=move |_| save()>{tr().save}</button>
-                    </div>
+            <Modal nested=true on_close=Callback::new(move |_| field.close_link(None))>
+                <header>
+                    <h2>{if existing { tr().link_edit } else { tr().link_add }}</h2>
+                    <button class="icon-btn" title=tr().close on:click=move |_| field.close_link(None)><Icon icon=I::X/></button>
+                </header>
+                <label class="field-label">{tr().link_text}</label>
+                <input class="text-input" node_ref=caption_ref prop:value=move || caption.get()
+                    on:input=move |e| caption.set(event_target_value(&e)) on:keydown=enter/>
+                <label class="field-label">{tr().link_address}</label>
+                <input class="text-input" node_ref=address_ref placeholder="https://" prop:value=move || address.get()
+                    on:input=move |e| address.set(event_target_value(&e)) on:keydown=enter/>
+                <div class="modal-actions">
+                    {existing.then(|| view! {
+                        <button class="btn" on:click=move |_| field.close_link(Some(target.with_value(LinkTarget::remove)))>
+                            {tr().link_remove}
+                        </button>
+                        <span class="spacer"></span>
+                    })}
+                    <button class="btn" on:click=move |_| field.close_link(None)>{tr().cancel}</button>
+                    <button class="btn primary" disabled=move || made().is_none() on:click=move |_| save()>{tr().save}</button>
                 </div>
-            </div>
+            </Modal>
         </Portal>
     }
 }

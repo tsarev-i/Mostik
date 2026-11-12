@@ -10,6 +10,7 @@ use mostik_core::*;
 
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
+use crate::modal::Modal;
 use crate::settings::{ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES};
 use crate::{bridge, folders, hidden, ops, order, time};
 
@@ -5472,35 +5473,33 @@ fn BrowseChannelsDialog() -> impl IntoView {
         }
     };
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal browse-modal" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{tr().browse_channels}</h2>
-                    <button class="btn small" on:click=move |_| { close(); c.creating_channel.set(Some(NewChannel::default())); }>{tr().create_channel}</button>
-                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
-                </header>
-                <input class="text-input" node_ref=field placeholder=tr().search_channels_ph prop:value=move || query.get()
-                    on:input=move |e| query.set(event_target_value(&e))/>
-                <div class="browse-list">
-                    {move || {
-                        let rec = others();
-                        (!rec.is_empty()).then(|| view! {
-                            <div class="sr-title">{tr().recommended}</div>
-                            {rec.into_iter().map(|ch| row(ch, false)).collect_view()}
-                        })
-                    }}
-                    {move || loading.get().then(|| view! { <div class="sr-empty">{tr().searching}</div> })}
-                    <div class="sr-title">{tr().your_channels}</div>
-                    {move || {
-                        let list = mine();
-                        if list.is_empty() {
-                            return view! { <div class="sr-empty">{tr().nothing_found}</div> }.into_any();
-                        }
-                        list.into_iter().map(|ch| row(ch, true)).collect_view().into_any()
-                    }}
-                </div>
+        <Modal class="browse-modal" on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{tr().browse_channels}</h2>
+                <button class="btn small" on:click=move |_| { close(); c.creating_channel.set(Some(NewChannel::default())); }>{tr().create_channel}</button>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+            </header>
+            <input class="text-input" node_ref=field placeholder=tr().search_channels_ph prop:value=move || query.get()
+                on:input=move |e| query.set(event_target_value(&e))/>
+            <div class="browse-list">
+                {move || {
+                    let rec = others();
+                    (!rec.is_empty()).then(|| view! {
+                        <div class="sr-title">{tr().recommended}</div>
+                        {rec.into_iter().map(|ch| row(ch, false)).collect_view()}
+                    })
+                }}
+                {move || loading.get().then(|| view! { <div class="sr-empty">{tr().searching}</div> })}
+                <div class="sr-title">{tr().your_channels}</div>
+                {move || {
+                    let list = mine();
+                    if list.is_empty() {
+                        return view! { <div class="sr-empty">{tr().nothing_found}</div> }.into_any();
+                    }
+                    list.into_iter().map(|ch| row(ch, true)).collect_view().into_any()
+                }}
             </div>
-        </div>
+        </Modal>
     }
 }
 
@@ -5576,45 +5575,43 @@ fn ForwardDialog(msg: Message) -> impl IntoView {
             .and_then(|id| c.snap.with(|s| s.chat(&id).map(|ch| display_title(s, ch))))
     };
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal forward-modal" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{tr().forward_message}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
-                </header>
-                {move || match target_title() {
-                    Some(title) => view! {
-                        <div class="chips"><span class="chip">{title}
-                            <button on:click=move |_| target.set(None)><Icon icon=I::X size=12/></button>
-                        </span></div>
-                    }.into_any(),
-                    None => view! {
-                        <div class="picker-field">
-                            <input class="text-input" node_ref=field placeholder=tr().forward_to_ph prop:value=move || query.get()
-                                on:input=move |e| query.set(event_target_value(&e))/>
-                            <div class="picker-results inline">
-                                {move || options.get().into_iter().map(|(id, title, kind, face)| view! {
-                                    <button class="picker-row" on:click=move |_| { target.set(Some(id.clone())); query.set(String::new()); }>
-                                        {match face {
-                                            Some(u) => view! { <Avatar user=u size=24/> }.into_any(),
-                                            None => view! { <span class="sr-icon">{kind_icon(&kind, 16)}</span> }.into_any(),
-                                        }}
-                                        <span class="dm-name">{title}</span>
-                                    </button>
-                                }).collect_view()}
-                            </div>
+        <Modal class="forward-modal" on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{tr().forward_message}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+            </header>
+            {move || match target_title() {
+                Some(title) => view! {
+                    <div class="chips"><span class="chip">{title}
+                        <button on:click=move |_| target.set(None)><Icon icon=I::X size=12/></button>
+                    </span></div>
+                }.into_any(),
+                None => view! {
+                    <div class="picker-field">
+                        <input class="text-input" node_ref=field placeholder=tr().forward_to_ph prop:value=move || query.get()
+                            on:input=move |e| query.set(event_target_value(&e))/>
+                        <div class="picker-results inline">
+                            {move || options.get().into_iter().map(|(id, title, kind, face)| view! {
+                                <button class="picker-row" on:click=move |_| { target.set(Some(id.clone())); query.set(String::new()); }>
+                                    {match face {
+                                        Some(u) => view! { <Avatar user=u size=24/> }.into_any(),
+                                        None => view! { <span class="sr-icon">{kind_icon(&kind, 16)}</span> }.into_any(),
+                                    }}
+                                    <span class="dm-name">{title}</span>
+                                </button>
+                            }).collect_view()}
                         </div>
-                    }.into_any(),
-                }}
-                <textarea class="text-input area" placeholder=tr().forward_comment_ph prop:value=move || text.get()
-                    on:input=move |e| text.set(event_target_value(&e))></textarea>
-                <ForwardedBlock f=preview/>
-                <div class="modal-actions">
-                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
-                    <button class="btn primary" disabled=move || target.get().is_none() || busy.get() on:click=move |_| send()>{tr().forward_btn}</button>
-                </div>
+                    </div>
+                }.into_any(),
+            }}
+            <textarea class="text-input area" placeholder=tr().forward_comment_ph prop:value=move || text.get()
+                on:input=move |e| text.set(event_target_value(&e))></textarea>
+            <ForwardedBlock f=preview/>
+            <div class="modal-actions">
+                <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                <button class="btn primary" disabled=move || target.get().is_none() || busy.get() on:click=move |_| send()>{tr().forward_btn}</button>
             </div>
-        </div>
+        </Modal>
     }
 }
 
@@ -5626,21 +5623,19 @@ fn NewMessageDialog() -> impl IntoView {
     let me = c.snap.with_untracked(|s| s.me.clone());
     let exclude = Signal::derive(move || vec![me.clone()]);
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{tr().new_message}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
-                </header>
-                <label class="field-label">{tr().new_message_to}</label>
-                <PeoplePicker exclude=exclude on_pick=Callback::new(move |p: UserProfile| {
-                    close();
-                    c.view.set(ViewMode::Home);
-                    c.snap.update(|s| if s.user(&p.id).is_none() { s.users.push(profile_face(&p)); });
-                    ops::message_user(c, p.id);
-                })/>
-            </div>
-        </div>
+        <Modal on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{tr().new_message}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+            </header>
+            <label class="field-label">{tr().new_message_to}</label>
+            <PeoplePicker exclude=exclude on_pick=Callback::new(move |p: UserProfile| {
+                close();
+                c.view.set(ViewMode::Home);
+                c.snap.update(|s| if s.user(&p.id).is_none() { s.users.push(profile_face(&p)); });
+                ops::message_user(c, p.id);
+            })/>
+        </Modal>
     }
 }
 
@@ -5704,59 +5699,57 @@ fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
         v
     });
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{move || if step.get() == 1 { tr().create_channel.to_owned() } else { format!("{} #{}", tr().add_people_to, name.get()) }}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
-                </header>
-                {move || if step.get() == 1 {
-                    view! {
-                        <label class="field-label">{tr().channel_name}</label>
-                        <div class="name-input"><span>"#"</span>
-                            <input class="text-input bare" node_ref=name_field placeholder=tr().channel_name_ph maxlength="80" prop:value=move || name.get()
-                                on:input=move |e| name.set(event_target_value(&e))/>
-                        </div>
-                        <label class="field-label">{tr().channel_desc}</label>
-                        <textarea class="text-input area" placeholder=tr().channel_desc_ph prop:value=move || description.get()
-                            on:input=move |e| description.set(event_target_value(&e))></textarea>
-                        // "Visibility", as when creating a channel in Slack.
-                        <label class="field-label">{tr().visibility}</label>
-                        <label class="pref-radio">
-                            <input type="radio" name="visibility" prop:checked=move || !public.get() on:change=move |_| public.set(false)/>
-                            <span><b>{tr().vis_private}</b>" — "{tr().vis_private_hint}</span>
-                        </label>
-                        <label class="pref-radio">
-                            <input type="radio" name="visibility" prop:checked=move || public.get() on:change=move |_| public.set(true)/>
-                            <span><b>{tr().vis_public}</b>" — "{tr().vis_public_hint}</span>
-                        </label>
-                        <div class="modal-actions">
-                            <button class="btn primary" disabled=move || name.with(|n| n.trim().is_empty()) on:click=move |_| step.set(2)>{tr().next}</button>
-                        </div>
-                    }.into_any()
-                } else {
-                    view! {
-                        <PeoplePicker exclude=exclude on_pick=Callback::new(move |p: UserProfile| people.update(|v| v.push(p)))/>
-                        <div class="chips">
-                            {move || people.get().into_iter().map(|p| {
-                                let id = p.id.clone();
-                                view! {
-                                    <span class="chip"><Avatar user=profile_face(&p) size=20/>{p.display_name.clone()}
-                                        <button on:click=move |_| people.update(|v| v.retain(|x| x.id != id))><Icon icon=I::X size=12/></button>
-                                    </span>
-                                }
-                            }).collect_view()}
-                        </div>
-                        <div class="modal-actions">
-                            <button class="btn" on:click=move |_| step.set(1)>{tr().back}</button>
-                            <button class="btn primary" disabled=move || busy.get() on:click=move |_| create()>
-                                {move || if people.with(Vec::is_empty) { tr().skip_for_now } else { tr().create }}
-                            </button>
-                        </div>
-                    }.into_any()
-                }}
-            </div>
-        </div>
+        <Modal on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{move || if step.get() == 1 { tr().create_channel.to_owned() } else { format!("{} #{}", tr().add_people_to, name.get()) }}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+            </header>
+            {move || if step.get() == 1 {
+                view! {
+                    <label class="field-label">{tr().channel_name}</label>
+                    <div class="name-input"><span>"#"</span>
+                        <input class="text-input bare" node_ref=name_field placeholder=tr().channel_name_ph maxlength="80" prop:value=move || name.get()
+                            on:input=move |e| name.set(event_target_value(&e))/>
+                    </div>
+                    <label class="field-label">{tr().channel_desc}</label>
+                    <textarea class="text-input area" placeholder=tr().channel_desc_ph prop:value=move || description.get()
+                        on:input=move |e| description.set(event_target_value(&e))></textarea>
+                    // "Visibility", as when creating a channel in Slack.
+                    <label class="field-label">{tr().visibility}</label>
+                    <label class="pref-radio">
+                        <input type="radio" name="visibility" prop:checked=move || !public.get() on:change=move |_| public.set(false)/>
+                        <span><b>{tr().vis_private}</b>" — "{tr().vis_private_hint}</span>
+                    </label>
+                    <label class="pref-radio">
+                        <input type="radio" name="visibility" prop:checked=move || public.get() on:change=move |_| public.set(true)/>
+                        <span><b>{tr().vis_public}</b>" — "{tr().vis_public_hint}</span>
+                    </label>
+                    <div class="modal-actions">
+                        <button class="btn primary" disabled=move || name.with(|n| n.trim().is_empty()) on:click=move |_| step.set(2)>{tr().next}</button>
+                    </div>
+                }.into_any()
+            } else {
+                view! {
+                    <PeoplePicker exclude=exclude on_pick=Callback::new(move |p: UserProfile| people.update(|v| v.push(p)))/>
+                    <div class="chips">
+                        {move || people.get().into_iter().map(|p| {
+                            let id = p.id.clone();
+                            view! {
+                                <span class="chip"><Avatar user=profile_face(&p) size=20/>{p.display_name.clone()}
+                                    <button on:click=move |_| people.update(|v| v.retain(|x| x.id != id))><Icon icon=I::X size=12/></button>
+                                </span>
+                            }
+                        }).collect_view()}
+                    </div>
+                    <div class="modal-actions">
+                        <button class="btn" on:click=move |_| step.set(1)>{tr().back}</button>
+                        <button class="btn primary" disabled=move || busy.get() on:click=move |_| create()>
+                            {move || if people.with(Vec::is_empty) { tr().skip_for_now } else { tr().create }}
+                        </button>
+                    </div>
+                }.into_any()
+            }}
+        </Modal>
     }
 }
 
@@ -5874,105 +5867,103 @@ fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
     let title = move || name.with(|n| split_chat_icon(n).1.to_owned());
     let (save2, leave2, change_add, change_rm) = (save.clone(), leave.clone(), change.clone(), change);
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal details" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2 class="details-title">
-                        {move || kind.clone().map(|kind| {
-                            let emoji = name.with(|n| split_chat_icon(n).0.map(str::to_owned));
-                            kind_icon(&Mark { kind, emoji }, 20)
-                        })}
-                        <span>{title}</span>
-                    </h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
-                </header>
-                <nav class="ch-tabs modal-tabs">
-                    <button class=move || if tab.get() == DetailsTab::About { "tab active" } else { "tab" } on:click=move |_| tab.set(DetailsTab::About)>{tr().about_channel}</button>
-                    <button class=move || if tab.get() == DetailsTab::Members { "tab active" } else { "tab" } on:click=move |_| tab.set(DetailsTab::Members)>
-                        {move || format!("{} {}", tr().members_tab, members.with(Vec::len))}
-                    </button>
-                </nav>
-                <div class="details-body">
-                    {move || match tab.get() {
-                        DetailsTab::About => {
-                            let (save, leave) = (save2.clone(), leave2.clone());
-                            view! {
-                                <div class="detail-card">
-                                    <label class="field-label">{tr().channel_name}</label>
-                                    <input class="text-input" prop:value=move || name.get() disabled=move || !admin.get()
-                                        on:input=move |e| name.set(event_target_value(&e))/>
-                                    <label class="field-label">{tr().channel_description}</label>
-                                    <textarea class="text-input area" placeholder=tr().no_description prop:value=move || description.get() disabled=move || !admin.get()
-                                        on:input=move |e| description.set(event_target_value(&e))></textarea>
-                                    {move || (!admin.get()).then(|| view! { <p class="pref-hint flush">{tr().only_admins_edit}</p> })}
-                                    <Show when=move || admin.get()>
-                                        <div class="modal-actions"><button class="btn primary" on:click={let save = save.clone(); move |_| save()}>{tr().save}</button></div>
-                                    </Show>
-                                </div>
-                                <div class="detail-card">
-                                    {move || if confirm_leave.get() {
-                                        let leave = leave.clone();
-                                        view! {
-                                            <p>{tr().leave_confirm}</p>
-                                            <div class="modal-actions">
-                                                <button class="btn" on:click=move |_| confirm_leave.set(false)>{tr().cancel}</button>
-                                                <button class="btn danger" on:click=move |_| leave()>{tr().leave_channel}</button>
-                                            </div>
-                                        }.into_any()
-                                    } else {
-                                        view! { <button class="link danger-text" on:click=move |_| confirm_leave.set(true)>{tr().leave_channel}</button> }.into_any()
-                                    }}
-                                </div>
-                            }.into_any()
-                        }
-                        DetailsTab::Members => {
-                            let (rm, me) = (change_rm.clone(), me.clone());
-                            view! {
-                                <input class="text-input member-search" placeholder=tr().find_members prop:value=move || member_query.get()
-                                    on:input=move |e| member_query.set(event_target_value(&e))/>
+        <Modal class="details" on_close=Callback::new(move |_| close())>
+            <header>
+                <h2 class="details-title">
+                    {move || kind.clone().map(|kind| {
+                        let emoji = name.with(|n| split_chat_icon(n).0.map(str::to_owned));
+                        kind_icon(&Mark { kind, emoji }, 20)
+                    })}
+                    <span>{title}</span>
+                </h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+            </header>
+            <nav class="ch-tabs modal-tabs">
+                <button class=move || if tab.get() == DetailsTab::About { "tab active" } else { "tab" } on:click=move |_| tab.set(DetailsTab::About)>{tr().about_channel}</button>
+                <button class=move || if tab.get() == DetailsTab::Members { "tab active" } else { "tab" } on:click=move |_| tab.set(DetailsTab::Members)>
+                    {move || format!("{} {}", tr().members_tab, members.with(Vec::len))}
+                </button>
+            </nav>
+            <div class="details-body">
+                {move || match tab.get() {
+                    DetailsTab::About => {
+                        let (save, leave) = (save2.clone(), leave2.clone());
+                        view! {
+                            <div class="detail-card">
+                                <label class="field-label">{tr().channel_name}</label>
+                                <input class="text-input" prop:value=move || name.get() disabled=move || !admin.get()
+                                    on:input=move |e| name.set(event_target_value(&e))/>
+                                <label class="field-label">{tr().channel_description}</label>
+                                <textarea class="text-input area" placeholder=tr().no_description prop:value=move || description.get() disabled=move || !admin.get()
+                                    on:input=move |e| description.set(event_target_value(&e))></textarea>
+                                {move || (!admin.get()).then(|| view! { <p class="pref-hint flush">{tr().only_admins_edit}</p> })}
                                 <Show when=move || admin.get()>
-                                    <button class="member-row add-people-row" on:click=move |_| adding.set(true)>
-                                        <span class="pf-icon"><Icon icon=I::Plus size=18/></span>
-                                        <span class="dm-name">{tr().add_people}</span>
-                                    </button>
+                                    <div class="modal-actions"><button class="btn primary" on:click={let save = save.clone(); move |_| save()}>{tr().save}</button></div>
                                 </Show>
-                                <div class="member-list">
-                                    {move || {
-                                        let q = member_query.get().trim().to_lowercase();
-                                        members.get().into_iter().filter(move |m| q.is_empty() || m.profile.display_name.to_lowercase().contains(&q)).map(|m| {
-                                        let id = m.profile.id.clone();
-                                        let removable = admin.get() && id != me;
-                                        let (rm, pid) = (rm.clone(), id.clone());
-                                        view! {
-                                            <div class="member-row">
-                                                <button class="face-btn" on:click=move |_| { close(); ops::open_profile(c, pid.clone()); }>
-                                                    <Avatar user=profile_face(&m.profile) size=36/>
-                                                </button>
-                                                <span class="dm-body">
-                                                    <span class="dm-name">{m.profile.display_name.clone()}{(m.role == "admin").then(|| view! { <span class="role-tag">{tr().admin}</span> })}</span>
-                                                    <span class="dm-preview">{m.profile.position.clone().unwrap_or_default()}</span>
-                                                </span>
-                                                {removable.then(|| view! {
-                                                    <button class="icon-btn" title=tr().remove_from_channel on:click=move |_| rm(vec![id.clone()], false)><Icon icon=I::X size=16/></button>
-                                                })}
-                                            </div>
-                                        }
-                                    }).collect_view()}}
-                                </div>
-                            }.into_any()
-                        }
-                    }}
-                </div>
+                            </div>
+                            <div class="detail-card">
+                                {move || if confirm_leave.get() {
+                                    let leave = leave.clone();
+                                    view! {
+                                        <p>{tr().leave_confirm}</p>
+                                        <div class="modal-actions">
+                                            <button class="btn" on:click=move |_| confirm_leave.set(false)>{tr().cancel}</button>
+                                            <button class="btn danger" on:click=move |_| leave()>{tr().leave_channel}</button>
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    view! { <button class="link danger-text" on:click=move |_| confirm_leave.set(true)>{tr().leave_channel}</button> }.into_any()
+                                }}
+                            </div>
+                        }.into_any()
+                    }
+                    DetailsTab::Members => {
+                        let (rm, me) = (change_rm.clone(), me.clone());
+                        view! {
+                            <input class="text-input member-search" placeholder=tr().find_members prop:value=move || member_query.get()
+                                on:input=move |e| member_query.set(event_target_value(&e))/>
+                            <Show when=move || admin.get()>
+                                <button class="member-row add-people-row" on:click=move |_| adding.set(true)>
+                                    <span class="pf-icon"><Icon icon=I::Plus size=18/></span>
+                                    <span class="dm-name">{tr().add_people}</span>
+                                </button>
+                            </Show>
+                            <div class="member-list">
+                                {move || {
+                                    let q = member_query.get().trim().to_lowercase();
+                                    members.get().into_iter().filter(move |m| q.is_empty() || m.profile.display_name.to_lowercase().contains(&q)).map(|m| {
+                                    let id = m.profile.id.clone();
+                                    let removable = admin.get() && id != me;
+                                    let (rm, pid) = (rm.clone(), id.clone());
+                                    view! {
+                                        <div class="member-row">
+                                            <button class="face-btn" on:click=move |_| { close(); ops::open_profile(c, pid.clone()); }>
+                                                <Avatar user=profile_face(&m.profile) size=36/>
+                                            </button>
+                                            <span class="dm-body">
+                                                <span class="dm-name">{m.profile.display_name.clone()}{(m.role == "admin").then(|| view! { <span class="role-tag">{tr().admin}</span> })}</span>
+                                                <span class="dm-preview">{m.profile.position.clone().unwrap_or_default()}</span>
+                                            </span>
+                                            {removable.then(|| view! {
+                                                <button class="icon-btn" title=tr().remove_from_channel on:click=move |_| rm(vec![id.clone()], false)><Icon icon=I::X size=16/></button>
+                                            })}
+                                        </div>
+                                    }
+                                }).collect_view()}}
+                            </div>
+                        }.into_any()
+                    }
+                }}
             </div>
-            {move || adding.get().then(|| {
-                let add = change_add.clone();
-                view! {
-                    <AddPeopleDialog chat_id=picker_chat.clone() title=name.get_untracked() exclude=exclude
-                        on_close=Callback::new(move |_| adding.set(false))
-                        on_add=Callback::new(move |ids: Vec<UserId>| { adding.set(false); add(ids, true); })/>
-                }
-            })}
-        </div>
+        </Modal>
+        {move || adding.get().then(|| {
+            let add = change_add.clone();
+            view! {
+                <AddPeopleDialog chat_id=picker_chat.clone() title=name.get_untracked() exclude=exclude
+                    on_close=Callback::new(move |_| adding.set(false))
+                    on_add=Callback::new(move |ids: Vec<UserId>| { adding.set(false); add(ids, true); })/>
+            }
+        })}
     }
 }
 
@@ -5998,29 +5989,27 @@ fn AddPeopleDialog(
         v
     });
     view! {
-        <div class="modal-backdrop nested" on:click=move |ev| { ev.stop_propagation(); on_close.run(()); }>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{format!("{} #{title}", tr().add_people_to)}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| on_close.run(())><Icon icon=I::X/></button>
-                </header>
-                <PeoplePicker chat_id=chat_id exclude=all_excluded on_pick=Callback::new(move |p: UserProfile| people.update(|v| v.push(p)))/>
-                <div class="chips">
-                    {move || people.get().into_iter().map(|p| {
-                        let id = p.id.clone();
-                        view! {
-                            <span class="chip"><Avatar user=profile_face(&p) size=20/>{p.display_name.clone()}
-                                <button on:click=move |_| people.update(|v| v.retain(|x| x.id != id))><Icon icon=I::X size=12/></button>
-                            </span>
-                        }
-                    }).collect_view()}
-                </div>
-                <div class="modal-actions">
-                    <button class="btn primary" disabled=move || people.with(Vec::is_empty)
-                        on:click=move |_| on_add.run(people.get_untracked().into_iter().map(|p| p.id).collect())>{tr().add_btn}</button>
-                </div>
+        <Modal nested=true on_close=on_close>
+            <header>
+                <h2>{format!("{} #{title}", tr().add_people_to)}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| on_close.run(())><Icon icon=I::X/></button>
+            </header>
+            <PeoplePicker chat_id=chat_id exclude=all_excluded on_pick=Callback::new(move |p: UserProfile| people.update(|v| v.push(p)))/>
+            <div class="chips">
+                {move || people.get().into_iter().map(|p| {
+                    let id = p.id.clone();
+                    view! {
+                        <span class="chip"><Avatar user=profile_face(&p) size=20/>{p.display_name.clone()}
+                            <button on:click=move |_| people.update(|v| v.retain(|x| x.id != id))><Icon icon=I::X size=12/></button>
+                        </span>
+                    }
+                }).collect_view()}
             </div>
-        </div>
+            <div class="modal-actions">
+                <button class="btn primary" disabled=move || people.with(Vec::is_empty)
+                    on:click=move |_| on_add.run(people.get_untracked().into_iter().map(|p| p.id).collect())>{tr().add_btn}</button>
+            </div>
+        </Modal>
     }
 }
 
@@ -6568,56 +6557,54 @@ fn StatusDialog() -> impl IntoView {
     ];
     let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{tr().update_status}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
-                </header>
-                <div class="status-input">
-                    // The emoji is picked, as in Slack: a text field would need the OS emoji input.
-                    <button class="emoji-input" title=tr().section_emoji
-                        on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
-                        {move || match emoji.get() {
-                            e if e.is_empty() => view! { <Icon icon=I::Smile size=20/> }.into_any(),
-                            e => view! { <span>{e}</span> }.into_any(),
-                        }}
+        <Modal on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{tr().update_status}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+            </header>
+            <div class="status-input">
+                // The emoji is picked, as in Slack: a text field would need the OS emoji input.
+                <button class="emoji-input" title=tr().section_emoji
+                    on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
+                    {move || match emoji.get() {
+                        e if e.is_empty() => view! { <Icon icon=I::Smile size=20/> }.into_any(),
+                        e => view! { <span>{e}</span> }.into_any(),
+                    }}
+                </button>
+                <input class="text-input bare" maxlength="100" placeholder=tr().status_placeholder prop:value=move || text.get()
+                    on:input=move |e| text.set(event_target_value(&e))/>
+                <Show when=move || !emoji.get().is_empty() || !text.get().is_empty()>
+                    <button class="icon-btn" title=tr().clear_status on:click=move |_| { emoji.set(String::new()); text.set(String::new()); }>
+                        <Icon icon=I::X size=14/>
                     </button>
-                    <input class="text-input bare" maxlength="100" placeholder=tr().status_placeholder prop:value=move || text.get()
-                        on:input=move |e| text.set(event_target_value(&e))/>
-                    <Show when=move || !emoji.get().is_empty() || !text.get().is_empty()>
-                        <button class="icon-btn" title=tr().clear_status on:click=move |_| { emoji.set(String::new()); text.set(String::new()); }>
-                            <Icon icon=I::X size=14/>
-                        </button>
-                    </Show>
-                </div>
-                {move || emoji_at.get().map(|at| view! {
-                    <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 312.0, at.1)
-                        on_close=Callback::new(move |_| emoji_at.set(None))
-                        on_pick=Callback::new(move |glyph: String| {
-                            emoji_at.set(None);
-                            crate::emoji::remember(crate::emoji::Source::Text, &glyph);
-                            emoji.set(glyph);
-                        })/>
-                })}
-                <div class="field-label">{tr().for_your_org}</div>
-                <div class="status-presets">
-                    {tr().status_presets.into_iter().map(|(e, t)| view! {
-                        <button class="status-preset" on:click=move |_| { emoji.set(e.to_owned()); text.set(t.to_owned()); }>
-                            <span class="preset-emoji">{e}</span><span>{t}</span>
-                        </button>
-                    }).collect_view()}
-                </div>
-                <label class="field-label">{tr().clear_after}</label>
-                <select class="pref-select" on:change=move |e| clear.set(event_target_value(&e).parse().unwrap_or(0))>
-                    {clear_options.into_iter().map(|(secs, label)| view! { <option value=secs.to_string()>{label}</option> }).collect_view()}
-                </select>
-                <div class="modal-actions">
-                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
-                    <button class="btn primary" on:click=move |_| save()>{tr().save}</button>
-                </div>
+                </Show>
             </div>
-        </div>
+            {move || emoji_at.get().map(|at| view! {
+                <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 312.0, at.1)
+                    on_close=Callback::new(move |_| emoji_at.set(None))
+                    on_pick=Callback::new(move |glyph: String| {
+                        emoji_at.set(None);
+                        crate::emoji::remember(crate::emoji::Source::Text, &glyph);
+                        emoji.set(glyph);
+                    })/>
+            })}
+            <div class="field-label">{tr().for_your_org}</div>
+            <div class="status-presets">
+                {tr().status_presets.into_iter().map(|(e, t)| view! {
+                    <button class="status-preset" on:click=move |_| { emoji.set(e.to_owned()); text.set(t.to_owned()); }>
+                        <span class="preset-emoji">{e}</span><span>{t}</span>
+                    </button>
+                }).collect_view()}
+            </div>
+            <label class="field-label">{tr().clear_after}</label>
+            <select class="pref-select" on:change=move |e| clear.set(event_target_value(&e).parse().unwrap_or(0))>
+                {clear_options.into_iter().map(|(secs, label)| view! { <option value=secs.to_string()>{label}</option> }).collect_view()}
+            </select>
+            <div class="modal-actions">
+                <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                <button class="btn primary" on:click=move |_| save()>{tr().save}</button>
+            </div>
+        </Modal>
     }
 }
 
@@ -6659,39 +6646,37 @@ fn PreferencesDialog() -> impl IntoView {
         (PrefTab::Updates, I::Download, tr().p_updates),
     ];
     view! {
-        <div class="modal-backdrop" on:click=move |_| c.prefs.set(false)>
-            <div class="modal prefs" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{tr().preferences}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| c.prefs.set(false)>
-                        <Icon icon=I::X/>
-                    </button>
-                </header>
-                <div class="prefs-body">
-                    <nav class="prefs-nav">
-                        {tabs.into_iter().map(|(id, icon, label)| view! {
-                            <button class=move || if tab.get() == id { "active" } else { "" } on:click=move |_| tab.set(id)>
-                                <Icon icon=icon size=16/><span>{label}</span>
-                            </button>
-                        }).collect_view()}
-                    </nav>
-                    <section class="prefs-section">
-                        {move || match tab.get() {
-                            PrefTab::Notifications => view! { <PrefNotifications/> }.into_any(),
-                            PrefTab::Appearance => view! { <PrefAppearance/> }.into_any(),
-                            PrefTab::Messages => view! { <PrefMessages/> }.into_any(),
-                            PrefTab::Language => view! { <PrefLanguage/> }.into_any(),
-                            PrefTab::Home => view! { <PrefHome/> }.into_any(),
-                            PrefTab::MarkRead => view! { <PrefMarkRead/> }.into_any(),
-                            PrefTab::Accessibility => view! { <PrefAccessibility/> }.into_any(),
-                            PrefTab::Advanced => view! { <PrefAdvanced/> }.into_any(),
-                            PrefTab::Updates => view! { <PrefUpdates/> }.into_any(),
-                            PrefTab::Emoji => view! { <PrefEmoji/> }.into_any(),
-                        }}
-                    </section>
-                </div>
+        <Modal class="prefs" on_close=Callback::new(move |_| c.prefs.set(false))>
+            <header>
+                <h2>{tr().preferences}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| c.prefs.set(false)>
+                    <Icon icon=I::X/>
+                </button>
+            </header>
+            <div class="prefs-body">
+                <nav class="prefs-nav">
+                    {tabs.into_iter().map(|(id, icon, label)| view! {
+                        <button class=move || if tab.get() == id { "active" } else { "" } on:click=move |_| tab.set(id)>
+                            <Icon icon=icon size=16/><span>{label}</span>
+                        </button>
+                    }).collect_view()}
+                </nav>
+                <section class="prefs-section">
+                    {move || match tab.get() {
+                        PrefTab::Notifications => view! { <PrefNotifications/> }.into_any(),
+                        PrefTab::Appearance => view! { <PrefAppearance/> }.into_any(),
+                        PrefTab::Messages => view! { <PrefMessages/> }.into_any(),
+                        PrefTab::Language => view! { <PrefLanguage/> }.into_any(),
+                        PrefTab::Home => view! { <PrefHome/> }.into_any(),
+                        PrefTab::MarkRead => view! { <PrefMarkRead/> }.into_any(),
+                        PrefTab::Accessibility => view! { <PrefAccessibility/> }.into_any(),
+                        PrefTab::Advanced => view! { <PrefAdvanced/> }.into_any(),
+                        PrefTab::Updates => view! { <PrefUpdates/> }.into_any(),
+                        PrefTab::Emoji => view! { <PrefEmoji/> }.into_any(),
+                    }}
+                </section>
             </div>
-        </div>
+        </Modal>
     }
 }
 
@@ -7127,42 +7112,40 @@ fn AddEmojiDialog() -> impl IntoView {
     let ready =
         move || !busy.get() && file.with(Option::is_some) && name.with(|n| !n.trim().trim_matches(':').is_empty());
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal add-emoji" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{tr().add_emoji_title}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
-                </header>
-                <p class="muted">{tr().custom_emoji_hint}</p>
-                <label class="field-label">{tr().emoji_upload_step}</label>
-                <div class="add-emoji-upload">
-                    <div class="add-emoji-preview">
-                        {move || file.get().map(|f| view! { <img src=bridge::local_file_url(&f.path) alt=""/> })}
-                    </div>
-                    <div>
-                        <p class="muted">{tr().emoji_image_hint}</p>
-                        <button class="btn small" disabled=move || busy.get() on:click=pick>
-                            {move || if file.with(Option::is_some) { tr().emoji_change_image } else { tr().emoji_choose_image }}
-                        </button>
-                    </div>
+        <Modal class="add-emoji" on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{tr().add_emoji_title}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()><Icon icon=I::X/></button>
+            </header>
+            <p class="muted">{tr().custom_emoji_hint}</p>
+            <label class="field-label">{tr().emoji_upload_step}</label>
+            <div class="add-emoji-upload">
+                <div class="add-emoji-preview">
+                    {move || file.get().map(|f| view! { <img src=bridge::local_file_url(&f.path) alt=""/> })}
                 </div>
-                <label class="field-label">{tr().emoji_name_step}</label>
-                <div class="name-input"><span>":"</span>
-                    <input class="text-input bare" placeholder=tr().emoji_name_ph maxlength="40" prop:value=move || name.get()
-                        on:input=move |e| name.set(event_target_value(&e))
-                        on:keydown=move |e: ev::KeyboardEvent| if e.key() == "Enter" && ready() { e.prevent_default(); save() }/>
-                    <span>":"</span>
-                </div>
-                <p class="muted">{tr().emoji_name_hint}</p>
-                {move || error.get().map(|e| view! { <p class="dialog-error">{e}</p> })}
-                <div class="modal-actions">
-                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
-                    <button class="btn primary" disabled=move || !ready() on:click=move |_| save()>
-                        {move || if busy.get() { tr().emoji_adding } else { tr().save }}
+                <div>
+                    <p class="muted">{tr().emoji_image_hint}</p>
+                    <button class="btn small" disabled=move || busy.get() on:click=pick>
+                        {move || if file.with(Option::is_some) { tr().emoji_change_image } else { tr().emoji_choose_image }}
                     </button>
                 </div>
             </div>
-        </div>
+            <label class="field-label">{tr().emoji_name_step}</label>
+            <div class="name-input"><span>":"</span>
+                <input class="text-input bare" placeholder=tr().emoji_name_ph maxlength="40" prop:value=move || name.get()
+                    on:input=move |e| name.set(event_target_value(&e))
+                    on:keydown=move |e: ev::KeyboardEvent| if e.key() == "Enter" && ready() { e.prevent_default(); save() }/>
+                <span>":"</span>
+            </div>
+            <p class="muted">{tr().emoji_name_hint}</p>
+            {move || error.get().map(|e| view! { <p class="dialog-error">{e}</p> })}
+            <div class="modal-actions">
+                <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                <button class="btn primary" disabled=move || !ready() on:click=move |_| save()>
+                    {move || if busy.get() { tr().emoji_adding } else { tr().save }}
+                </button>
+            </div>
+        </Modal>
     }
 }
 
@@ -7312,17 +7295,15 @@ fn DeleteDialog() -> impl IntoView {
             .map(|m| c.snap.with(|s| s.plain(&m.text)).chars().take(200).collect::<String>())
     };
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header><h2>{tr().delete_message}</h2></header>
-                <p>{tr().delete_message_warning}</p>
-                <blockquote class="quote">{preview}</blockquote>
-                <div class="modal-actions">
-                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
-                    <button class="btn danger" on:click=confirm>{tr().delete}</button>
-                </div>
+        <Modal on_close=Callback::new(move |_| close())>
+            <header><h2>{tr().delete_message}</h2></header>
+            <p>{tr().delete_message_warning}</p>
+            <blockquote class="quote">{preview}</blockquote>
+            <div class="modal-actions">
+                <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                <button class="btn danger" on:click=confirm>{tr().delete}</button>
             </div>
-        </div>
+        </Modal>
     }
 }
 
@@ -7340,16 +7321,14 @@ fn LeaveDialog(id: ChatId) -> impl IntoView {
         ops::leave_chat(c, id.clone());
     };
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header><h2>{tr().leave_title(&title)}</h2></header>
-                <p>{tr().leave_confirm}</p>
-                <div class="modal-actions">
-                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
-                    <button class="btn danger" on:click=confirm>{tr().leave_channel}</button>
-                </div>
+        <Modal on_close=Callback::new(move |_| close())>
+            <header><h2>{tr().leave_title(&title)}</h2></header>
+            <p>{tr().leave_confirm}</p>
+            <div class="modal-actions">
+                <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                <button class="btn danger" on:click=confirm>{tr().leave_channel}</button>
             </div>
-        </div>
+        </Modal>
     }
 }
 
@@ -7418,51 +7397,49 @@ fn FolderDialog(edit: FolderEdit) -> impl IntoView {
     };
     let on_enter = submit.clone();
     view! {
-        <div class="modal-backdrop" on:click=move |_| close()>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header><h2>{if renaming { tr().rename_section } else { tr().new_section_title }}</h2></header>
-                <label class="field-label">{tr().section_name}</label>
-                // The smiley picks the section's emoji, as in Slack.
-                <div class="name-input">
-                    <button class="section-emoji-btn" title=tr().section_emoji
-                        on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
-                        {move || match emoji.get() {
-                            Some(e) => view! { <span class="section-emoji">{e}</span> }.into_any(),
-                            None => view! { <Icon icon=I::Smile size=18/> }.into_any(),
-                        }}
+        <Modal on_close=Callback::new(move |_| close())>
+            <header><h2>{if renaming { tr().rename_section } else { tr().new_section_title }}</h2></header>
+            <label class="field-label">{tr().section_name}</label>
+            // The smiley picks the section's emoji, as in Slack.
+            <div class="name-input">
+                <button class="section-emoji-btn" title=tr().section_emoji
+                    on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
+                    {move || match emoji.get() {
+                        Some(e) => view! { <span class="section-emoji">{e}</span> }.into_any(),
+                        None => view! { <Icon icon=I::Smile size=18/> }.into_any(),
+                    }}
+                </button>
+                <input class="text-input bare" node_ref=field maxlength="80" placeholder=tr().section_name_ph
+                    prop:value=move || name.get()
+                    on:input=move |e| name.set(event_target_value(&e))
+                    on:keydown=move |e: ev::KeyboardEvent| {
+                        if e.key() == "Enter" {
+                            e.prevent_default();
+                            on_enter();
+                        }
+                    }/>
+                {move || emoji.get().is_some().then(|| view! {
+                    <button class="icon-btn section-emoji-clear" title=tr().remove_emoji on:click=move |_| emoji.set(None)>
+                        <Icon icon=I::X size=14/>
                     </button>
-                    <input class="text-input bare" node_ref=field maxlength="80" placeholder=tr().section_name_ph
-                        prop:value=move || name.get()
-                        on:input=move |e| name.set(event_target_value(&e))
-                        on:keydown=move |e: ev::KeyboardEvent| {
-                            if e.key() == "Enter" {
-                                e.prevent_default();
-                                on_enter();
-                            }
-                        }/>
-                    {move || emoji.get().is_some().then(|| view! {
-                        <button class="icon-btn section-emoji-clear" title=tr().remove_emoji on:click=move |_| emoji.set(None)>
-                            <Icon icon=I::X size=14/>
-                        </button>
-                    })}
-                </div>
-                {move || emoji_at.get().map(|at| view! {
-                    <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
-                        on_close=Callback::new(move |_| emoji_at.set(None))
-                        on_pick=Callback::new(move |glyph: String| {
-                            emoji_at.set(None);
-                            crate::emoji::remember(crate::emoji::Source::Text, &glyph);
-                            emoji.set(Some(glyph));
-                        })/>
                 })}
-                <div class="modal-actions">
-                    <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
-                    <button class="btn primary" disabled=move || name.with(|n| n.trim().is_empty()) on:click=move |_| submit()>
-                        {if renaming { tr().save } else { tr().create }}
-                    </button>
-                </div>
             </div>
-        </div>
+            {move || emoji_at.get().map(|at| view! {
+                <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
+                    on_close=Callback::new(move |_| emoji_at.set(None))
+                    on_pick=Callback::new(move |glyph: String| {
+                        emoji_at.set(None);
+                        crate::emoji::remember(crate::emoji::Source::Text, &glyph);
+                        emoji.set(Some(glyph));
+                    })/>
+            })}
+            <div class="modal-actions">
+                <button class="btn" on:click=move |_| close()>{tr().cancel}</button>
+                <button class="btn primary" disabled=move || name.with(|n| n.trim().is_empty()) on:click=move |_| submit()>
+                    {if renaming { tr().save } else { tr().create }}
+                </button>
+            </div>
+        </Modal>
     }
 }
 
@@ -7470,20 +7447,18 @@ fn FolderDialog(edit: FolderEdit) -> impl IntoView {
 fn AboutDialog() -> impl IntoView {
     let c = ctx();
     view! {
-        <div class="modal-backdrop" on:click=move |_| c.about.set(false)>
-            <div class="modal" on:click=|ev| ev.stop_propagation()>
-                <header>
-                    <h2>{tr().about_title}</h2>
-                    <button class="icon-btn" title=tr().close on:click=move |_| c.about.set(false)>
-                        <Icon icon=I::X/>
-                    </button>
-                </header>
-                <p><b>{tr().about_bold}</b></p>
-                <p>{tr().about_trademarks}</p>
-                <p>{tr().about_protocol}</p>
-                <p class="muted">{tr().version(env!("CARGO_PKG_VERSION"))}</p>
-            </div>
-        </div>
+        <Modal on_close=Callback::new(move |_| c.about.set(false))>
+            <header>
+                <h2>{tr().about_title}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| c.about.set(false)>
+                    <Icon icon=I::X/>
+                </button>
+            </header>
+            <p><b>{tr().about_bold}</b></p>
+            <p>{tr().about_trademarks}</p>
+            <p>{tr().about_protocol}</p>
+            <p class="muted">{tr().version(env!("CARGO_PKG_VERSION"))}</p>
+        </Modal>
     }
 }
 
