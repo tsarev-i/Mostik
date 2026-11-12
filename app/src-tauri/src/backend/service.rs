@@ -11,6 +11,7 @@
 //! again only when its last message or edit has changed.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 
 use mostik_core::custom_emoji::{
     self as ce, EmojiSet, MAX_UPLOAD, SERVICE_CHAT_NAME, SERVICE_DESCRIPTION, SERVICE_MARKER, UPLOAD_SIDE,
@@ -90,6 +91,8 @@ pub struct State {
     marked: StdMutex<BTreeMap<String, u64>>,
     /// One read or write of the service chat at a time.
     busy: Mutex<()>,
+    /// Bytes of the emoji images on disk, counted at every [`download`].
+    cached_bytes: AtomicU64,
 }
 
 /// How often the alias of an organization is looked up while its service chat is unknown.
@@ -99,6 +102,9 @@ const PAGE: u32 = 50;
 const MAX_PAGES: usize = 100;
 /// Emoji images downloaded at the same time.
 const DOWNLOADS: usize = 4;
+/// The most bytes the emoji images take on disk. Past it a new image is not kept: it still shows,
+/// fetched when needed.
+const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -733,13 +739,28 @@ fn file_path(app: &AppHandle, file_id: &str) -> Option<PathBuf> {
     dir(app).map(|d| d.join("files").join(safe))
 }
 
-/// Downloads the images of the emoji that are not on disk yet.
+/// Downloads the images of the emoji that are not on disk yet, after deleting the ones of emoji
+/// that are gone.
 async fn download(app: &AppHandle, live: &Live) {
     use futures_util::StreamExt;
-    let missing: Vec<String> = sets(app)
+    let ids: BTreeSet<String> = sets(app)
         .iter()
         .flat_map(|s| s.emoji.iter().chain(&s.taken))
         .map(|e| e.file_id.clone())
+        .collect();
+    if let Some(files) = dir(app).map(|d| d.join("files")) {
+        let keep: BTreeSet<std::ffi::OsString> = ids
+            .iter()
+            .filter_map(|id| file_path(app, id)?.file_name().map(ToOwned::to_owned))
+            .collect();
+        let kept = prune(&files, &keep);
+        app.state::<AppState>()
+            .service
+            .cached_bytes
+            .store(kept, Ordering::SeqCst);
+    }
+    let missing: Vec<String> = ids
+        .into_iter()
         .filter(|id| file_path(app, id).is_some_and(|p| !p.exists()))
         .collect();
     let jobs = missing.into_iter().map(|id| async move { fetch(app, live, &id).await });
@@ -755,6 +776,12 @@ async fn fetch(app: &AppHandle, live: &Live, file_id: &str) -> Result<Vec<u8>, S
         .fetch_file(file_id, None, ce::MAX_BYTES)
         .await
         .map_err(|e| e.to_string())?;
+    let cached = &app.state::<AppState>().service.cached_bytes;
+    let len = bytes.len() as u64;
+    if cached.fetch_add(len, Ordering::SeqCst) + len > CACHE_LIMIT {
+        cached.fetch_sub(len, Ordering::SeqCst);
+        return Ok(bytes);
+    }
     if let Some(path) = file_path(app, file_id)
         && let Some(parent) = path.parent()
         && std::fs::create_dir_all(parent).is_ok()
@@ -765,6 +792,21 @@ async fn fetch(app: &AppHandle, live: &Live, file_id: &str) -> Result<Vec<u8>, S
         }
     }
     Ok(bytes)
+}
+
+/// Deletes the files in `dir` whose names are not in `keep` (images of deleted emoji, leftovers
+/// of an interrupted write). Returns the bytes of the files kept.
+fn prune(dir: &std::path::Path, keep: &BTreeSet<std::ffi::OsString>) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut kept = 0;
+    for entry in entries.flatten() {
+        if keep.contains(&entry.file_name()) {
+            kept += entry.metadata().map_or(0, |m| m.len());
+        } else {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    kept
 }
 
 /// The image type by its first bytes: the storage does not always say.
@@ -1119,6 +1161,24 @@ pub async fn delete_custom_emoji(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_keeps_only_current_images() {
+        let dir = std::env::temp_dir().join(format!("mostik-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, len) in [("disk_a", 3), ("disk_b", 5), ("disk_c.tmp", 7)] {
+            std::fs::write(dir.join(name), vec![0; len]).unwrap();
+        }
+        let keep = BTreeSet::from(["disk_a".into(), "disk_x".into()]);
+        assert_eq!(prune(&dir, &keep), 3);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, ["disk_a"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sniffs_images() {

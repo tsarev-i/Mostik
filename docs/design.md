@@ -132,7 +132,8 @@ until then Noto Sans is used.
   socket 20 s, an update check a minute, a file transfer a minute plus its size at 32 KB/s; 30 s without
   data fails a transfer.
 - Files are read piece by piece and dropped once over their limit: an image for the UI 50 MB, a custom
-  emoji 512 KB. A saved attachment goes to disk as it arrives.
+  emoji 512 KB. A saved attachment goes to disk as it arrives. A service chat gives at most 1000 custom
+  emoji (the earliest), and their images keep at most 64 MB on disk; images of deleted emoji are removed.
 - Some `delivery` pushes come in protobuf (metadata version 4). Each is a twin of a JSON push of the same
   event (same server timestamp and author, checked on an hour of live traffic), so they are skipped unread.
 - A panic in the push handler closes the connection like a network error, and the reconnection starts
