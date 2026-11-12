@@ -36,6 +36,9 @@ pub struct Ctx {
     pub exhausted: RwSignal<HashSet<ChatId>>,
     pub loading_older: RwSignal<bool>,
     pub editing: RwSignal<Option<Message>>,
+    /// The text being edited, outside the editor: the message list rebuilds its rows whenever a
+    /// message of the chat changes, and the editor of a rebuilt row picks the draft up again.
+    pub edit_draft: StoredValue<Option<EditDraft>>,
     pub confirm_delete: RwSignal<Option<Message>>,
     /// Channel the user is about to leave from the sidebar menu: waits for confirmation.
     pub confirm_leave: RwSignal<Option<ChatId>>,
@@ -387,6 +390,7 @@ pub fn App() -> impl IntoView {
         exhausted: RwSignal::new(HashSet::new()),
         loading_older: RwSignal::new(false),
         editing: RwSignal::new(None),
+        edit_draft: StoredValue::new(None),
         confirm_delete: RwSignal::new(None),
         confirm_leave: RwSignal::new(None),
         picker: RwSignal::new(None),
@@ -440,6 +444,15 @@ pub fn App() -> impl IntoView {
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
+    // A draft lives only while its message is being edited.
+    Effect::new(move |_| {
+        let key = c.editing.with(|e| e.as_ref().map(|m| (m.chat_id.clone(), m.ts)));
+        c.edit_draft.update_value(|d| {
+            if d.as_ref().map(|d| &d.key) != key.as_ref() {
+                *d = None;
+            }
+        });
+    });
     // Preferences: save, apply the language, time format and theme, and pass them to the backend.
     Effect::new(move |_| {
         let st = c.settings.get();
@@ -2871,6 +2884,16 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
         }
     };
     let data_chat = id.0.clone();
+    // Someone is typing in the chat: three dots on the right, the names in the tooltip.
+    let typing = {
+        let id = id.clone();
+        Memo::new(move |_| tr().typing(&typers(c, &id)))
+    };
+    let typing_mark = move || {
+        typing.get().map(|hint| {
+            view! { <span class="sb-typing" title=hint><i></i><i></i><i></i></span> }
+        })
+    };
     let select = move |_| {
         // The click that ends a drag.
         if c.chat_drag.with_untracked(|d| d.as_ref().is_some_and(|d| d.active)) {
@@ -2938,6 +2961,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                     <span class="sb-name">{title}</span>
                     {you}
                     {face_status}
+                    {typing_mark}
                     {live_call}
                     {pencil}
                     {badge}
@@ -3030,8 +3054,16 @@ fn ChannelHeader() -> impl IntoView {
 
 /// The "X is typing…" line for a chat.
 fn typing_line(c: Ctx, chat: &ChatId) -> Option<String> {
+    tr().typing(&typers(c, chat))
+}
+
+/// Names of the people typing in a chat now.
+fn typers(c: Ctx, chat: &ChatId) -> Vec<String> {
     let now = c.now.get();
-    let names: Vec<String> = c.typing.with(|t| {
+    c.typing.with(|t| {
+        if !t.iter().any(|(ch, _, until)| ch == chat && *until > now) {
+            return vec![];
+        }
         c.snap.with(|s| {
             t.iter()
                 .filter(|(ch, _, until)| ch == chat && *until > now)
@@ -3041,8 +3073,7 @@ fn typing_line(c: Ctx, chat: &ChatId) -> Option<String> {
                 })
                 .collect()
         })
-    });
-    tr().typing(&names)
+    })
 }
 
 #[component]
@@ -3132,6 +3163,13 @@ fn MessageList() -> impl IntoView {
     }
 }
 
+/// Text typed in the editor of a message and where the caret was.
+pub struct EditDraft {
+    key: (ChatId, Timestamp),
+    text: String,
+    caret: Option<u32>,
+}
+
 /// In-place message editing, as in Slack: a text field, "Cancel" and "Save".
 /// Enter saves (or Ctrl+Enter, depending on the preference), Esc cancels.
 #[component]
@@ -3145,13 +3183,34 @@ fn InlineEditor(msg: Message) -> impl IntoView {
     c.picked
         .update(|p| p.extend(named.into_iter().map(|(name, id)| (name, UserId(id)))));
     let original = shown.trim().to_owned();
-    let text = RwSignal::new(shown);
+    // The row may have been rebuilt while the user was typing: go on with their draft.
+    let key = (msg.chat_id.clone(), msg.ts);
+    let draft = c
+        .edit_draft
+        .with_value(|d| d.as_ref().filter(|d| d.key == key).map(|d| (d.text.clone(), d.caret)));
+    let (initial, caret) = draft.unwrap_or((shown, None));
+    let caret = caret.unwrap_or(utf16_len(&initial));
+    let text = RwSignal::new(initial);
     let busy = RwSignal::new(false);
     let area = NodeRef::<html::Div>::new();
+    Effect::new(move |first: Option<()>| {
+        let text = text.get();
+        if first.is_none() {
+            return;
+        }
+        let caret = area.get_untracked().and_then(|el| selection(&el).1);
+        c.edit_draft.set_value(Some(EditDraft {
+            key: key.clone(),
+            text,
+            caret,
+        }));
+    });
     let initial = text.get_untracked();
     Effect::new(move |_| {
         if let Some(el) = area.get() {
-            place_caret(&el, &initial, utf16_len(&initial));
+            // Only the field appearing fills it: the emoji lookup reads the snapshot, and its
+            // changes (someone came online) would put the original text back over the typed one.
+            untrack(|| place_caret(&el, &initial, caret));
             // The editor is taller than the message: the last message's editor would go under
             // the composer. Once laid out, scroll it fully into view.
             request_animation_frame(move || {

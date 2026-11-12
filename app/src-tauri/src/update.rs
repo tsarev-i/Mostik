@@ -121,12 +121,13 @@ async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
     if matches!(status(app), UpdateStatus::Installing { .. } | UpdateStatus::Unsupported) {
         return Ok(status(app));
     }
-    let found = app
-        .updater()
-        .map_err(|e| e.to_string())?
-        .check()
-        .await
-        .map_err(|e| e.to_string())?;
+    // A release can go out before its macOS bundle (no runner for it yet): until the bundle is
+    // added, latest.json has no entry for this platform, which means no update, not an error.
+    let found = match app.updater().map_err(|e| e.to_string())?.check().await {
+        Ok(found) => found,
+        Err(tauri_plugin_updater::Error::TargetNotFound(_) | tauri_plugin_updater::Error::TargetsNotFound(_)) => None,
+        Err(e) => return Err(e.to_string()),
+    };
     let new = match &found {
         Some(update) => UpdateStatus::Available {
             version: update.version.clone(),

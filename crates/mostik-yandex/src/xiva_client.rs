@@ -41,6 +41,8 @@ pub enum XivaError {
 pub enum Incoming {
     /// `messenger-prod / delivery` push: the body is `{ClientMessage, ServerMessageInfo, …}`.
     Push { event: String, body: Value },
+    /// A push whose body is not JSON (some come in protobuf, metadata version 4): not read yet.
+    Undecoded { event: String, version: u32, body: Vec<u8> },
     /// Xiva service text frame (subscription, ping).
     Text(Value),
     /// The connection is closed.
@@ -180,6 +182,12 @@ impl XivaClient {
                             if let Some(tx) = xiva::rpc_seq(&data).and_then(|seq| p.lock().ok()?.remove(&seq)) {
                                 eprintln!("xiva: response of {} bytes not decoded: {e}", data.len());
                                 let _ = tx.send(serde_json::json!({ UNDECODED: e.to_string() }));
+                            } else if let Some((event, meta, body)) = xiva::push_head(&data) {
+                                on_event(Incoming::Undecoded {
+                                    event,
+                                    version: meta.version,
+                                    body: body.to_vec(),
+                                });
                             }
                         }
                     },

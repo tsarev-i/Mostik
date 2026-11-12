@@ -1115,7 +1115,7 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             }
             let _ = app.emit(EVENT, &ev);
         }
-        Incoming::Text(_) => {}
+        Incoming::Text(_) | Incoming::Undecoded { .. } => {}
         Incoming::Closed => {
             let _ = app.emit(EVENT, &LiveEvent::Connection { online: false });
             let app = app.clone();
@@ -1398,6 +1398,9 @@ fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Optio
         .body(body)
         .extra("chat", &m.chat_id.0)
         .extra("ts", m.ts);
+    if let Some(icon) = notification_icon(app) {
+        builder = builder.icon(icon);
+    }
     if let Some(parent) = m.thread_parent {
         builder = builder.extra("thread", parent);
     }
@@ -2371,28 +2374,57 @@ fn start_heartbeat(app: &AppHandle) {
     });
 }
 
+/// Icon of the notifications, as a file path. Without one the notification plugin gives the name
+/// of the executable as the icon, which no icon theme has, and Plasma draws a broken image next
+/// to the text. The app icon is written to the cache once per run.
+fn notification_icon(app: &AppHandle) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        PATH.get_or_init(|| {
+            const ICON: &[u8] = include_bytes!("../icons/128x128@2x.png");
+            let dir = app.path().app_cache_dir().ok()?;
+            let path = dir.join("notification-icon.png");
+            if std::fs::read(&path).ok().as_deref() != Some(ICON) {
+                std::fs::create_dir_all(&dir).ok()?;
+                std::fs::write(&path, ICON).ok()?;
+            }
+            path.to_str().map(str::to_owned)
+        })
+        .clone()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        None
+    }
+}
+
 /// "Show an example" in the notification preferences.
 #[tauri::command]
 pub fn test_notification(app: AppHandle) -> Result<(), String> {
-    app.notification()
+    let mut builder = app
+        .notification()
         .builder()
         .title(text(&app, "Мостик", "Mostik"))
         .body(text(
             &app,
             "Так выглядит уведомление о новом сообщении.",
             "This is what a new message notification looks like.",
-        ))
-        .show()
-        .map_err(|e| {
-            format!(
-                "{}: {e}",
-                text(
-                    &app,
-                    "система не показала уведомление",
-                    "the system didn't show the notification"
-                )
+        ));
+    if let Some(icon) = notification_icon(&app) {
+        builder = builder.icon(icon);
+    }
+    builder.show().map_err(|e| {
+        format!(
+            "{}: {e}",
+            text(
+                &app,
+                "система не показала уведомление",
+                "the system didn't show the notification"
             )
-        })
+        )
+    })
 }
 
 /// Main window title: the UI language and the unread count, as in Slack.

@@ -196,10 +196,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Runs even when a bundle job failed: GitHub sometimes finds no macOS runner for hours, and Linux
+  # and Windows should not wait for it. Re-running the failed bundle job later runs this job again,
+  # which adds the missing bundle to the same release and rewrites latest.json.
   release:
     name: Release
     needs: [version, bundle]
-    if: needs.version.outputs.release == 'true'
+    if: ${{ !cancelled() && needs.version.outputs.release == 'true' && needs.bundle.result != 'skipped' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -211,32 +214,59 @@ jobs:
           merge-multiple: true
 
       # The updater manifest: installed copies fetch it from the latest release and verify the
-      # downloaded bundle against its signature.
+      # downloaded bundle against its signature. A platform whose bundle is missing is left out:
+      # its copies keep their version until the bundle is added. Linux and Windows are required.
       - name: Write latest.json
         env:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
+          shopt -s nullglob
           ls -l dist
+          # The workflow log: stdout of platform() is the manifest.
+          exec 3>&1
           platform() {
-            local file
-            file=$(cd dist && ls $2)
+            local files=(dist/$2)
+            if [ ${#files[@]} -eq 0 ]; then
+              if [ "$3" = required ]; then
+                echo "::error::No $2 bundle for $1" >&3
+                exit 1
+              fi
+              echo "::warning::No $2 bundle for $1: this release goes out without it; re-run the failed bundle job to add it" >&3
+              return
+            fi
+            local file=${files[0]#dist/}
             jq -n --arg key "$1" --arg url "https://github.com/$GH_REPO/releases/download/v$VERSION/$file" \
               --arg sig "$(cat "dist/$file.sig")" '{($key): {signature: $sig, url: $url}}'
           }
           {
-            platform linux-x86_64 '*.AppImage'
-            platform windows-x86_64 '*-setup.exe'
+            platform linux-x86_64 '*.AppImage' required
+            platform windows-x86_64 '*-setup.exe' required
             platform darwin-aarch64 '*.app.tar.gz'
-          } | jq -s --arg version "$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{version: $version, pub_date: $date, platforms: add}' > latest.json
+          } > platforms.json
+          jq -s --arg version "$VERSION" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $version, pub_date: $date, platforms: add}' platforms.json > latest.json
           cat latest.json
 
+      # A re-run finds the release already published: it uploads only the bundles the release
+      # lacks and replaces latest.json, so files people may be downloading stay untouched.
       - name: Publish v${{ needs.version.outputs.version }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "v$VERSION" dist/*.AppImage dist/*.exe dist/*.dmg dist/*.app.tar.gz latest.json \
-            --target "$GITHUB_SHA" --title "Mostik v$VERSION" --generate-notes
+          shopt -s nullglob
+          files=(dist/*.AppImage dist/*.exe dist/*.dmg dist/*.app.tar.gz)
+          if ! gh release view "v$VERSION" > /dev/null 2>&1; then
+            gh release create "v$VERSION" "${files[@]}" latest.json \
+              --target "$GITHUB_SHA" --title "Mostik v$VERSION" --generate-notes
+            exit 0
+          fi
+          present=$(gh release view "v$VERSION" --json assets --jq '.assets[].name')
+          missing=()
+          for file in "${files[@]}"; do
+            grep -qxF "${file#dist/}" <<< "$present" || missing+=("$file")
+          done
+          echo "Adding to v$VERSION: ${missing[*]:-nothing}"
+          gh release upload "v$VERSION" "${missing[@]}" latest.json --clobber
