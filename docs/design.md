@@ -121,3 +121,20 @@ until then Noto Sans is used.
   chat of its own (`0/58/…`, "Групповой звонок 01.02 в 10:00") whose creation starts its first call; these
   chats are meeting chats, or with Preferences → Home → "Group calls in a section of their own" a
   "Group calls" section of Mostik's own (not a Telemost folder, so nothing is written to Telemost).
+
+## Connection
+
+- HTTP requests and the Xiva socket share one rustls setup with the platform verifier, so both trust
+  what the system trusts (a corporate root included), and both take the system proxy (`HTTPS_PROXY`,
+  `ALL_PROXY`, `NO_PROXY`, else the OS settings). The socket goes through an HTTP proxy with `CONNECT`;
+  a SOCKS or HTTPS proxy gets an error that names it.
+- Every network step has a time limit: an API call 20 s, a step of loading the page 30 s, opening the
+  socket 20 s, an update check a minute, a file transfer a minute plus its size at 32 KB/s; 30 s without
+  data fails a transfer.
+- Files are read piece by piece and dropped once over their limit: an image for the UI 50 MB, a custom
+  emoji 512 KB. A saved attachment goes to disk as it arrives.
+- Some `delivery` pushes come in protobuf (metadata version 4). Each is a twin of a JSON push of the same
+  event (same server timestamp and author, checked on an hour of live traffic), so they are skipped unread.
+- A panic in the push handler closes the connection like a network error, and the reconnection starts
+  afresh. Reconnection pauses are 2, 4 … 60 s, each stretched by up to a half at random; a connection
+  that closed while it was being set up is not kept.

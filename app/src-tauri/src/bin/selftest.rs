@@ -124,13 +124,6 @@ async fn run() -> Res<()> {
                 .map_or(0, |d| d.as_millis());
             match &inc {
                 Incoming::Push { event, body } => println!("{}", json!({ "t": now, "event": event, "body": body })),
-                Incoming::Undecoded { event, version, body } => {
-                    let hex: String = body.iter().map(|b| format!("{b:02x}")).collect();
-                    println!(
-                        "{}",
-                        json!({ "t": now, "event": event, "version": version, "hex": hex })
-                    )
-                }
                 Incoming::Text(t) => println!("{}", json!({ "t": now, "text": t })),
                 Incoming::Closed => println!("{}", json!({ "t": now, "closed": true })),
             }

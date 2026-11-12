@@ -1,31 +1,41 @@
 //! Xiva WebSocket: a background reader, responses matched to requests by `seq`, pushes go to an event handler.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use futures_util::stream::SplitSink;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, Notify, oneshot};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::endpoints::{WEB_ORIGIN, xiva_ws_url};
 use crate::session::CookieJar;
 use crate::xiva::{self, Frame};
 
-type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+/// What the socket runs over: TLS to Xiva, or an in-memory pipe in the tests.
+trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+type Ws = WebSocketStream<Box<dyn Io>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum XivaError {
     #[error("WebSocket: {0}")]
     Ws(#[from] tokio_tungstenite::tungstenite::Error),
+    #[error("{0}")]
+    Net(#[from] crate::net::NetError),
+    #[error("no connection to Telemost within {0} s")]
+    ConnectTimeout(u64),
     #[error("frame: {0}")]
     Frame(#[from] xiva::FrameError),
     #[error("no response to {0} within {1} s")]
@@ -40,19 +50,19 @@ pub enum XivaError {
 #[derive(Debug, Clone)]
 pub enum Incoming {
     /// `messenger-prod / delivery` push: the body is `{ClientMessage, ServerMessageInfo, …}`.
+    /// (Its protobuf twins are skipped, see [`xiva`].)
     Push { event: String, body: Value },
-    /// A push whose body is not JSON (some come in protobuf, metadata version 4): not read yet.
-    Undecoded { event: String, version: u32, body: Vec<u8> },
     /// Xiva service text frame (subscription, ping).
     Text(Value),
     /// The connection is closed.
     Closed,
 }
 
-type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<Value>>>>;
+/// Waiters for responses by `seq`: a response that did not decode comes as the error text.
+type Pending = Arc<StdMutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
-/// The key of the stand-in body a waiter gets when its response did not decode.
-const UNDECODED: &str = "__undecoded";
+/// How long opening the socket may take: the proxy, TLS and the WebSocket handshake.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How often Xiva pings until its first ping says (`server-interval-sec`).
 const DEFAULT_PING_INTERVAL_MS: u64 = 60_000;
@@ -139,7 +149,24 @@ impl XivaClient {
             h.insert("User-Agent", v);
         }
         h.insert("Origin", HeaderValue::from_static(WEB_ORIGIN));
-        let (ws, _) = connect_async(req).await?;
+        let host = req.uri().host().unwrap_or_default().to_owned();
+        let port = req.uri().port_u16().unwrap_or(443);
+        let open = async {
+            let tls = crate::net::connect_tls(&host, port).await?;
+            let (ws, _) = tokio_tungstenite::client_async(req, Box::new(tls) as Box<dyn Io>).await?;
+            Ok::<_, XivaError>(ws)
+        };
+        let ws = tokio::time::timeout(CONNECT_TIMEOUT, open)
+            .await
+            .map_err(|_| XivaError::ConnectTimeout(CONNECT_TIMEOUT.as_secs()))??;
+        Ok(Self::start(ws, on_event))
+    }
+
+    /// Starts the reader of an open socket.
+    fn start<F>(ws: Ws, on_event: F) -> Self
+    where
+        F: Fn(Incoming) + Send + Sync + 'static,
+    {
         let (sink, mut stream) = ws.split();
         let writer = Arc::new(Mutex::new(sink));
         let pending: Pending = Arc::default();
@@ -162,76 +189,81 @@ impl XivaClient {
         let reader = tokio::spawn(async move {
             // Why the connection ended, for the log: Telemost drops it now and then for no
             // visible reason.
-            let reason = loop {
-                let msg = tokio::select! {
-                    msg = stream.next() => msg,
-                    () = live.kill.notified() => break "no ping from Xiva".to_owned(),
-                };
-                let msg = match msg {
-                    Some(Ok(msg)) => msg,
-                    Some(Err(e)) => break format!("read error: {e}"),
-                    None => break "the stream ended".to_owned(),
-                };
-                live.last_frame.store(now_ms(), Ordering::SeqCst);
-                match msg {
-                    WsMessage::Binary(data) => match xiva::decode(&data) {
-                        Ok(Frame::Rpc { seq, body, .. }) => {
-                            if crate::diag::traffic_logging() {
-                                crate::diag::traffic_log(
-                                    serde_json::json!({ "dir": "in", "via": "ws", "seq": seq, "body": body }),
-                                );
+            let frames = async {
+                loop {
+                    let msg = tokio::select! {
+                        msg = stream.next() => msg,
+                        () = live.kill.notified() => break "no ping from Xiva".to_owned(),
+                    };
+                    let msg = match msg {
+                        Some(Ok(msg)) => msg,
+                        Some(Err(e)) => break format!("read error: {e}"),
+                        None => break "the stream ended".to_owned(),
+                    };
+                    live.last_frame.store(now_ms(), Ordering::SeqCst);
+                    match msg {
+                        WsMessage::Binary(data) => match xiva::decode(&data) {
+                            Ok(Frame::Rpc { seq, body, .. }) => {
+                                if crate::diag::traffic_logging() {
+                                    crate::diag::traffic_log(
+                                        serde_json::json!({ "dir": "in", "via": "ws", "seq": seq, "body": body }),
+                                    );
+                                }
+                                if let Some(tx) = p.lock().ok().and_then(|mut m| m.remove(&seq)) {
+                                    let _ = tx.send(Ok(body));
+                                }
                             }
-                            if let Some(tx) = p.lock().ok().and_then(|mut m| m.remove(&seq)) {
-                                let _ = tx.send(body);
+                            Ok(Frame::Push { event, body, .. }) => on_event(Incoming::Push { event, body }),
+                            Ok(Frame::ProtobufTwin { .. }) => {}
+                            // A response that does not decode still answers its request, so the
+                            // caller does not wait for the timeout.
+                            Err(e) => match xiva::rpc_seq(&data) {
+                                Some(seq) => {
+                                    crate::diag::traffic_log(serde_json::json!({
+                                        "dir": "in", "via": "ws", "seq": seq, "error": e.to_string(), "hex": crate::diag::hex(&data)
+                                    }));
+                                    if let Some(tx) = p.lock().ok().and_then(|mut m| m.remove(&seq)) {
+                                        eprintln!("xiva: response of {} bytes not decoded: {e}", data.len());
+                                        let _ = tx.send(Err(e.to_string()));
+                                    }
+                                }
+                                None => eprintln!("xiva: a frame of {} bytes not decoded: {e}", data.len()),
+                            },
+                        },
+                        WsMessage::Text(t) => {
+                            let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
+                            if let Some(sec) = v.get("server-interval-sec").and_then(Value::as_u64)
+                                && sec > 0
+                            {
+                                live.ping_interval_ms.store(sec * 1000, Ordering::SeqCst);
                             }
-                        }
-                        Ok(Frame::Push { event, body, .. }) => on_event(Incoming::Push { event, body }),
-                        // A response that does not decode still answers its request, so the caller
-                        // does not wait for the timeout. (Some pushes carry protobuf, not JSON:
-                        // those are not read yet.)
-                        Err(e) => {
-                            if let Some(seq) = xiva::rpc_seq(&data) {
-                                crate::diag::traffic_log(serde_json::json!({
-                                    "dir": "in", "via": "ws", "seq": seq, "error": e.to_string(), "hex": crate::diag::hex(&data)
-                                }));
+                            if let Some(id) = v.get("subscription-id").and_then(Value::as_str)
+                                && let Ok(mut s) = sub.lock()
+                            {
+                                *s = Some(id.to_owned());
                             }
-                            if let Some(tx) = xiva::rpc_seq(&data).and_then(|seq| p.lock().ok()?.remove(&seq)) {
-                                eprintln!("xiva: response of {} bytes not decoded: {e}", data.len());
-                                let _ = tx.send(serde_json::json!({ UNDECODED: e.to_string() }));
-                            } else if let Some((event, meta, body)) = xiva::push_head(&data) {
-                                on_event(Incoming::Undecoded {
-                                    event,
-                                    version: meta.version,
-                                    body: body.to_vec(),
-                                });
-                            }
+                            on_event(Incoming::Text(v));
                         }
-                    },
-                    WsMessage::Text(t) => {
-                        let v: Value = serde_json::from_str(&t).unwrap_or(Value::Null);
-                        if let Some(sec) = v.get("server-interval-sec").and_then(Value::as_u64)
-                            && sec > 0
-                        {
-                            live.ping_interval_ms.store(sec * 1000, Ordering::SeqCst);
+                        WsMessage::Ping(payload) => {
+                            let _ = w.lock().await.send(WsMessage::Pong(payload)).await;
                         }
-                        if let Some(id) = v.get("subscription-id").and_then(Value::as_str)
-                            && let Ok(mut s) = sub.lock()
-                        {
-                            *s = Some(id.to_owned());
+                        WsMessage::Close(frame) => {
+                            break match frame {
+                                Some(f) => format!("close frame {}: {}", u16::from(f.code), f.reason),
+                                None => "close frame without a code".to_owned(),
+                            };
                         }
-                        on_event(Incoming::Text(v));
+                        _ => {}
                     }
-                    WsMessage::Ping(payload) => {
-                        let _ = w.lock().await.send(WsMessage::Pong(payload)).await;
-                    }
-                    WsMessage::Close(frame) => {
-                        break match frame {
-                            Some(f) => format!("close frame {}: {}", u16::from(f.code), f.reason),
-                            None => "close frame without a code".to_owned(),
-                        };
-                    }
-                    _ => {}
                 }
+            };
+            // A panic in `on_event` ends the connection the way a network error does. Uncaught, it
+            // would end the reader and leave the socket looking alive with nobody reading it; and
+            // the handler's state may be half-changed (a poisoned lock), which the reconnection
+            // starts afresh.
+            let reason = match AssertUnwindSafe(frames).catch_unwind().await {
+                Ok(reason) => reason,
+                Err(panic) => format!("the push handler panicked: {}", panic_text(panic.as_ref())),
             };
             eprintln!("xiva: the connection closed: {reason}");
             crate::diag::traffic_log(serde_json::json!({ "dir": "in", "via": "ws", "closed": reason }));
@@ -240,11 +272,13 @@ impl XivaClient {
             if let Ok(mut m) = p.lock() {
                 m.clear();
             }
-            on_event(Incoming::Closed);
+            if std::panic::catch_unwind(AssertUnwindSafe(|| on_event(Incoming::Closed))).is_err() {
+                eprintln!("xiva: the push handler panicked on the close");
+            }
         });
 
         liveness.clone().watch();
-        Ok(Self {
+        Self {
             writer,
             pending,
             seq: AtomicU64::new(0),
@@ -252,7 +286,7 @@ impl XivaClient {
             subscription_id,
             reader: reader.abort_handle(),
             liveness,
-        })
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -311,10 +345,8 @@ impl XivaClient {
             return Err(e);
         }
         match tokio::time::timeout(Duration::from_secs(timeout_s), rx).await {
-            Ok(Ok(v)) => match v.get(UNDECODED).and_then(Value::as_str) {
-                Some(e) => Err(XivaError::BadResponse(method.to_owned(), e.to_owned())),
-                None => Ok(v),
-            },
+            Ok(Ok(Ok(v))) => Ok(v),
+            Ok(Ok(Err(e))) => Err(XivaError::BadResponse(method.to_owned(), e)),
             Ok(Err(_)) => Err(XivaError::Closed),
             Err(_) => {
                 crate::diag::traffic_log(
@@ -332,5 +364,118 @@ impl XivaClient {
         if let Ok(mut m) = self.pending.lock() {
             m.remove(&seq);
         }
+    }
+}
+
+/// The message of a caught panic.
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xiva::Meta;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    /// A client on one end of an in-memory pipe and the server's end of it.
+    async fn pair<F>(on_event: F) -> (XivaClient, WebSocketStream<tokio::io::DuplexStream>)
+    where
+        F: Fn(Incoming) + Send + Sync + 'static,
+    {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let client = WebSocketStream::from_raw_socket(Box::new(client) as Box<dyn Io>, Role::Client, None).await;
+        let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+        (XivaClient::start(client, on_event), server)
+    }
+
+    fn push(version: u32, body: &[u8]) -> WsMessage {
+        let meta = Meta {
+            version,
+            aux: 1,
+            reserved: 0,
+        };
+        WsMessage::Binary(xiva::encode_push(meta, body).into())
+    }
+
+    /// What the handler got, in order: `push`, `text` or `closed`.
+    fn recorder() -> (Arc<StdMutex<Vec<String>>>, impl Fn(Incoming) + Send + Sync + 'static) {
+        let got: Arc<StdMutex<Vec<String>>> = Arc::default();
+        let record = got.clone();
+        let handler = move |incoming: Incoming| {
+            let kind = match incoming {
+                Incoming::Push { body, .. } => format!("push {}", body["n"]),
+                Incoming::Text(_) => "text".to_owned(),
+                Incoming::Closed => "closed".to_owned(),
+            };
+            record.lock().unwrap().push(kind);
+        };
+        (got, handler)
+    }
+
+    async fn until(what: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !what() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out");
+    }
+
+    #[tokio::test]
+    async fn protobuf_twins_are_skipped() {
+        let (got, handler) = recorder();
+        let (_xiva, mut server) = pair(handler).await;
+        server.send(push(4, &[0x0a, 0x01, b'x'])).await.unwrap();
+        server.send(push(5, br#"{"n":1}"#)).await.unwrap();
+        server.close(None).await.unwrap();
+        until(|| got.lock().unwrap().len() == 2).await;
+        assert_eq!(*got.lock().unwrap(), ["push 1", "closed"]);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_handler_closes_the_connection() {
+        let (got, record) = recorder();
+        let handler = move |incoming: Incoming| {
+            if matches!(&incoming, Incoming::Push { body, .. } if body["n"] == 2) {
+                panic!("a bug in the handler");
+            }
+            record(incoming);
+        };
+        let (xiva, mut server) = pair(handler).await;
+        let request = serde_json::json!({});
+        let call = xiva.call("history", &request, 5);
+        let serve = async {
+            server.send(push(5, br#"{"n":1}"#)).await.unwrap();
+            server.send(push(5, br#"{"n":2}"#)).await.unwrap();
+        };
+        let (answer, ()) = tokio::join!(call, serve);
+        assert!(matches!(answer, Err(XivaError::Closed)), "{answer:?}");
+        assert!(xiva.is_closed());
+        assert_eq!(*got.lock().unwrap(), ["push 1", "closed"]);
+    }
+
+    #[tokio::test]
+    async fn a_response_that_does_not_decode_answers_its_call() {
+        let (_, handler) = recorder();
+        let (xiva, mut server) = pair(handler).await;
+        let serve = async {
+            let Some(Ok(WsMessage::Binary(request))) = server.next().await else {
+                panic!("no request");
+            };
+            let mut response = request.to_vec();
+            response.truncate(response.len() - 2);
+            response.extend_from_slice(b"not json");
+            server.send(WsMessage::Binary(response.into())).await.unwrap();
+        };
+        let request = serde_json::json!({});
+        let (answer, ()) = tokio::join!(xiva.call("whoami", &request, 5), serve);
+        assert!(matches!(answer, Err(XivaError::BadResponse(m, _)) if m == "whoami"));
+        assert!(!xiva.is_closed());
     }
 }

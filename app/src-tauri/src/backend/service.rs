@@ -750,7 +750,11 @@ async fn download(app: &AppHandle, live: &Live) {
 }
 
 async fn fetch(app: &AppHandle, live: &Live, file_id: &str) -> Result<Vec<u8>, String> {
-    let (bytes, _) = live.web.fetch_file(file_id, None).await.map_err(|e| e.to_string())?;
+    let (bytes, _) = live
+        .web
+        .fetch_file(file_id, None, ce::MAX_BYTES)
+        .await
+        .map_err(|e| e.to_string())?;
     if let Some(path) = file_path(app, file_id)
         && let Some(parent) = path.parent()
         && std::fs::create_dir_all(parent).is_ok()

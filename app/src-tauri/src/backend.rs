@@ -127,6 +127,9 @@ struct FileCache {
 
 const FILE_CACHE_LIMIT: usize = 64 * 1024 * 1024;
 
+/// The largest attachment served to the UI (an image, whole or a preview): it is held in memory.
+const SERVED_FILE_LIMIT: u64 = 50 * 1024 * 1024;
+
 impl FileCache {
     fn get(&self, key: &str) -> Option<(Arc<Vec<u8>>, String)> {
         self.items.get(key).cloned()
@@ -656,7 +659,11 @@ async fn cached_file(live: &Live, id: &str, size: Option<&str>) -> Result<(Arc<V
     if let Some(hit) = cached() {
         return Ok(hit);
     }
-    let fetched = live.web.fetch_file(id, size).await.map_err(|e| e.to_string());
+    let fetched = live
+        .web
+        .fetch_file(id, size, SERVED_FILE_LIMIT)
+        .await
+        .map_err(|e| e.to_string());
     if let Ok(mut d) = live.downloads.lock() {
         d.remove(&key);
     }
@@ -729,7 +736,6 @@ pub async fn save_file(
     name: String,
 ) -> Result<String, String> {
     let live = live(&state).await?;
-    let (bytes, _) = live.web.fetch_file(&file_id, None).await.map_err(|e| e.to_string())?;
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
     let safe: String = name
         .chars()
@@ -756,10 +762,25 @@ pub async fn save_file(
         path = dir.join(format!("{stem} ({n}){ext}"));
         n += 1;
     }
-    std::fs::write(&path, bytes).map_err(|e| format!("could not save the file: {e}"))?;
+    download_to(&live, &file_id, &path).await?;
     let shown = path.display().to_string();
     open_external(&shown)?;
     Ok(shown)
+}
+
+/// Writes an attachment into a new file at `path` as it arrives, whatever its size; a failed
+/// download leaves no file behind.
+async fn download_to(live: &Live, file_id: &str, path: &std::path::Path) -> Result<(), String> {
+    let mut file = tokio::fs::File::create_new(path)
+        .await
+        .map_err(|e| format!("could not save the file: {e}"))?;
+    let downloaded = live.web.download(file_id, &mut file).await;
+    drop(file);
+    if let Err(e) = downloaded {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 /// "Edit" in your own profile: the name and photo are edited in Yandex ID.
@@ -1061,8 +1082,8 @@ impl From<WebError> for ConnectError {
     }
 }
 
-/// With `MOSTIK_PUSH_LOG=<file>` every push goes to the traffic log: a JSON body as is (with
-/// `parsed`: whether the app understood it), a protobuf one as hex.
+/// With `MOSTIK_PUSH_LOG=<file>` every push goes to the traffic log as is, with `parsed`:
+/// whether the app understood it.
 fn log_push(incoming: &Incoming, me: Option<&UserId>) {
     if !mostik_yandex::diag::traffic_logging() {
         return;
@@ -1070,9 +1091,6 @@ fn log_push(incoming: &Incoming, me: Option<&UserId>) {
     mostik_yandex::diag::traffic_log(match incoming {
         Incoming::Push { event, body } => {
             json!({ "event": event, "parsed": convert::from_push(body, me).is_some(), "body": body })
-        }
-        Incoming::Undecoded { event, version, body } => {
-            json!({ "event": event, "version": version, "hex": mostik_yandex::diag::hex(body) })
         }
         Incoming::Text(_) => return,
         Incoming::Closed => json!({ "closed": true }),
@@ -1162,7 +1180,7 @@ fn handle_incoming(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, diag: &Atomi
             }
             let _ = app.emit(EVENT, &ev);
         }
-        Incoming::Text(_) | Incoming::Undecoded { .. } => {}
+        Incoming::Text(_) => {}
         Incoming::Closed => {
             let _ = app.emit(EVENT, &LiveEvent::Connection { online: false });
             let app = app.clone();
@@ -2572,18 +2590,39 @@ pub fn set_preferences(
     }
 }
 
-/// Reconnects with pauses of 2, 4, 8 … 60 seconds.
+/// Reconnects after the connection closed. One loop at a time: the closes that come while it
+/// runs are its own business.
 async fn reconnect_loop(app: AppHandle) {
     let state = app.state::<AppState>();
-    if state.reconnecting.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let mut delay = 2;
     loop {
-        tokio::time::sleep(Duration::from_secs(delay)).await;
-        let Some(jar) = store::load() else { break };
+        if state.reconnecting.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let reconnected = reconnect(&app, &state).await;
+        state.reconnecting.store(false, Ordering::SeqCst);
+        // A connection that closed after `reconnect` saw it open, while the flag still turned
+        // its own reconnection away, would otherwise stay dead.
+        let dead = state.live.lock().await.as_ref().is_some_and(|l| l.xiva.is_closed());
+        if !(reconnected && dead) {
+            return;
+        }
+        eprintln!("reconnect: the new connection closed at once");
+        let _ = app.emit(EVENT, &LiveEvent::Connection { online: false });
+    }
+}
+
+/// Connects again and again, with growing pauses, until a connection is up (`true`) or there
+/// is no session to connect with (`false`).
+async fn reconnect(app: &AppHandle, state: &AppState) -> bool {
+    let mut attempt = 0;
+    loop {
+        tokio::time::sleep(reconnect_pause(attempt, random())).await;
+        attempt = attempt.saturating_add(1);
+        let Some(jar) = store::load() else { return false };
         let mut probe = json!({});
-        match connect_inner(&app, &state, jar, &mut probe).await {
+        match connect_inner(app, state, jar, &mut probe).await {
+            // Its close went to a reconnection that this loop turned away: try again.
+            Ok((_, live)) if live.xiva.is_closed() => eprintln!("reconnect: the new connection closed at once"),
             Ok((snapshot, live)) => {
                 let live = Arc::new(live);
                 *state.live.lock().await = Some(live.clone());
@@ -2591,25 +2630,37 @@ async fn reconnect_loop(app: AppHandle) {
                 service::start(app.clone(), live);
                 let _ = app.emit(EVENT, &LiveEvent::Connection { online: true });
                 let _ = app.emit(SNAPSHOT_EVENT, &snapshot);
-                break;
+                return true;
             }
             Err(ConnectError::Unauthorized) => {
                 store::delete();
-                call::close(&app);
+                call::close(app);
                 *state.live.lock().await = None;
                 let reason = text(
-                    &app,
+                    app,
                     "Сессия Яндекс ID недействительна, войдите снова.",
                     "Your Yandex ID session has expired. Please sign in again.",
                 );
                 let _ = app.emit(SIGNED_OUT_EVENT, reason);
-                break;
+                return false;
             }
             Err(ConnectError::Other(e)) => eprintln!("reconnect failed: {e}"),
         }
-        delay = (delay * 2).min(60);
     }
-    state.reconnecting.store(false, Ordering::SeqCst);
+}
+
+/// The pause before reconnection attempt `attempt` (from 0): 2, 4, 8 … 60 s, each stretched by
+/// up to a half at random (`random` is any number), so that clients cut off together (a
+/// Telemost restart, a network change at an office) do not come back all at once.
+fn reconnect_pause(attempt: u32, random: u64) -> Duration {
+    let base = 2_000u64.saturating_mul(1 << attempt.min(5)).min(60_000);
+    Duration::from_millis(base + random % (base / 2 + 1))
+}
+
+/// A random number, for the jitter of [`reconnect_pause`]: std's hasher keys are random.
+fn random() -> u64 {
+    use std::hash::BuildHasher;
+    std::collections::hash_map::RandomState::new().hash_one(std::time::Instant::now())
 }
 
 /// Chat count and chat ID patterns of a `history` response, for the probe.
@@ -2856,7 +2907,22 @@ async fn connect_inner(
 
 #[cfg(test)]
 mod tests {
-    use super::percent_decode;
+    use super::{percent_decode, reconnect_pause};
+    use std::time::Duration;
+
+    #[test]
+    fn reconnect_pauses_grow_with_jitter() {
+        let ms = |attempt, random| reconnect_pause(attempt, random).as_millis();
+        assert_eq!(
+            [0, 1, 2, 3, 4, 5, 40].map(|a| ms(a, 0)),
+            [2000, 4000, 8000, 16000, 32000, 60000, 60000]
+        );
+        // Up to a half more, at random.
+        assert_eq!(ms(0, 1000), 3000);
+        assert_eq!(ms(0, 1001), 2000);
+        assert_eq!(ms(5, u64::MAX), 60000 + u128::from(u64::MAX % 30001));
+        assert!(reconnect_pause(40, u64::MAX) <= Duration::from_secs(90));
+    }
 
     #[test]
     fn decodes_file_ids() {
