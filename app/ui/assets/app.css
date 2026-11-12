@@ -874,7 +874,18 @@ button:disabled { opacity: 0.4; cursor: default; }
   color: var(--text);
   font: 15px/1.46668 var(--font);
 }
-.composer .editor:empty::before { content: attr(data-placeholder); color: var(--text-muted); pointer-events: none; }
+.editor-box { position: relative; }
+.editor-placeholder {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  padding: 4px 12px;
+  color: var(--text-muted);
+  font: 15px/1.46668 var(--font);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
 
 .send-group { display: flex; border-radius: 4px; overflow: hidden; background: var(--accent-green); color: #fff; }
 .send-group.empty { background: none; color: var(--text-muted); }

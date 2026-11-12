@@ -1523,9 +1523,10 @@ fn TopBar() -> impl IntoView {
     let selected = RwSignal::new(0usize);
     let hits: RwSignal<Vec<Hit>> = RwSignal::new(vec![]);
     let placeholder = move || tr().search_in(&org_name(c));
-    // Ctrl+K is the quick switcher, Alt+← / Alt+→ go back and forward, as in Slack.
+    // Ctrl+K is the quick switcher, Alt+← / Alt+→ go back and forward, as in Slack. Ctrl+Shift+K
+    // is "Add link" in a message field.
     scoped_window_listener(ev::keydown, move |e| {
-        if e.ctrl_key() && e.key().eq_ignore_ascii_case("k") {
+        if e.ctrl_key() && !e.shift_key() && e.key().eq_ignore_ascii_case("k") {
             e.prevent_default();
             if let Some(el) = input.get_untracked() {
                 let _ = el.focus();
@@ -3749,7 +3750,8 @@ fn render_inline(text: &str, who: &Mentionable, me: Me) -> AnyView {
             Inline::Link { text, url } => {
                 let (target, middle) = (url.clone(), url.clone());
                 // A middle click is no `click`: left to the webview, WebKitGTK opens the link
-                // right in the app window. It opens in the default browser, like a click.
+                // right in the app window. It opens in the default browser, like a click. Its
+                // release would also paste the X11 selection into the focused message field.
                 view! {
                     <a class="msg-link" href=url.clone() title=url on:click=move |e| {
                         e.prevent_default();
@@ -3758,6 +3760,10 @@ fn render_inline(text: &str, who: &Mentionable, me: Me) -> AnyView {
                         e.prevent_default();
                         if e.button() == 1 {
                             ops::open_url(ctx(), middle.clone());
+                        }
+                    } on:mouseup=|e| {
+                        if e.button() == 1 {
+                            e.prevent_default();
                         }
                     }>{text}</a>
                 }
@@ -5073,45 +5079,50 @@ fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     </Show>
                 })}
                 <crate::compose::FormatBar field/>
-                <div
-                    class="editor"
-                    node_ref=area
-                    contenteditable="plaintext-only"
-                    role="textbox"
-                    aria-multiline="true"
-                    data-placeholder=placeholder
-                    on:input=move |_| {
-                        let Some(text) = area.get_untracked().map(|el| crate::editor::tidy(&el, &crate::custom::lookup(c))) else { return };
-                        remember(&text);
-                        set_draft.set(text);
-                        ops::typing(c, c.current.get_untracked());
-                        let found = area.get_untracked().map(|el| {
-                            if let Some(q) = emoji_query(&el) {
-                                // Custom emoji first, as in Slack, leaving room for the standard ones.
-                                let standard = crate::emoji::suggest(&q, 8);
-                                let mut found: Vec<Suggestion> = crate::custom::suggest(c, &q, 8).into_iter().map(Suggestion::Custom).collect();
-                                found.truncate(8usize.saturating_sub(standard.len()).max(4));
-                                found.extend(standard.into_iter().map(|(glyph, code)| Suggestion::Emoji { glyph, code }));
-                                found.truncate(8);
-                                found
-                            } else if let Some(q) = mention_query(&el) {
-                                let chat = c.current.get_untracked();
-                                c.snap.with_untracked(|s| mention_suggestions(s, &chat, &q, 8))
-                            } else {
-                                vec![]
-                            }
-                        }).unwrap_or_default();
-                        suggest_sel.set(0);
-                        suggestions.set(found);
-                    }
-                    on:keydown=on_key
-                    on:paste=move |e: ev::ClipboardEvent| {
-                        if thread || !crate::compose::attach_pasted(c, &e) {
-                            field.paste_link(&e);
+                // A placeholder of its own: WebKit does not always restyle `attr()` in `::before` when
+                // the chat, and so the attribute, changes.
+                <div class="editor-box">
+                    <div class="editor-placeholder" hidden=move || !draft.with(String::is_empty)>{placeholder}</div>
+                    <div
+                        class="editor"
+                        node_ref=area
+                        contenteditable="plaintext-only"
+                        role="textbox"
+                        aria-multiline="true"
+                        aria-placeholder=placeholder
+                        on:input=move |_| {
+                            let Some(text) = area.get_untracked().map(|el| crate::editor::tidy(&el, &crate::custom::lookup(c))) else { return };
+                            remember(&text);
+                            set_draft.set(text);
+                            ops::typing(c, c.current.get_untracked());
+                            let found = area.get_untracked().map(|el| {
+                                if let Some(q) = emoji_query(&el) {
+                                    // Custom emoji first, as in Slack, leaving room for the standard ones.
+                                    let standard = crate::emoji::suggest(&q, 8);
+                                    let mut found: Vec<Suggestion> = crate::custom::suggest(c, &q, 8).into_iter().map(Suggestion::Custom).collect();
+                                    found.truncate(8usize.saturating_sub(standard.len()).max(4));
+                                    found.extend(standard.into_iter().map(|(glyph, code)| Suggestion::Emoji { glyph, code }));
+                                    found.truncate(8);
+                                    found
+                                } else if let Some(q) = mention_query(&el) {
+                                    let chat = c.current.get_untracked();
+                                    c.snap.with_untracked(|s| mention_suggestions(s, &chat, &q, 8))
+                                } else {
+                                    vec![]
+                                }
+                            }).unwrap_or_default();
+                            suggest_sel.set(0);
+                            suggestions.set(found);
                         }
-                    }
-                    on:blur=move |_| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
-                ></div>
+                        on:keydown=on_key
+                        on:paste=move |e: ev::ClipboardEvent| {
+                            if thread || !crate::compose::attach_pasted(c, &e) {
+                                field.paste_link(&e);
+                            }
+                        }
+                        on:blur=move |_| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
+                    ></div>
+                </div>
                 <Show when=move || !suggestions.with(Vec::is_empty)>
                     <div class="emoji-suggest">
                         {move || suggestions.get().into_iter().enumerate().map(|(i, pick)| {

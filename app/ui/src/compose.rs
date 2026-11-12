@@ -84,8 +84,8 @@ impl Field {
     }
 
     /// Formatting hotkeys, as in Slack: Ctrl+B bold, Ctrl+I italic, Ctrl+Shift+X strikethrough,
-    /// Ctrl+Shift+U a link. Keys are taken by their place, so they work in any keyboard layout.
-    /// Returns whether the key was one of them.
+    /// Ctrl+Shift+U a link, or Ctrl+Shift+K where that does not come (see [`link_keys`]). Keys are
+    /// taken by their place, so they work in any keyboard layout. Returns whether the key was one of them.
     pub fn hotkey(self, e: &ev::KeyboardEvent) -> bool {
         if !(e.ctrl_key() || e.meta_key()) || e.alt_key() {
             return false;
@@ -94,7 +94,7 @@ impl Field {
             ("KeyB", false) => self.wrap("**", "**"),
             ("KeyI", false) => self.wrap("__", "__"),
             ("KeyX", true) => self.wrap("~~", "~~"),
-            ("KeyU", true) => self.open_link(),
+            ("KeyU" | "KeyK", true) => self.open_link(),
             _ => return false,
         }
         e.prevent_default();
@@ -201,6 +201,15 @@ fn paste_link(text: &str, start: Option<u32>, end: Option<u32>, pasted: &str) ->
     Some((format!("{head}{}", &text[range.end..]), caret))
 }
 
+/// The "Add link" hotkey that works here. On Linux Ctrl+Shift+U never reaches the page: GTK and
+/// IBus take it for typing a character by its Unicode code.
+fn link_keys() -> &'static str {
+    let linux = web_sys::window()
+        .and_then(|w| w.navigator().user_agent().ok())
+        .is_some_and(|ua| ua.contains("Linux"));
+    if linux { "Ctrl+Shift+K" } else { "Ctrl+Shift+U" }
+}
+
 /// Where the emoji picker of a field opens, and the field's selection it inserts into: the
 /// picker's search takes the focus.
 type PickerAt = ((f64, f64), (Option<u32>, Option<u32>));
@@ -225,7 +234,7 @@ pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
             <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
             <button class="fmt" title=hint(tr().fmt_strike, "Ctrl+Shift+X") on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
             <span class="sep"></span>
-            <button class="fmt" title=hint(tr().fmt_link, "Ctrl+Shift+U") on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_link, link_keys()) on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
             <span class="sep"></span>
             <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
             <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>
