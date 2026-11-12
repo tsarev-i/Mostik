@@ -9,4 +9,4 @@ description = "Mostik domain model: chats, messages, users"
 
 [dependencies]
 serde.workspace = true
-emojis = "0.9.1"
+emojis.workspace = true
