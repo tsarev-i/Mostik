@@ -511,7 +511,7 @@ pub fn App() -> impl IntoView {
     // Folders made or changed in Telemost come with no push: they are read again when the window
     // gets the focus, at most once a minute.
     let folders_read = StoredValue::new(0.0);
-    let _folders_focus = window_event_listener(ev::focus, move |_| {
+    scoped_window_listener(ev::focus, move |_| {
         let now = js_sys::Date::now();
         if c.live && c.phase.get_untracked() == Phase::Ready && now - folders_read.get_value() > 60_000.0 {
             folders_read.set_value(now);
@@ -616,25 +616,25 @@ pub fn App() -> impl IntoView {
         }
     };
     // Listen to both pointer and mouse events: some environments send only one kind.
-    let _pm = window_event_listener(ev::pointermove, move |e| {
+    scoped_window_listener(ev::pointermove, move |e| {
         drag_to(e.client_x() as f64);
         chat_drag_to(c, &e);
     });
-    let _mm = window_event_listener(ev::mousemove, move |e| {
+    scoped_window_listener(ev::mousemove, move |e| {
         drag_to(e.client_x() as f64);
         chat_drag_to(c, &e);
     });
-    let _pu = window_event_listener(ev::pointerup, move |_| {
+    scoped_window_listener(ev::pointerup, move |_| {
         drag_end();
         chat_drop(c);
     });
-    let _mu = window_event_listener(ev::mouseup, move |_| {
+    scoped_window_listener(ev::mouseup, move |_| {
         drag_end();
         chat_drop(c);
     });
 
     // Ctrl+= / Ctrl+- / Ctrl+0 zoom, as in Slack.
-    let _zoom = window_event_listener(ev::keydown, move |e| {
+    scoped_window_listener(ev::keydown, move |e| {
         if !(e.ctrl_key() || e.meta_key()) || e.alt_key() {
             return;
         }
@@ -650,7 +650,7 @@ pub fn App() -> impl IntoView {
     });
 
     // Esc, as in Slack: first closes an open menu or image viewer, otherwise the topmost dialog.
-    let _esc = window_event_listener(ev::keydown, move |e| {
+    scoped_window_listener(ev::keydown, move |e| {
         if e.key() != "Escape" {
             return;
         }
@@ -707,7 +707,7 @@ pub fn App() -> impl IntoView {
     });
 
     // The right-click menu closes on a click outside it, on scroll and when the window loses focus.
-    let _ctx_down = window_event_listener(ev::mousedown, move |e| {
+    scoped_window_listener(ev::mousedown, move |e| {
         let inside = |sel: &str| {
             e.target()
                 .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
@@ -722,10 +722,10 @@ pub fn App() -> impl IntoView {
             c.me_menu.set(false);
         }
     });
-    let _ctx_wheel = window_event_listener(ev::wheel, move |_| c.ctx_menu.set(None));
-    let _ctx_blur = window_event_listener(ev::blur, move |_| c.ctx_menu.set(None));
-    let _focus = window_event_listener(ev::focus, move |_| ops::refresh_me(c));
-    let _ctx_resize = window_event_listener(ev::resize, move |_| c.ctx_menu.set(None));
+    scoped_window_listener(ev::wheel, move |_| c.ctx_menu.set(None));
+    scoped_window_listener(ev::blur, move |_| c.ctx_menu.set(None));
+    scoped_window_listener(ev::focus, move |_| ops::refresh_me(c));
+    scoped_window_listener(ev::resize, move |_| c.ctx_menu.set(None));
 
     if live {
         ops::subscribe(c);
@@ -741,10 +741,12 @@ pub fn App() -> impl IntoView {
         ops::load_threads(c);
         ops::open_chat(c, ChatId("dev".into()));
     }
+    // Only these two settings rebuild the whole view; the others are read where they apply.
+    let lang_clock = Memo::new(move |_| c.settings.with(|s| (s.lang, s.clock24)));
     view! {
         {move || {
             // Language and time format before building the view: effects run only after rendering.
-            let (lang, clock24) = c.settings.with(|s| (s.lang, s.clock24));
+            let (lang, clock24) = lang_clock.get();
             crate::i18n::set_current(lang);
             time::configure(lang, clock24);
             let phase = c.phase.get();
@@ -836,7 +838,7 @@ fn Workspace() -> impl IntoView {
     let c = ctx();
     let inner_width = || window().inner_width().ok().and_then(|v| v.as_f64()).unwrap_or(1280.0);
     let win_w = RwSignal::new(inner_width());
-    let _resize = window_event_listener(ev::resize, move |_| win_w.set(inner_width()));
+    scoped_window_listener(ev::resize, move |_| win_w.set(inner_width()));
     // The right pane gives way to the messages down to MAIN_MIN, then down to THREAD_MIN itself;
     // when even that does not fit (a narrow window), it takes the whole column in place of the chat.
     let pane_w = Memo::new(move |_| {
@@ -1507,7 +1509,7 @@ fn TopBar() -> impl IntoView {
     let hits: RwSignal<Vec<Hit>> = RwSignal::new(vec![]);
     let placeholder = move || tr().search_in(&org_name(c));
     // Ctrl+K is the quick switcher, Alt+← / Alt+→ go back and forward, as in Slack.
-    let _hotkey = window_event_listener(ev::keydown, move |e| {
+    scoped_window_listener(ev::keydown, move |e| {
         if e.ctrl_key() && e.key().eq_ignore_ascii_case("k") {
             e.prevent_default();
             if let Some(el) = input.get_untracked() {
@@ -1522,7 +1524,7 @@ fn TopBar() -> impl IntoView {
         }
     });
     // A click outside the search and history closes their drop-downs.
-    let _outside = window_event_listener(ev::mousedown, move |e| {
+    scoped_window_listener(ev::mousedown, move |e| {
         let inside = |sel: &str| {
             e.target()
                 .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
@@ -1990,7 +1992,7 @@ fn HoverTip() -> impl IntoView {
             tip.set(None);
         }
     };
-    let _over = window_event_listener(ev::mouseover, move |e| {
+    scoped_window_listener(ev::mouseover, move |e| {
         let el = e
             .target()
             .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
@@ -2010,14 +2012,14 @@ fn HoverTip() -> impl IntoView {
             tip.set(Some(next));
         }
     });
-    let _out = window_event_listener(ev::mouseout, move |e| {
+    scoped_window_listener(ev::mouseout, move |e| {
         // The pointer left the window.
         if e.related_target().is_none() {
             hide();
         }
     });
-    let _down = window_event_listener(ev::mousedown, move |_| hide());
-    let _wheel = window_event_listener(ev::wheel, move |_| hide());
+    scoped_window_listener(ev::mousedown, move |_| hide());
+    scoped_window_listener(ev::wheel, move |_| hide());
     let node = NodeRef::<html::Div>::new();
     // Shifts the tip back inside the window when the element is near its edge.
     Effect::new(move |_| {
