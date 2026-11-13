@@ -165,20 +165,31 @@ pub fn attached(c: Ctx, chat: &ChatId) -> Vec<bridge::PendingFile> {
         .with_untracked(|all| all.get(chat).cloned().unwrap_or_default())
 }
 
+/// Replaces the text of `m`. The new text goes over the message as it is now: `m` is the copy
+/// taken when the editor opened, and its reactions and marks may have changed since.
 pub async fn edit(c: Ctx, m: Message, text: String) -> Result<(), String> {
     let text = with_mention_ids(c, &text);
     if c.live {
         bridge::edit_message(&m, &text).await?;
     }
-    upsert(
-        c,
-        Message {
-            text,
-            edited: true,
-            ..m
-        },
-        None,
-    );
+    let now = c.snap.with_untracked(|s| {
+        s.messages
+            .iter()
+            .find(|x| x.chat_id == m.chat_id && x.ts == m.ts)
+            .cloned()
+    });
+    // Gone meanwhile (deleted, or the chat was left): nothing to show it in.
+    if let Some(now) = now {
+        upsert(
+            c,
+            Message {
+                text,
+                edited: true,
+                ..now
+            },
+            None,
+        );
+    }
     Ok(())
 }
 

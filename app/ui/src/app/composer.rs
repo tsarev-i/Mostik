@@ -78,7 +78,14 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
             });
         }
     });
-    let cancel = move || c.editing.set(None);
+    // Closing the editor gives the focus back to the field it was opened from, as in Slack: ↑
+    // works again and typing goes on.
+    let in_thread = msg.thread_parent.is_some();
+    let close = move || {
+        c.editing.set(None);
+        focus_composer(in_thread);
+    };
+    let cancel = close;
     let save = {
         let msg = msg.clone();
         move || {
@@ -92,13 +99,22 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
                 return c.confirm_delete.set(Some(msg.clone()));
             }
             if t == original {
-                return c.editing.set(None);
+                return close();
             }
             busy.set(true);
             let m = msg.clone();
+            let key = (msg.chat_id.clone(), msg.ts);
             spawn_local(async move {
                 match ops::edit(c, m, t).await {
-                    Ok(()) => c.editing.set(None),
+                    // Only if it is still this message's editor: while the edit went, the user may
+                    // have opened another one.
+                    Ok(())
+                        if c.editing
+                            .with_untracked(|e| e.as_ref().is_some_and(|e| (&e.chat_id, e.ts) == (&key.0, key.1))) =>
+                    {
+                        close()
+                    }
+                    Ok(()) => {}
                     Err(e) => ops::failed(c, tr().err_not_sent, e),
                 }
                 // Saved, the editor closes and its signals go.
@@ -150,6 +166,31 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
                 </button>
             </div>
         </div>
+    }
+}
+
+/// Puts the focus, with the caret at the end, in the composer of the chat or of the open thread,
+/// unless the user has put it somewhere else while a save was going.
+fn focus_composer(thread: bool) {
+    let elsewhere = document()
+        .active_element()
+        .is_some_and(|a| a.tag_name() != "BODY" && a.closest(".inline-edit").ok().flatten().is_none());
+    if elsewhere {
+        return;
+    }
+    let selector = if thread {
+        ".composer-wrap.in-thread .editor"
+    } else {
+        ".composer-wrap:not(.in-thread) .editor"
+    };
+    let found = document()
+        .query_selector(selector)
+        .ok()
+        .flatten()
+        .and_then(|el| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(el).ok());
+    if let Some(el) = found {
+        let _ = el.focus();
+        crate::editor::set_caret(&el, utf16_len(&crate::editor::value(&el)));
     }
 }
 

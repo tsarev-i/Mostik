@@ -307,10 +307,16 @@ pub(super) fn ForwardDialog(msg: Message) -> impl IntoView {
         busy.set(true);
         let (m, text) = (msg.clone(), text.get_untracked());
         spawn_local(async move {
+            let key = (m.chat_id.clone(), m.ts);
             match ops::forward(c, m, to, text).await {
                 Ok(()) => {
                     c.notice.set(Some(tr().forwarded_notice.into()));
-                    close();
+                    // Only if it is still this message's dialog: the user may have opened another.
+                    if c.forwarding
+                        .with_untracked(|f| f.as_ref().is_some_and(|f| (&f.chat_id, f.ts) == (&key.0, key.1)))
+                    {
+                        close();
+                    }
                 }
                 Err(e) => ops::failed(c, tr().err_forward, e),
             }
@@ -572,7 +578,10 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
                         ch.description = (!d.trim().is_empty()).then(|| d.clone());
                     }
                 });
-                close();
+                // Only if this dialog is still open, not one opened again after it was closed.
+                if name.try_get_untracked().is_some() {
+                    close();
+                }
             });
         }
     };
