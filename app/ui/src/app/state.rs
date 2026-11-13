@@ -75,8 +75,9 @@ pub struct Ctx {
     pub browsing: RwSignal<bool>,
     pub settings: RwSignal<Settings>,
     pub status_dialog: RwSignal<bool>,
-    /// Files attached to the main composer (picked in the dialog or dropped).
-    pub pending_files: RwSignal<Vec<bridge::PendingFile>>,
+    /// Files attached to the main composer of each chat (picked in the dialog, dropped or
+    /// pasted), like the text drafts: a file attached in one chat never goes to another.
+    pub pending_files: RwSignal<std::collections::HashMap<ChatId, Vec<bridge::PendingFile>>>,
     pub new_message: RwSignal<bool>,
     /// The "Create a channel" dialog.
     pub creating_channel: RwSignal<Option<NewChannel>>,

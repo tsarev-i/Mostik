@@ -118,13 +118,51 @@ pub async fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Times
     if !c.live {
         return Err(tr().only_in_app_files.into());
     }
-    let paths: Vec<String> = c.pending_files.get_untracked().into_iter().map(|f| f.path).collect();
-    let sent = bridge::send_files(&chat.0, thread, paths, &with_mention_ids(c, &text)).await?;
-    c.pending_files.set(vec![]);
+    let paths: Vec<String> = attached(c, &chat).into_iter().map(|f| f.path).collect();
+    let sent = bridge::send_files(&chat.0, thread, paths.clone(), &with_mention_ids(c, &text)).await?;
+    // Only what went: the user may have attached more while it was uploading.
+    c.pending_files.update(|all| {
+        if let Some(list) = all.get_mut(&chat) {
+            list.retain(|f| !paths.contains(&f.path));
+            if list.is_empty() {
+                all.remove(&chat);
+            }
+        }
+    });
     for m in sent {
         upsert(c, m, None);
     }
     Ok(())
+}
+
+/// Attaches `files` to the message being written in `chat`; a file already there is not added again.
+pub fn attach_files(c: Ctx, chat: ChatId, files: Vec<bridge::PendingFile>) {
+    c.pending_files.update(|all| {
+        let list = all.entry(chat).or_default();
+        for f in files {
+            if !list.iter().any(|x| x.path == f.path) {
+                list.push(f);
+            }
+        }
+    });
+}
+
+/// Takes the file at `path` off the message being written in `chat`.
+pub fn detach_file(c: Ctx, chat: &ChatId, path: &str) {
+    c.pending_files.update(|all| {
+        if let Some(list) = all.get_mut(chat) {
+            list.retain(|f| f.path != path);
+            if list.is_empty() {
+                all.remove(chat);
+            }
+        }
+    });
+}
+
+/// Files attached to the message being written in `chat`, untracked.
+pub fn attached(c: Ctx, chat: &ChatId) -> Vec<bridge::PendingFile> {
+    c.pending_files
+        .with_untracked(|all| all.get(chat).cloned().unwrap_or_default())
 }
 
 pub async fn edit(c: Ctx, m: Message, text: String) -> Result<(), String> {

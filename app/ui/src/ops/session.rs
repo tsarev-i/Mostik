@@ -110,13 +110,7 @@ pub fn subscribe(c: Ctx) {
         })
         .await;
         bridge::listen(bridge::FILES_EVENT, move |files: Vec<bridge::PendingFile>| {
-            c.pending_files.update(|p| {
-                for f in files {
-                    if !p.iter().any(|x| x.path == f.path) {
-                        p.push(f);
-                    }
-                }
-            });
+            super::attach_files(c, c.current.get_untracked(), files);
         })
         .await;
         bridge::listen(bridge::CALL_EVENT, move |call: Option<bridge::CallInfo>| {

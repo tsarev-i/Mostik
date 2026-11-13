@@ -345,6 +345,9 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
         c.error.set(Some(tr().only_in_app_files.into()));
         return true;
     }
+    // A large file takes a while to read: it goes to the chat it was pasted in, even if the user
+    // has moved on.
+    let chat = c.current.get_untracked();
     spawn_local(async move {
         for f in files {
             let name = file_name(&f.name(), &f.type_());
@@ -353,7 +356,7 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
                 Err(e) => Err(format!("{name}: {e:?}")),
             };
             match kept {
-                Ok(file) => c.pending_files.update(|p| p.push(file)),
+                Ok(file) => crate::ops::attach_files(c, chat.clone(), vec![file]),
                 Err(e) => return c.error.set(Some(e)),
             }
         }

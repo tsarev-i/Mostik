@@ -261,7 +261,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     };
     let submit = move || {
         let text = draft.get_untracked().trim().to_owned();
-        let with_files = !thread && !c.pending_files.with_untracked(Vec::is_empty);
+        let with_files = !thread && !ops::attached(c, &c.current.get_untracked()).is_empty();
         if (text.is_empty() && !with_files) || sending.get_untracked() {
             return;
         }
@@ -420,14 +420,19 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         }
     };
     let typing_text = move || if thread { None } else { typing_line(c, &c.current.get()) };
+    // The files attached in the open chat.
+    let files = move || {
+        let chat = c.current.get();
+        c.pending_files.with(|all| all.get(&chat).cloned().unwrap_or_default())
+    };
     view! {
         <div class=if thread { "composer-wrap in-thread" } else { "composer-wrap" }>
             <div class="composer">
                 {move || reply.get().map(|r| view! { <ReplyBar target=r/> })}
                 {(!thread).then(|| view! {
-                    <Show when=move || !c.pending_files.with(Vec::is_empty)>
+                    <Show when=move || !files().is_empty()>
                         <div class="pending-files">
-                            {move || c.pending_files.get().into_iter().map(|f| {
+                            {move || files().into_iter().map(|f| {
                                 let path = f.path.clone();
                                 view! {
                                     <span class="pending-file">
@@ -437,7 +442,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                                             <span class="file-size">{human_size(f.size)}</span>
                                         </span>
                                         <button class="pf-remove" title=tr().remove_file
-                                            on:click=move |_| c.pending_files.update(|p| p.retain(|x| x.path != path))>
+                                            on:click=move |_| ops::detach_file(c, &c.current.get_untracked(), &path)>
                                             <Icon icon=I::X size=12/>
                                         </button>
                                     </span>
@@ -539,13 +544,11 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                             if !c.live {
                                 return c.error.set(Some(tr().only_in_app_files.into()));
                             }
+                            // The files go to the chat the dialog was opened in.
+                            let chat = c.current.get_untracked();
                             spawn_local(async move {
                                 match bridge::pick_files().await {
-                                    Ok(files) => c.pending_files.update(|p| {
-                                        for f in files {
-                                            if !p.iter().any(|x| x.path == f.path) { p.push(f); }
-                                        }
-                                    }),
+                                    Ok(files) => ops::attach_files(c, chat, files),
                                     Err(e) => c.error.set(Some(e)),
                                 }
                             });
@@ -570,7 +573,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     {move || sending.get().then(|| view! { <span class="composer-hint">{tr().uploading}</span> })}
                     <span class="composer-hint">{if crate::app::enter_sends() { tr().hint_shift_enter } else { tr().hint_ctrl_enter }}</span>
                     <div class="spacer"></div>
-                    <div class=move || if (draft.with(|d| d.trim().is_empty()) && (thread || c.pending_files.with(Vec::is_empty))) || sending.get() { "send-group empty" } else { "send-group" }>
+                    <div class=move || if (draft.with(|d| d.trim().is_empty()) && (thread || files().is_empty())) || sending.get() { "send-group empty" } else { "send-group" }>
                         <button class="send" title=tr().send on:click=move |_| submit()><Icon icon=I::Send size=16/></button>
                     </div>
                 </div>
