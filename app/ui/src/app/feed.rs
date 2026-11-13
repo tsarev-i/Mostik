@@ -189,6 +189,19 @@ pub(super) fn MessageList() -> impl IntoView {
             el.set_scroll_top(el.scroll_top() + (now - offset).round() as i32);
         }
     };
+    // A message the user has just sent takes the list to the bottom, wherever it was scrolled,
+    // as in Slack: otherwise it would land below the view.
+    Effect::new(move |seen: Option<Option<Timestamp>>| {
+        let me = c.snap.with_untracked(|s| s.me.clone());
+        let last = messages.with(|list| list.last().map(|m| (m.ts, m.author == me)));
+        let newest = last.map(|(ts, _)| ts);
+        if let (Some(Some(before)), Some((ts, true))) = (seen, last)
+            && ts > before
+        {
+            stick.set(true);
+        }
+        newest
+    });
     Effect::new(move |_| {
         messages.track();
         // When the loading stops, an older page has come or the start of the chat shows above.
