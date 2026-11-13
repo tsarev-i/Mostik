@@ -91,6 +91,12 @@ thread_local! {
     static CURSOR: std::cell::RefCell<std::collections::HashMap<ChatId, Timestamp>> = Default::default();
 }
 
+/// Whether the latest history page of chat `id` has been loaded over the current connection: only
+/// then do older pages follow on from what is shown.
+pub fn history_loaded(id: &ChatId) -> bool {
+    FRESH.with_borrow(|f| f.contains(id))
+}
+
 /// Where the loaded history of chat `id` starts, if a page of it has been loaded.
 fn cursor(id: &ChatId) -> Option<Timestamp> {
     CURSOR.with_borrow(|c| c.get(id).copied())
@@ -232,7 +238,6 @@ pub(super) async fn load_latest(c: Ctx, id: &ChatId) {
                     e.remove(id);
                 }
             });
-            fill_screen(c, id.clone());
             // Only what is in front of the user is read: not a chat in a hidden window after a
             // reconnection, nor one the user marked unread.
             if read_on_open && reading(c, id) {
@@ -241,25 +246,6 @@ pub(super) async fn load_latest(c: Ctx, id: &ChatId) {
         }
         Err(e) => failed(c, tr().err_history, e),
     }
-}
-
-/// A short page may not fill the message list, and then there is no scrolling to load older
-/// messages: load them until the list scrolls or the history ends. Runs after the list re-renders.
-fn fill_screen(c: Ctx, id: ChatId) {
-    set_timeout(
-        move || {
-            if c.current.get_untracked() != id {
-                return;
-            }
-            let Some(el) = document().query_selector(".chat-feed").ok().flatten() else {
-                return;
-            };
-            if el.scroll_height() <= el.client_height() {
-                load_older(c);
-            }
-        },
-        std::time::Duration::from_millis(16),
-    );
 }
 
 /// "Back" / "Forward" through opened chats, like the arrows in Slack's top bar.
@@ -356,25 +342,25 @@ pub fn mark_read(c: Ctx, id: ChatId) {
 /// Loads older messages of the current chat. Returns `false` if there is nothing more to load.
 pub fn load_older(c: Ctx) -> bool {
     let id = c.current.get_untracked();
-    if !c.live || c.loading_older.get_untracked() || c.exhausted.with_untracked(|e| e.contains(&id)) {
+    if !c.live || c.loading_older.with_untracked(|l| l.contains(&id)) || c.exhausted.with_untracked(|e| e.contains(&id))
+    {
         return false;
     }
     let loaded = cursor(&id);
     let Some(before) = c.snap.with_untracked(|s| older_page_before(s, &id, loaded)) else {
         return false;
     };
-    c.loading_older.set(true);
+    c.loading_older.update(|l| {
+        l.insert(id.clone());
+    });
     spawn_local(async move {
         match bridge::history(&id.0, Some(before), None).await {
-            Ok(page) => {
-                add_older_page(c, &id, before, page);
-                c.loading_older.set(false);
-                fill_screen(c, id);
-                return;
-            }
+            Ok(page) => add_older_page(c, &id, before, page),
             Err(e) => failed(c, tr().err_older, e),
         }
-        c.loading_older.set(false);
+        c.loading_older.update(|l| {
+            l.remove(&id);
+        });
     });
     true
 }

@@ -201,6 +201,26 @@ pub(super) fn MessageList() -> impl IntoView {
             stick.set(false);
         }
     });
+    // A short page may not fill the list, and then there is no scrolling to load older messages:
+    // load them until the list scrolls or the history ends. Checked after every change of the list
+    // and of the loading, once laid out, however the chat was opened.
+    Effect::new(move |_| {
+        let id = c.current.get();
+        messages.track();
+        let busy = c.loading_older.with(|l| l.contains(&id)) || c.exhausted.with(|e| e.contains(&id));
+        // Before the latest page comes, the list has nothing to go on from.
+        if busy || !c.live || !ops::history_loaded(&id) {
+            return;
+        }
+        request_animation_frame(move || {
+            let Some(el) = list_ref.try_get_untracked().flatten() else {
+                return;
+            };
+            if c.current.get_untracked() == id && el.scroll_height() <= el.client_height() {
+                ops::load_older(c);
+            }
+        });
+    });
     // Pictures and videos get their height only once loaded: keep the view in place then too.
     // `load` does not bubble, so it is caught on the way down.
     Effect::new(move |attached: Option<bool>| {
@@ -252,7 +272,7 @@ pub(super) fn MessageList() -> impl IntoView {
                 let done = !c.live || c.exhausted.with(|e| e.contains(&id));
                 if done {
                     view! { <ChannelIntro/> }.into_any()
-                } else if c.loading_older.get() {
+                } else if c.loading_older.with(|l| l.contains(&id)) {
                     view! { <div class="loading-older"><div class="spinner small"></div></div> }.into_any()
                 } else {
                     view! { <div class="loading-older"></div> }.into_any()

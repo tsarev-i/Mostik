@@ -36,7 +36,8 @@ pub struct Ctx {
     pub typing: RwSignal<Vec<(ChatId, UserId, f64)>>,
     pub last_typing: RwSignal<f64>,
     pub exhausted: RwSignal<HashSet<ChatId>>,
-    pub loading_older: RwSignal<bool>,
+    /// Chats an older history page is being loaded for.
+    pub loading_older: RwSignal<std::collections::HashSet<ChatId>>,
     pub editing: RwSignal<Option<Message>>,
     /// The text being edited, outside the editor: a message line built again (the message list
     /// shown again after the pinned message, the text changed on another device) picks the

@@ -91,7 +91,7 @@ pub fn App() -> impl IntoView {
         typing: RwSignal::new(vec![]),
         last_typing: RwSignal::new(0.0),
         exhausted: RwSignal::new(HashSet::new()),
-        loading_older: RwSignal::new(false),
+        loading_older: RwSignal::new(Default::default()),
         editing: RwSignal::new(None),
         edit_draft: StoredValue::new(None),
         confirm_delete: RwSignal::new(None),
