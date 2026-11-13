@@ -15,6 +15,17 @@ use super::{failed, learn_users};
 
 /// Selects a chat, loads its fresh history and marks it as read.
 pub fn open_chat(c: Ctx, id: ChatId) {
+    // The chat already in front, its history loaded, stays as it is, as in Slack. Selecting it
+    // again would set the signals of the chat view, and every `set` notifies: the list would be built again and jump
+    // to the bottom, and the field would lose its caret.
+    let in_front = c.current.get_untracked() == id
+        && (!c.live || history_loaded(&id))
+        && !c.view.get_untracked().is_home_page()
+        && !c.pins_tab.get_untracked()
+        && !c.hidden.with_untracked(|h| h.contains_key(&id));
+    if in_front {
+        return;
+    }
     if !select_chat(c, id.clone(), true) {
         return;
     }
@@ -298,8 +309,11 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
             c.snap
                 .with_untracked(|s| s.messages.iter().any(|m| m.chat_id == chat2 && m.ts == target))
         };
+        // The user may leave the chat while its history loads: then loading stops and nothing
+        // shows, or the thread would open in the chat they went to.
+        let here = |c: Ctx| c.current.get_untracked() == chat2;
         let mut pages = 0;
-        while c.live && !has(c) && pages < 20 && !c.exhausted.with_untracked(|e| e.contains(&chat2)) {
+        while c.live && here(c) && !has(c) && pages < 20 && !c.exhausted.with_untracked(|e| e.contains(&chat2)) {
             let loaded = cursor(&chat2);
             let Some(before) = c.snap.with_untracked(|s| older_page_before(s, &chat2, loaded)) else {
                 break;
@@ -310,7 +324,9 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
             }
             pages += 1;
         }
-        show();
+        if here(c) {
+            show();
+        }
     });
 }
 
