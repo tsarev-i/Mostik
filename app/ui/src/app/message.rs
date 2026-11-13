@@ -199,9 +199,10 @@ pub(super) fn MessageRow(
                             // Follows the set: it may arrive after the message, and an emoji may be renamed.
                             let (chat, glyph) = (chat_id.clone(), r.emoji.clone());
                             let glyph = move || match crate::custom::by_kind(c, &chat, kind) {
-                                Some(e) => crate::custom::image(&e, "custom-emoji").into_any(),
+                                // The button's tooltip says who reacted: the image has none to cover it.
+                                Some(e) => crate::custom::image_untitled(&e, "custom-emoji").into_any(),
                                 None if mostik_core::custom_emoji::is_custom_reaction(kind) => {
-                                    view! { <span class="emoji" title=tr().unknown_custom_emoji>"▫️"</span> }.into_any()
+                                    view! { <span class="emoji">"▫️"</span> }.into_any()
                                 }
                                 None => view! { <span class="emoji">{glyph.clone()}</span> }.into_any(),
                             };
@@ -394,6 +395,7 @@ fn reaction_title(s: &Snapshot, r: &Reaction, custom: Option<&mostik_core::custo
     if names.is_empty() && !r.mine {
         return match custom {
             Some(e) => mostik_core::custom_emoji::caption(&e.name),
+            None if mostik_core::custom_emoji::is_custom_reaction(r.kind) => tr().unknown_custom_emoji.to_owned(),
             None => reactions::name(r.kind).unwrap_or("").to_owned(),
         };
     }
