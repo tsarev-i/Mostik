@@ -239,8 +239,14 @@ impl XivaClient {
                             }
                             on_event(Incoming::Text(v));
                         }
+                        // Only when the writer is free: waiting for it would stop the reading, and with
+                        // it the check that drops a dead connection, behind a send stuck on a full
+                        // socket. A busy writer is sending anyway, and tungstenite answers the ping
+                        // with it.
                         WsMessage::Ping(payload) => {
-                            let _ = w.lock().await.send(WsMessage::Pong(payload)).await;
+                            if let Ok(mut w) = w.try_lock() {
+                                let _ = w.send(WsMessage::Pong(payload)).await;
+                            }
                         }
                         WsMessage::Close(frame) => {
                             break match frame {
@@ -307,7 +313,9 @@ impl XivaClient {
         }
     }
 
-    /// Sends a request and waits for the response with the same `seq`.
+    /// Sends a request and waits for the response with the same `seq`. The wait for the writer
+    /// and the send count towards `timeout_s` too: on a connection that died while a large request
+    /// filled the socket, the send would hang until the system gives up, minutes later.
     pub async fn call(&self, method: &str, body: &impl Serialize, timeout_s: u64) -> Result<Value, XivaError> {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let (tx, rx) = oneshot::channel();
@@ -325,21 +333,28 @@ impl XivaClient {
                 "dir": "out", "via": "ws", "seq": seq, "method": method, "body": serde_json::to_value(body).ok()
             }));
         }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
         let sent = match xiva::encode_rpc(seq, method, body) {
-            Ok(bytes) => self
-                .writer
-                .lock()
-                .await
-                .send(WsMessage::Binary(bytes.into()))
-                .await
-                .map_err(XivaError::from),
+            Ok(bytes) => {
+                let send = async { self.writer.lock().await.send(WsMessage::Binary(bytes.into())).await };
+                match tokio::time::timeout_at(deadline, send).await {
+                    Ok(sent) => sent.map_err(XivaError::from),
+                    Err(_) => {
+                        // The socket takes nothing: the connection is dead. It is dropped, which
+                        // releases the other calls, and made again.
+                        eprintln!("xiva: {method} could not be sent within {timeout_s} s, the connection is dropped");
+                        self.liveness.kill.notify_one();
+                        Err(XivaError::Timeout(method.to_owned(), timeout_s))
+                    }
+                }
+            }
             Err(e) => Err(e.into()),
         };
         if let Err(e) = sent {
             self.forget(seq);
             return Err(e);
         }
-        match tokio::time::timeout(Duration::from_secs(timeout_s), rx).await {
+        match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => Err(XivaError::BadResponse(method.to_owned(), e)),
             Ok(Err(_)) => Err(XivaError::Closed),
@@ -472,5 +487,24 @@ mod tests {
         let (answer, ()) = tokio::join!(xiva.call("whoami", &request, 5), serve);
         assert!(matches!(answer, Err(XivaError::BadResponse(m, _)) if m == "whoami"));
         assert!(!xiva.is_closed());
+    }
+
+    #[tokio::test]
+    async fn a_send_stuck_on_a_full_socket_times_out_and_drops_the_connection() {
+        let (got, handler) = recorder();
+        // A small pipe the server never reads: the request does not fit.
+        let (client, _server) = tokio::io::duplex(1024);
+        let client = WebSocketStream::from_raw_socket(Box::new(client) as Box<dyn Io>, Role::Client, None).await;
+        let xiva = XivaClient::start(client, handler);
+        let large = serde_json::json!({ "text": "x".repeat(64 * 1024) });
+        let small = serde_json::json!({});
+        let started = std::time::Instant::now();
+        // The second call waits for the writer the first one holds.
+        let (stuck, queued) = tokio::join!(xiva.call("post", &large, 1), xiva.call("whoami", &small, 1));
+        assert!(matches!(stuck, Err(XivaError::Timeout(m, 1)) if m == "post"));
+        assert!(queued.is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        until(|| xiva.is_closed()).await;
+        until(|| got.lock().unwrap().last().is_some_and(|k| k == "closed")).await;
     }
 }
