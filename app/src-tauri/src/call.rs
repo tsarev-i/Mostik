@@ -192,8 +192,13 @@ where
     open_locked(app, &url, info, &jar).await
 }
 
-/// The opening itself; the caller holds `CallState::opening` and has seen no open call.
+/// The opening itself; the caller holds `CallState::opening` and has seen no open call. Only a
+/// Telemost meeting opens: the window gets the camera, the microphone and the session cookies,
+/// and without it the system would open any address it is given (`file://`, another app).
 async fn open_locked(app: &AppHandle, url: &str, info: CallInfo, jar: &CookieJar) -> Result<(), String> {
+    if !is_meeting_url(url) {
+        return Err(format!("not a Telemost meeting link: {url}"));
+    }
     let state = app.state::<CallState>();
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let title = window_title(app, &info.label);
@@ -410,7 +415,7 @@ mod imp {
 
     use mostik_yandex::session::CookieJar;
     use serde_json::{Value, json};
-    use tauri::{AppHandle, Manager, Url};
+    use tauri::{AppHandle, Manager};
 
     use super::{HEIGHT, MEETING_HOSTS, WIDTH};
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -633,7 +638,7 @@ mod imp {
             .await?;
         // The user has asked for the call, so the meeting page gets the camera and the
         // microphone without another prompt, as in a native app.
-        for origin in origins(url) {
+        for origin in origins() {
             cdp.send(
                 "Browser.grantPermissions",
                 json!({ "origin": origin, "permissions": ["audioCapture", "videoCapture"] }),
@@ -846,16 +851,9 @@ mod imp {
             .collect()
     }
 
-    /// Origins that get the camera and microphone: the meeting's own and both Telemost hosts.
-    pub(super) fn origins(url: &str) -> Vec<String> {
-        let mut out: Vec<String> = MEETING_HOSTS.iter().map(|h| format!("https://{h}")).collect();
-        if let Ok(u) = Url::parse(url) {
-            let own = u.origin().ascii_serialization();
-            if !out.contains(&own) {
-                out.insert(0, own);
-            }
-        }
-        out
+    /// Origins that get the camera and microphone: the Telemost hosts only.
+    pub(super) fn origins() -> Vec<String> {
+        MEETING_HOSTS.iter().map(|h| format!("https://{h}")).collect()
     }
 
     /// Dark "connecting" page shown until the meeting loads, in the colours of the Slack huddle window.
@@ -892,12 +890,11 @@ b{{color:#f8f8f8;font-size:17px}}
         use super::*;
 
         #[test]
-        fn origins_include_the_meeting_host_once() {
+        fn only_telemost_gets_the_camera() {
             assert_eq!(
-                origins("https://telemost.yandex.ru/j/123"),
+                origins(),
                 vec!["https://telemost.360.yandex.ru", "https://telemost.yandex.ru"]
             );
-            assert_eq!(origins("https://example.org/j/1")[0], "https://example.org");
         }
 
         #[test]
