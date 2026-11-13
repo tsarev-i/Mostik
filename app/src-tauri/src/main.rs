@@ -285,6 +285,7 @@ fn main() {
             backend::chats::chat_details,
             backend::files::pick_files,
             backend::files::keep_file,
+            backend::files::forget_file,
             backend::files::send_files,
             backend::presence::presence,
             backend::presence::set_status,

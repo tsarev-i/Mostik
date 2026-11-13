@@ -259,7 +259,7 @@ pub struct AppState {
     pub prefs: StdMutex<Prefs>,
     allowed_files: StdMutex<BTreeSet<String>>,
     /// Contents of the files pasted or dropped into the message field, by their [`KEPT`](files::KEPT) path.
-    kept_files: StdMutex<BTreeMap<String, Vec<u8>>>,
+    kept_files: StdMutex<BTreeMap<String, bytes::Bytes>>,
     live: Mutex<Option<Arc<Live>>>,
     session: Session,
     reconnecting: AtomicBool,

@@ -193,6 +193,9 @@ async fn forget_local_data(app: &AppHandle, state: &AppState) {
     if let Ok(mut allowed) = state.allowed_files.lock() {
         allowed.clear();
     }
+    if let Ok(mut kept) = state.kept_files.lock() {
+        kept.clear();
+    }
     if let Some(main) = app.get_webview_window("main") {
         crate::webview::forget_site_data(&main, crate::webview::SiteData::CookiesAndCaches);
     }

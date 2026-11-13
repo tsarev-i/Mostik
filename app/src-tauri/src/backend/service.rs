@@ -1102,7 +1102,7 @@ pub async fn add_custom_emoji(
     let file_id = live
         .web
         .clone_light()
-        .upload_file(&chat, &payload, &file_name, prepared.mime, prepared.bytes)
+        .upload_file(&chat, &payload, &file_name, prepared.mime, prepared.bytes.into())
         .await
         .map_err(|e| e.to_string())?;
     let info = wire::file_info(&file_id, &file_name, size);

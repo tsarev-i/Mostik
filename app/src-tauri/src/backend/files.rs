@@ -1,6 +1,7 @@
 //! Files: attachments served to the UI from a memory cache and saved to "Downloads", links and
 //! files opened outside the app, and the files the user picks, pastes and sends.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mostik_core::{ChatId, Message, Timestamp};
@@ -289,11 +290,24 @@ pub(crate) async fn pick(
 /// Path prefix of the files kept by [`keep_file`]: they have no path on disk.
 pub(super) const KEPT: &str = "kept:";
 
+/// The largest file kept in memory by [`keep_file`].
+const KEPT_FILE_LIMIT: usize = 200 * 1024 * 1024;
+
+/// The most bytes all kept files take together.
+const KEPT_TOTAL_LIMIT: usize = 512 * 1024 * 1024;
+
+/// Whether a file of `size` bytes may be kept next to the `kept` ones.
+fn fits(kept: &BTreeMap<String, bytes::Bytes>, size: usize) -> bool {
+    let total: usize = kept.values().map(bytes::Bytes::len).sum();
+    size <= KEPT_FILE_LIMIT && total.saturating_add(size) <= KEPT_TOTAL_LIMIT
+}
+
 /// A file pasted or dropped into the message field: its contents come in the request body, its
 /// name (URI-encoded) in the `x-file-name` header. It is kept in memory, so that a pasted
 /// screenshot leaves nothing on disk, and is sent like a picked file.
 #[tauri::command]
 pub async fn keep_file(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<PendingFile, String> {
@@ -320,15 +334,37 @@ pub async fn keep_file(
             .first()
             .is_some_and(|m| m.type_() == "image"),
     };
-    state
-        .kept_files
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(path.clone(), bytes.clone());
+    {
+        let mut kept = state.kept_files.lock().map_err(|e| e.to_string())?;
+        if !fits(&kept, bytes.len()) {
+            return Err(text(
+                &app,
+                "Файл слишком большой, чтобы вставить его: прикрепите его кнопкой «+»",
+                "The file is too large to paste: attach it with \"+\"",
+            )
+            .into());
+        }
+        // The request owns its body: one copy, which the upload then shares.
+        kept.insert(path.clone(), bytes::Bytes::copy_from_slice(bytes));
+    }
     if let Ok(mut allowed) = state.allowed_files.lock() {
         allowed.insert(path);
     }
     Ok(file)
+}
+
+/// A file taken off the message (× on its card): a pasted one is no longer kept.
+#[tauri::command]
+pub fn forget_file(state: tauri::State<'_, AppState>, path: String) {
+    if !path.starts_with(KEPT) {
+        return;
+    }
+    if let Ok(mut kept) = state.kept_files.lock() {
+        kept.remove(&path);
+    }
+    if let Ok(mut allowed) = state.allowed_files.lock() {
+        allowed.remove(&path);
+    }
 }
 
 /// Uploads the files and sends them: images as one gallery with a caption, the rest one by one.
@@ -348,7 +384,7 @@ pub async fn send_files(
     }
     let target = target_chat(&chat_id, thread)?;
     let gallery_id = request_id();
-    let kept: Vec<Option<Vec<u8>>> = {
+    let kept: Vec<Option<bytes::Bytes>> = {
         let all = state.kept_files.lock().map_err(|e| e.to_string())?;
         paths.iter().map(|p| all.get(p).cloned()).collect()
     };
@@ -418,12 +454,12 @@ async fn upload_one(
     target: String,
     gallery_id: String,
     path: &str,
-    kept: Option<Vec<u8>>,
+    kept: Option<bytes::Bytes>,
 ) -> Result<Uploaded, String> {
     let p = std::path::Path::new(path);
     let bytes = match kept {
         Some(bytes) => bytes,
-        None => tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?,
+        None => tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?.into(),
     };
     let name = p
         .file_name()
@@ -467,4 +503,19 @@ async fn send_plain(
         m.text = text.to_owned();
     }
     Ok(m)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kept_files_stay_within_the_limits() {
+        let mut kept = BTreeMap::new();
+        assert!(fits(&kept, KEPT_FILE_LIMIT));
+        assert!(!fits(&kept, KEPT_FILE_LIMIT + 1));
+        kept.insert("a".to_owned(), bytes::Bytes::from(vec![0; KEPT_TOTAL_LIMIT - 10]));
+        assert!(fits(&kept, 10));
+        assert!(!fits(&kept, 11));
+    }
 }

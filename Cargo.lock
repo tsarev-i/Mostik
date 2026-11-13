@@ -3039,6 +3039,7 @@ dependencies = [
 name = "mostik-app"
 version = "0.4.0"
 dependencies = [
+ "bytes",
  "futures-util",
  "image",
  "imagesize",

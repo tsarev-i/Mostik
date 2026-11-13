@@ -27,6 +27,8 @@ selftest = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Pasted files are shared, not copied, between the memory they are kept in and the upload.
+bytes = "1"
 futures-util = "0.3"
 imagesize = "0.13"
 # Custom emoji: still images are scaled down to 128 px and posted as PNG; a GIF goes as is, undecoded.

@@ -672,6 +672,15 @@ pub struct OpenTarget {
     pub thread_parent: Option<Timestamp>,
 }
 
+/// A file taken off the message: the app no longer keeps a pasted one.
+pub async fn forget_file(path: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        path: &'a str,
+    }
+    call("forget_file", Args { path }).await
+}
+
 pub async fn pick_files() -> Result<Vec<PendingFile>, String> {
     call("pick_files", NoArgs {}).await
 }

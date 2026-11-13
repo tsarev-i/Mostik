@@ -147,7 +147,8 @@ pub fn attach_files(c: Ctx, chat: ChatId, files: Vec<bridge::PendingFile>) {
     });
 }
 
-/// Takes the file at `path` off the message being written in `chat`.
+/// Takes the file at `path` off the message being written in `chat`; a pasted file is no longer
+/// kept in memory.
 pub fn detach_file(c: Ctx, chat: &ChatId, path: &str) {
     c.pending_files.update(|all| {
         if let Some(list) = all.get_mut(chat) {
@@ -157,6 +158,14 @@ pub fn detach_file(c: Ctx, chat: &ChatId, path: &str) {
             }
         }
     });
+    if c.live {
+        let path = path.to_owned();
+        spawn_local(async move {
+            if let Err(e) = bridge::forget_file(&path).await {
+                leptos::logging::warn!("forget_file: {e}");
+            }
+        });
+    }
 }
 
 /// Files attached to the message being written in `chat`, untracked.
