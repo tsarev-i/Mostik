@@ -170,7 +170,6 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     let sending = RwSignal::new(false);
     let area = NodeRef::<html::Div>::new();
     let parent = move || if thread { c.thread.get_untracked() } else { None };
-    let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     let suggestions: RwSignal<Vec<Suggestion>> = RwSignal::new(vec![]);
     let suggest_sel = RwSignal::new(0usize);
 
@@ -554,22 +553,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                             });
                         }><Icon icon=I::Plus size=16/></button>
                     })}
-                    <button class="cb" title=tr().emoji_btn on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
-                        <Icon icon=I::Smile size=18/>
-                    </button>
-                    {move || emoji_at.get().map(|at| view! {
-                        <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
-                            custom=crate::custom::for_chat(c, &c.current.get_untracked()) can_add=c.live
-                            on_close=Callback::new(move |_| emoji_at.set(None))
-                            on_pick=Callback::new(move |glyph: String| {
-                                emoji_at.set(None);
-                                if let Some(el) = area.get_untracked() {
-                                    let text = insert_text(&el, &glyph, 0);
-                                    remember(&text);
-                                    set_draft.set(text);
-                                }
-                            })/>
-                    })}
+                    <crate::compose::EmojiButton field class="cb" size=18/>
                     {move || sending.get().then(|| view! { <span class="composer-hint">{tr().uploading}</span> })}
                     <span class="composer-hint">{if crate::app::enter_sends() { tr().hint_shift_enter } else { tr().hint_ctrl_enter }}</span>
                     <div class="spacer"></div>

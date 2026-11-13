@@ -214,6 +214,44 @@ fn link_keys() -> &'static str {
 /// picker's search takes the focus.
 type PickerAt = ((f64, f64), (Option<u32>, Option<u32>));
 
+/// An emoji button for a message field: opens the picker and inserts the emoji where the caret or
+/// selection was when it opened, then gives the focus back to the field.
+#[component]
+pub fn EmojiButton(field: Field, class: &'static str, size: u32) -> impl IntoView {
+    let picker: RwSignal<Option<PickerAt>> = RwSignal::new(None);
+    let open_picker = move |e: ev::MouseEvent| {
+        if let Some(el) = field.area.get_untracked() {
+            picker.set(Some((crate::emoji::anchor_of(&e), selection(&el))));
+        }
+    };
+    view! {
+        // The press keeps the focus and selection in the field.
+        <button class=class title=tr().emoji_btn on:mousedown=|e: ev::MouseEvent| e.prevent_default() on:click=open_picker>
+            <Icon icon=I::Smile size=size/>
+        </button>
+        {move || picker.get().map(|(at, sel)| {
+            let c = expect_context::<Ctx>();
+            // Read once: the picker would be built again, losing what is typed in its search, at
+            // every change of the snapshot or the emoji sets.
+            let custom = untrack(|| crate::custom::for_chat(c, &c.current.get_untracked()));
+            view! {
+                <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
+                    custom=custom can_add=c.live
+                    on_close=Callback::new(move |_| {
+                        picker.set(None);
+                        if let Some(el) = field.area.get_untracked() {
+                            let _ = el.focus();
+                        }
+                    })
+                    on_pick=Callback::new(move |glyph: String| {
+                        picker.set(None);
+                        field.insert_at(&glyph, sel);
+                    })/>
+            }
+        })}
+    }
+}
+
 /// Formatting buttons of a message field: each wraps the selection in Telemost markup markers or
 /// takes them off, "Link" opens the "Add link" dialog. A press keeps the focus and selection in the
 /// field. `emoji` adds an emoji button, for a field without one of its own.
@@ -221,12 +259,6 @@ type PickerAt = ((f64, f64), (Option<u32>, Option<u32>));
 pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
     let fmt = move |before: &'static str, after: &'static str| move |_| field.wrap(before, after);
     let hint = |name: &str, keys: &str| format!("{name} ({keys})");
-    let picker: RwSignal<Option<PickerAt>> = RwSignal::new(None);
-    let open_picker = move |e: ev::MouseEvent| {
-        if let Some(el) = field.area.get_untracked() {
-            picker.set(Some((crate::emoji::anchor_of(&e), selection(&el))));
-        }
-    };
     view! {
         <div class="composer-toolbar" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
             <button class="fmt" title=hint(tr().fmt_bold, "Ctrl+B") on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
@@ -240,27 +272,10 @@ pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
             <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>
             {emoji.then(|| view! {
                 <span class="sep"></span>
-                <button class="fmt" title=tr().emoji_btn on:click=open_picker><Icon icon=I::Smile size=16/></button>
+                <EmojiButton field class="fmt" size=16/>
             })}
         </div>
         {move || field.link.get().map(|target| view! { <LinkDialog field target/> })}
-        {move || picker.get().map(|(at, sel)| {
-            let c = expect_context::<Ctx>();
-            view! {
-                <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
-                    custom=crate::custom::for_chat(c, &c.current.get_untracked()) can_add=c.live
-                    on_close=Callback::new(move |_| {
-                        picker.set(None);
-                        if let Some(el) = field.area.get_untracked() {
-                            let _ = el.focus();
-                        }
-                    })
-                    on_pick=Callback::new(move |glyph: String| {
-                        picker.set(None);
-                        field.insert_at(&glyph, sel);
-                    })/>
-            }
-        })}
     }
 }
 
