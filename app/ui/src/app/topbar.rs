@@ -26,6 +26,21 @@ enum Hit {
     Message(Box<Message>, String),
 }
 
+/// Whether the app runs on macOS, where Option+arrows belong to text fields.
+fn on_mac() -> bool {
+    web_sys::window()
+        .and_then(|w| w.navigator().user_agent().ok())
+        .is_some_and(|ua| ua.contains("Mac OS"))
+}
+
+/// Whether the focus is in a text field: an input, a text area or an editable element.
+fn in_text_field() -> bool {
+    document().active_element().is_some_and(|el| {
+        matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA")
+            || wasm_bindgen::JsCast::dyn_ref::<web_sys::HtmlElement>(&el).is_some_and(|el| el.is_content_editable())
+    })
+}
+
 #[component]
 pub(super) fn TopBar() -> impl IntoView {
     let c = ctx();
@@ -36,9 +51,11 @@ pub(super) fn TopBar() -> impl IntoView {
     let hits: RwSignal<Vec<Hit>> = RwSignal::new(vec![]);
     let placeholder = move || tr().search_in(&org_name(c));
     // Ctrl+K is the quick switcher, Alt+← / Alt+→ go back and forward, as in Slack. Ctrl+Shift+K
-    // is "Add link" in a message field.
+    // is "Add link" in a message field. The physical key, so that Ctrl+K works in any layout (in
+    // Russian the key gives "л"). On macOS Option+arrows in a text field move the caret by word:
+    // there they stay the field's, and Cmd+[ / Cmd+] go back and forward, as in Slack for Mac.
     scoped_window_listener(ev::keydown, move |e| {
-        if e.ctrl_key() && !e.shift_key() && e.key().eq_ignore_ascii_case("k") {
+        if e.ctrl_key() && !e.shift_key() && e.code() == "KeyK" {
             e.prevent_default();
             if let Some(el) = input.get_untracked() {
                 let _ = el.focus();
@@ -46,9 +63,16 @@ pub(super) fn TopBar() -> impl IntoView {
             }
         } else if e.key() == "Escape" && history_open.get_untracked() {
             history_open.set(false);
-        } else if e.alt_key() && !e.ctrl_key() && (e.key() == "ArrowLeft" || e.key() == "ArrowRight") {
+        } else if e.alt_key()
+            && !e.ctrl_key()
+            && (e.key() == "ArrowLeft" || e.key() == "ArrowRight")
+            && !(on_mac() && in_text_field())
+        {
             e.prevent_default();
             ops::navigate(c, e.key() == "ArrowLeft");
+        } else if e.meta_key() && !e.shift_key() && matches!(e.code().as_str(), "BracketLeft" | "BracketRight") {
+            e.prevent_default();
+            ops::navigate(c, e.code() == "BracketLeft");
         }
     });
     // A click outside the search and history closes their drop-downs.
