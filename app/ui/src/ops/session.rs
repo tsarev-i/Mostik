@@ -109,8 +109,18 @@ pub fn subscribe(c: Ctx) {
             jump_to_message(c, t.chat_id, t.ts, t.thread_parent);
         })
         .await;
-        bridge::listen(bridge::FILES_EVENT, move |files: Vec<bridge::PendingFile>| {
-            super::attach_files(c, c.current.get_untracked(), files);
+        bridge::listen(bridge::DRAG_EVENT, move |at: Option<(f64, f64)>| {
+            let zone = at.and_then(|(x, y)| crate::compose::drop_zone_physical(x, y));
+            crate::compose::highlight_drop(zone == Some(crate::compose::DropZone::Chat));
+        })
+        .await;
+        bridge::listen(bridge::FILES_EVENT, move |d: bridge::Dropped| {
+            crate::compose::highlight_drop(false);
+            match crate::compose::drop_zone_physical(d.x, d.y) {
+                Some(crate::compose::DropZone::Chat) => super::attach_files(c, c.current.get_untracked(), d.files),
+                Some(crate::compose::DropZone::Thread) => c.notice.set(Some(tr().no_files_in_thread.into())),
+                None => {}
+            }
         })
         .await;
         bridge::listen(bridge::CALL_EVENT, move |call: Option<bridge::CallInfo>| {

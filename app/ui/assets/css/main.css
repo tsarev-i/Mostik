@@ -8,6 +8,12 @@
   background: var(--bg);
 }
 
+/* Files dragged over the chat will be attached to the message. */
+.main.drop-target {
+  outline: 2px dashed var(--link);
+  outline-offset: -4px;
+}
+
 .ch-header {
   flex: none;
   background: var(--bg-raised);

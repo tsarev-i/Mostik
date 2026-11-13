@@ -187,11 +187,34 @@ fn main() {
             });
         })
         .on_window_event(|window, event| {
-            // Files dropped onto the window, as in Slack, are attached to the message.
-            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
-                let files = backend::allow_files(window.app_handle(), paths);
-                if !files.is_empty() {
-                    let _ = window.app_handle().emit(backend::FILES_EVENT, &files);
+            // Files dropped onto the chat, as in Slack, are attached to the message. The page
+            // learns where the drag is, to highlight the chat and to decide where the files go.
+            // The other windows (the call and sign-in windows) take no files.
+            let tauri::WindowEvent::DragDrop(drag) = event else {
+                return;
+            };
+            if window.label() != "main" {
+                return;
+            }
+            let app = window.app_handle();
+            match drag {
+                tauri::DragDropEvent::Enter { position, .. } | tauri::DragDropEvent::Over { position } => {
+                    let _ = app.emit(backend::DRAG_EVENT, Some((position.x, position.y)));
+                }
+                tauri::DragDropEvent::Drop { paths, position } => {
+                    let _ = app.emit(backend::DRAG_EVENT, None::<(f64, f64)>);
+                    let files = backend::allow_files(app, paths);
+                    if !files.is_empty() {
+                        let dropped = backend::Dropped {
+                            files,
+                            x: position.x,
+                            y: position.y,
+                        };
+                        let _ = app.emit(backend::FILES_EVENT, &dropped);
+                    }
+                }
+                _ => {
+                    let _ = app.emit(backend::DRAG_EVENT, None::<(f64, f64)>);
                 }
             }
         })

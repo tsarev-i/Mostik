@@ -649,6 +649,16 @@ pub struct PendingFile {
 }
 
 pub const FILES_EVENT: &str = "mostik://files";
+/// Files are dragged over the window: where, in physical pixels; `None` when the drag ends.
+pub const DRAG_EVENT: &str = "mostik://drag";
+
+/// Files dropped onto the window and where, in physical pixels.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dropped {
+    pub files: Vec<PendingFile>,
+    pub x: f64,
+    pub y: f64,
+}
 /// The custom emoji sets changed.
 pub const EMOJI_EVENT: &str = "mostik://emoji";
 /// The backend showed a notification: play the sound.

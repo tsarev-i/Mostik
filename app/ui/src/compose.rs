@@ -395,19 +395,82 @@ pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent) -> bool {
     taken
 }
 
-/// Drag and drop onto the window: the files that reach the page (a picture dragged out of another
+/// Where files dropped onto the window go.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    /// The chat: its feed and message field. Files are attached to the message.
+    Chat,
+    /// The thread pane: a thread reply takes no files, so they are refused with a hint.
+    Thread,
+}
+
+/// The drop zone under the point `(x, y)` of the page, in CSS pixels; `None` for the rest of the
+/// window (the sidebar, the headers), where a drop is ignored, as in Slack.
+pub fn drop_zone(x: f64, y: f64) -> Option<DropZone> {
+    let el = document().element_from_point(x as f32, y as f32)?;
+    let has_field = |area: &web_sys::Element| area.query_selector(".composer-wrap").ok().flatten().is_some();
+    if el.closest(".thread-pane").ok().flatten().is_some_and(|p| has_field(&p)) {
+        return Some(DropZone::Thread);
+    }
+    el.closest("main.main")
+        .ok()
+        .flatten()
+        .filter(has_field)
+        .map(|_| DropZone::Chat)
+}
+
+/// [`drop_zone`] for a point in physical pixels, as the app reports a drag from a file manager.
+pub fn drop_zone_physical(x: f64, y: f64) -> Option<DropZone> {
+    let scale = window().device_pixel_ratio().max(0.1);
+    drop_zone(x / scale, y / scale)
+}
+
+/// Shows or hides the frame around the chat that says the files dragged over it will be attached.
+pub fn highlight_drop(on: bool) {
+    if let Ok(Some(main)) = document().query_selector("main.main") {
+        let _ = main.class_list().toggle_with_force("drop-target", on);
+    }
+}
+
+/// Drag and drop onto the chat: the files that reach the page (a picture dragged out of another
 /// program) are attached to the message. Files from a file manager do not get here: the app takes
 /// them itself and sends `mostik://files`.
 pub fn attach_dropped(c: Ctx) {
-    // Files are accepted anywhere in the window, not only over the text field.
-    scoped_window_listener(ev::dragover, |e| {
-        if e.data_transfer()
+    let has_files = |e: &web_sys::DragEvent| {
+        e.data_transfer()
             .is_some_and(|d| d.types().includes(&"Files".into(), 0))
-        {
+    };
+    // Over the chat or the thread pane the drop is taken (the pane refuses it with a hint);
+    // elsewhere the browser shows that it is not.
+    scoped_window_listener(ev::dragover, move |e| {
+        if !has_files(&e) {
+            return;
+        }
+        let zone = drop_zone(e.client_x().into(), e.client_y().into());
+        highlight_drop(zone == Some(DropZone::Chat));
+        if zone.is_some() {
             e.prevent_default();
         }
     });
+    // Leaving the window: no element takes the drag next.
+    scoped_window_listener(ev::dragleave, |e| {
+        if e.related_target().is_none() {
+            highlight_drop(false);
+        }
+    });
     scoped_window_listener(ev::drop, move |e| {
+        highlight_drop(false);
+        match drop_zone(e.client_x().into(), e.client_y().into()) {
+            Some(DropZone::Chat) => {}
+            Some(DropZone::Thread) => {
+                if has_files(&e) {
+                    e.prevent_default();
+                    c.notice.set(Some(tr().no_files_in_thread.into()));
+                }
+                return;
+            }
+            None => return,
+        }
         if attach(c, e.data_transfer()) {
             e.prevent_default();
         }
