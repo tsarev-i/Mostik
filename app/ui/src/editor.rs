@@ -499,11 +499,83 @@ fn past_markers(text: &str, at: u32, back: bool) -> u32 {
     utf16_len(&text[..at])
 }
 
-/// Before the browser deletes text: a deletion in or next to the hidden markers is made here,
-/// since the browser would take the markers along and the markup would fall apart (a fragment
-/// with its first character deleted would show its closing `~~`). The field changes as if typed in.
+/// `text` with `data` typed at UTF-16 offset `at`, when `at` is where a link's caption starts or
+/// ends inside its hidden markers: the typed text goes outside the link, before `[` or after
+/// `](address)`, as it does at the end of a line. (Bold and the like go on as typed, until their
+/// hotkey ends them.) Returns the text and the caret; `None` elsewhere, where the browser types.
+fn insert_shown(text: &str, at: u32, data: &str) -> Option<(String, u32)> {
+    let byte = crate::app::utf16_to_byte(text, Some(at));
+    let mut from = 0;
+    let mut to = None;
+    for span in edit_spans(text) {
+        match span {
+            EditSpan::Plain(t) => from += t.len(),
+            EditSpan::Marked {
+                kind,
+                open,
+                inner,
+                close,
+            } => {
+                let (inner_at, close_at) = (from + open.len(), from + open.len() + inner.len());
+                let end = close_at + close.len();
+                if kind == Mark::Link && byte == close_at {
+                    to = Some(end);
+                } else if kind == Mark::Link && byte == inner_at {
+                    to = Some(from);
+                }
+                from = end;
+            }
+        }
+    }
+    let to = to?;
+    let out = format!("{}{data}{}", &text[..to], &text[to..]);
+    Some((out, utf16_len(&text[..to]) + utf16_len(data)))
+}
+
+/// The range a deletion of `unit` takes from the selection: the selection itself, or from the
+/// caret one `unit` back or forth. For a field where the browser gives no target range: Chromium
+/// gives none in a `plaintext-only` field.
+fn deletion_range(el: &HtmlElement, back: bool, unit: &str) -> Option<(u32, u32)> {
+    let (start, end) = selection(el);
+    let (start, end) = (start?, end?);
+    if start != end {
+        return Some((start.min(end), start.max(end)));
+    }
+    let sel = web_sys::window()?.get_selection().ok()??;
+    let extended = sel.modify("extend", if back { "backward" } else { "forward" }, unit);
+    let range = selection(el);
+    set_caret(el, start);
+    extended.ok()?;
+    let (a, b) = (range.0?, range.1?);
+    Some((a.min(b), a.max(b)))
+}
+
+/// Before the browser types or deletes text next to the hidden markers, the change is made here:
+/// a deletion would take the markers along and the markup would fall apart (a fragment with its
+/// first character deleted would show its closing `~~`), and text typed right after a link in the
+/// middle of a line would go into its caption. The field changes as if typed in.
 pub fn before_input(el: &HtmlElement, ev: &web_sys::InputEvent, emoji: &dyn Fn(&str) -> Option<String>) {
     let kind = ev.input_type();
+    if kind == "insertText" && !ev.is_composing() {
+        let (Some(data), (Some(start), Some(end))) = (ev.data(), selection(el)) else {
+            return;
+        };
+        if start != end {
+            return;
+        }
+        let Some((typed, caret)) = insert_shown(&value(el), start, &data) else {
+            return;
+        };
+        ev.prevent_default();
+        render(el, &typed, emoji);
+        set_caret(el, caret);
+        let init = web_sys::EventInit::new();
+        init.set_bubbles(true);
+        if let Ok(input) = web_sys::Event::new_with_event_init_dict("input", &init) {
+            let _ = el.dispatch_event(&input);
+        }
+        return;
+    }
     let (back, unit) = match kind.as_str() {
         "deleteContentBackward" => (true, "character"),
         "deleteWordBackward" => (true, "word"),
@@ -516,13 +588,18 @@ pub fn before_input(el: &HtmlElement, ev: &web_sys::InputEvent, emoji: &dyn Fn(&
     if ev.is_composing() {
         return;
     }
-    let Ok(range) = ev.get_target_ranges().get(0).dyn_into::<web_sys::StaticRange>() else {
-        return;
-    };
-    let (Some(start), Some(end)) = (
-        offset_of(el, &range.start_container(), range.start_offset()),
-        offset_of(el, &range.end_container(), range.end_offset()),
-    ) else {
+    let target = ev
+        .get_target_ranges()
+        .get(0)
+        .dyn_into::<web_sys::StaticRange>()
+        .ok()
+        .and_then(|range| {
+            Some((
+                offset_of(el, &range.start_container(), range.start_offset())?,
+                offset_of(el, &range.end_container(), range.end_offset())?,
+            ))
+        });
+    let Some((start, end)) = target.or_else(|| deletion_range(el, back, unit)) else {
         return;
     };
     let text = value(el);
@@ -603,6 +680,25 @@ mod tests {
         assert_eq!(delete_shown("abc", 1, 2), None);
         // UTF-16 offsets: "👍" is two units.
         assert_eq!(delete_shown("👍 **ab**", 5, 6), Some(("👍 **b**".to_owned(), 5)));
+    }
+
+    #[test]
+    fn typing_at_the_edge_of_formatting_goes_outside_it() {
+        // Right after a link's caption, in the middle of a line: after the link.
+        assert_eq!(
+            insert_shown("a [b](https://x.ru) c", 4, "x"),
+            Some(("a [b](https://x.ru)x c".to_owned(), 20))
+        );
+        // Right before its caption: before the link.
+        assert_eq!(
+            insert_shown("a [b](https://x.ru) c", 3, "x"),
+            Some(("a x[b](https://x.ru) c".to_owned(), 3))
+        );
+        // Inside a caption, at the edges of bold (it goes on until Ctrl+B ends it) or in plain text:
+        // the browser types.
+        assert_eq!(insert_shown("a [bc](https://x.ru) d", 4, "x"), None);
+        assert_eq!(insert_shown("a **b** c", 5, "x"), None);
+        assert_eq!(insert_shown("a **b** c", 1, "x"), None);
     }
 
     #[test]
