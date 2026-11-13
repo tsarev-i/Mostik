@@ -181,13 +181,26 @@ pub(super) fn MessageList() -> impl IntoView {
         let Some(el) = list_ref.try_get_untracked().flatten() else {
             return;
         };
-        if stick.try_get_untracked() == Some(true) {
-            el.set_scroll_top(el.scroll_height());
+        let top = el.scroll_top();
+        // A scroll whose event has not come yet (a wheel step just now) is the user's: the kept
+        // message has moved by it in the view, and that is not to be undone. A step up lets go of
+        // the bottom, as in `on_scroll`.
+        let unseen = last_top.try_get_value().flatten().map_or(0, |last| top - last);
+        let target = if stick.try_get_untracked() == Some(true) && unseen >= 0 {
+            el.scroll_height() - el.client_height()
         } else if let Some((ts, offset)) = keep.try_get_value().flatten()
             && let Some(now) = row_offset(&el, ts)
         {
-            el.set_scroll_top(el.scroll_top() + (now - offset).round() as i32);
+            top + (now - (offset - f64::from(unseen))).round() as i32
+        } else {
+            top
+        };
+        if target != top {
+            el.set_scroll_top(target);
         }
+        // This scroll is not the user's: its event, or the next change before it, must not take
+        // it for theirs.
+        last_top.try_set_value(Some(el.scroll_top()));
     };
     // A message the user has just sent takes the list to the bottom, wherever it was scrolled,
     // as in Slack: otherwise it would land below the view.
@@ -234,14 +247,33 @@ pub(super) fn MessageList() -> impl IntoView {
             }
         });
     });
-    // Pictures and videos get their height only once loaded: keep the view in place then too.
+    // Pictures and videos get their height only once loaded: keep the view in place then too, if
+    // the loaded one is above the message kept in place (one below it moves nothing in the view).
     // `load` does not bubble, so it is caught on the way down.
     Effect::new(move |attached: Option<bool>| {
         if attached == Some(true) {
             return true;
         }
         let Some(el) = list_ref.get() else { return false };
-        let on_load = wasm_bindgen::closure::Closure::<dyn Fn()>::new(restore);
+        let on_load = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::Event)>::new(move |e: web_sys::Event| {
+            let Some(list) = list_ref.try_get_untracked().flatten() else {
+                return;
+            };
+            let kept = keep.try_get_value().flatten();
+            let above = match (
+                kept,
+                e.target()
+                    .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok()),
+            ) {
+                (Some((ts, _)), Some(media)) => row_offset(&list, ts).is_none_or(|row| {
+                    media.get_bounding_client_rect().top() - list.get_bounding_client_rect().top() < row
+                }),
+                _ => true,
+            };
+            if stick.try_get_untracked() == Some(true) || above {
+                restore();
+            }
+        });
         for event in ["load", "loadedmetadata"] {
             let _ = el.add_event_listener_with_callback_and_bool(
                 event,
