@@ -642,7 +642,7 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
                     });
                 };
                 view! {
-                    <button class="file-card" title=tr().download_and_open on:click=download>
+                    <button class="file-card" title=tr().download on:click=download>
                         <span class="file-icon"><Icon icon=I::Files size=22/></span>
                         <span class="file-meta">
                             <span class="file-name">{a.name.clone()}</span>

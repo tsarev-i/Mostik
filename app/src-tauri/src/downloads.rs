@@ -121,14 +121,116 @@ pub fn mark_from_internet(path: &Path) {
     }
 }
 
-#[cfg(not(windows))]
+/// Marks a saved file as downloaded from the internet (the `com.apple.quarantine` attribute
+/// browsers set), so Gatekeeper checks a program or script before it runs from it.
+#[cfg(target_os = "macos")]
+pub fn mark_from_internet(path: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let marked = std::process::Command::new("xattr")
+        .args(["-w", "com.apple.quarantine", &format!("0081;{now:x};Mostik;")])
+        .arg(path)
+        .status();
+    if !marked.is_ok_and(|s| s.success()) {
+        eprintln!("could not mark {} as downloaded", path.display());
+    }
+}
+
+/// Linux has no common mark for downloaded files: what runs is up to its execute bit, which a
+/// saved file does not get.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn mark_from_internet(_path: &Path) {}
+
+/// Shows a saved file in its folder, selected, as Slack does, instead of opening it: an attachment
+/// comes from someone else, and opening `invoice.pdf.exe` would run it.
+#[cfg(windows)]
+pub fn reveal(path: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // As one raw argument: explorer wants the quotes around the path only, after the comma.
+    // The name has no quotes (see `safe_name`).
+    std::process::Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("could not show the file: {e}"))
+}
+
+/// Shows a saved file in Finder, selected.
+#[cfg(target_os = "macos")]
+pub fn reveal(path: &Path) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("could not show the file: {e}"))
+}
+
+/// Shows a saved file in the file manager, selected (`org.freedesktop.FileManager1`, which
+/// Nautilus, Dolphin, Nemo and Thunar provide); without it, opens its folder.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn reveal(path: &Path) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    let mut shown = Command::new("gdbus");
+    shown
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.FileManager1",
+            "--object-path",
+            "/org/freedesktop/FileManager1",
+            "--method",
+            "org.freedesktop.FileManager1.ShowItems",
+        ])
+        .arg(format!("['{}']", file_uri(path)))
+        .arg("")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::appimage::outside(&mut shown);
+    if shown.status().is_ok_and(|s| s.success()) {
+        return Ok(());
+    }
+    let mut folder = Command::new("xdg-open");
+    folder.arg(path.parent().unwrap_or(path));
+    crate::appimage::outside(&mut folder);
+    folder
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("could not show the file: {e}"))
+}
+
+/// `file://` URI of an absolute path, every byte but the unreserved ones and `/` escaped (so a
+/// quote in a name cannot end the GVariant string it goes into).
+#[cfg(not(windows))]
+fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
 
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn file_uris_escape_all_but_plain_characters() {
+        assert_eq!(
+            file_uri(Path::new("/home/u/Загрузки/a b'c.pdf")),
+            "file:///home/u/%D0%97%D0%B0%D0%B3%D1%80%D1%83%D0%B7%D0%BA%D0%B8/a%20b%27c.pdf"
+        );
+    }
 
     #[test]
     fn plain_names_stay() {

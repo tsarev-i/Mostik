@@ -153,7 +153,8 @@ pub(super) fn prefetch_previews(live: Arc<Live>, messages: &[Message]) {
     });
 }
 
-/// Downloads an attachment to "Downloads" and opens it. Returns the file path.
+/// Downloads an attachment to "Downloads" and shows it in its folder, without opening it.
+/// Returns the file path.
 #[tauri::command]
 pub async fn save_file(
     app: AppHandle,
@@ -169,7 +170,10 @@ pub async fn save_file(
     download_to(&live, &file_id, file, &path).await?;
     crate::downloads::mark_from_internet(&path);
     let shown = path.display().to_string();
-    open_external(&shown)?;
+    // D-Bus may have to start the file manager first: off the async threads.
+    tokio::task::spawn_blocking(move || crate::downloads::reveal(&path))
+        .await
+        .map_err(|e| e.to_string())??;
     Ok(shown)
 }
 
