@@ -13,6 +13,10 @@ Mostik talks to the undocumented protocol of the Telemost web client (HTTP RPC p
 ## Downloads
 
 - [Latest release](https://github.com/tsarev-i/Mostik/releases/latest): Linux AppImage, Windows installer, macOS DMG
+- [Linux AppImage](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_amd64.AppImage): x86-64, glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36 or newer, Arch Linux; on Arch it needs `fuse3`)
+- [Windows installer](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_x64-setup.exe): Windows 10 and 11, x64, per-user install
+- [macOS DMG](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_aarch64.dmg): Apple Silicon only, not notarized
+- [Issues](https://github.com/tsarev-i/Mostik/issues): bug reports and feature requests
 
 ## Source
 

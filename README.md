@@ -4,6 +4,13 @@
 
 Неофициальный клиент чатов Яндекс Телемоста для Linux, Windows и macOS.
 
+[![Последняя версия](https://img.shields.io/github/v/release/tsarev-i/Mostik?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/tsarev-i/Mostik/releases/latest)
+[![Лицензия MIT](https://img.shields.io/github/license/tsarev-i/Mostik?label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F)](LICENSE)
+
+**Скачать:** [Linux (AppImage)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_amd64.AppImage) ·
+[Windows](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_x64-setup.exe) ·
+[macOS (Apple Silicon)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_aarch64.dmg)
+
 > [!WARNING]
 > Мостик не связан с ООО «Яндекс» и не поддерживается им. Он работает через недокументированный
 > протокол веб-клиента Телемоста, который может измениться в любой момент.
@@ -32,14 +39,23 @@
 
 ## Установка
 
-Скачайте файл из [последнего релиза](https://github.com/tsarev-i/Mostik/releases/latest):
+Ссылки ведут на файлы последней версии:
 
-- Linux: `Mostik_*_amd64.AppImage`, перед первым запуском `chmod +x`.
-- Windows: установщик `Mostik_*_x64-setup.exe`.
-- macOS (только Apple Silicon, M1 и новее): образ `Mostik_*_aarch64.dmg`, перетащите Мостик в «Программы».
-  Сборка не подписана сертификатом Apple, поэтому при первом запуске macOS его блокирует:
-  разрешите запуск в «Системные настройки -> Конфиденциальность и безопасность -> Всё равно открыть»
-  или выполните `xattr -dr com.apple.quarantine /Applications/Mostik.app`.
+| Система | Файл |
+|---|---|
+| Linux x86-64 с glibc 2.35 и новее: Ubuntu 22.04+, Debian 12+, Fedora 36+, Arch Linux | [Mostik_amd64.AppImage](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_amd64.AppImage) |
+| Windows 10 и 11, x64 | [Mostik_x64-setup.exe](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_x64-setup.exe) |
+| macOS на Apple Silicon (M1 и новее) | [Mostik_aarch64.dmg](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_aarch64.dmg) |
+
+Прошлые версии лежат на [странице релизов](https://github.com/tsarev-i/Mostik/releases),
+список изменений — в [CHANGELOG](CHANGELOG.md).
+
+## Обновления
+
+Мостик проверяет релизы на GitHub при запуске и раз в 4 часа. Когда выходит новая версия, в верхней
+панели появляется кнопка «Обновить»; без вашего клика ничего не устанавливается. Обновления подписаны,
+и Мостик проверяет подпись перед установкой. Автоматическую проверку можно выключить в настройках.
+
 
 ## Вход и данные
 
@@ -55,10 +71,11 @@
 
 Написан на Rust (Tauri 2 и Leptos). Понадобятся Rust 1.94+, цель `wasm32-unknown-unknown`,
 `wasm-bindgen-cli` той же версии, что `wasm-bindgen` в `Cargo.lock`, и `tauri-cli` 2.
-На Linux ещё WebKitGTK 4.1:
+На Linux ещё WebKitGTK 4.1, библиотека значка в трее и ALSA для звуков:
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev   # Debian/Ubuntu
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev   # Debian/Ubuntu
+sudo pacman -S --needed base-devel webkit2gtk-4.1 libayatana-appindicator librsvg alsa-lib rustup   # Arch Linux
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130 --locked
 cargo install tauri-cli --version 2.12.4 --locked
@@ -84,6 +101,11 @@ cookie) пишется в отладочной сборке, а в релизн�
 | `app/ui` | Интерфейс на Leptos (wasm) |
 | `app/src-tauri` | Десктоп-оболочка на Tauri 2: вход, хранение сессии, уведомления, трей |
 | `docs/design.md` | Размеры, цвета и поведение интерфейса |
+
+## Ошибки и предложения
+
+Пишите в [Issues](https://github.com/tsarev-i/Mostik/issues). К ошибке приложите версию Мостика
+(«О программе» в верхней панели), систему и шаги, после которых она появляется.
 
 ## Лицензия
 
