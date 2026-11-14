@@ -424,10 +424,7 @@ fn ChannelIntro() -> impl IntoView {
             // Like "This is your space" in Slack.
             (ChatKind::Notes, Some(me)) => view! {
                 <div class="intro notes">
-                    <div class="intro-face">
-                        <Avatar user=me.clone() size=120/>
-                        <span class="intro-name">{tr().me_suffix(&me.display_name)}</span>
-                    </div>
+                    {intro_face(c, me.clone(), tr().me_suffix(&me.display_name))}
                     <p>
                         <b>{tr().intro_notes_bold}</b>
                         {tr().intro_notes_text}
@@ -437,10 +434,7 @@ fn ChannelIntro() -> impl IntoView {
             .into_any(),
             (ChatKind::Direct { .. }, Some(peer)) => view! {
                 <div class="intro notes">
-                    <div class="intro-face">
-                        <Avatar user=peer.clone() size=120/>
-                        <span class="intro-name">{peer.display_name.clone()}</span>
-                    </div>
+                    {intro_face(c, peer.clone(), peer.display_name.clone())}
                     <p>{tr().intro_dm(&peer.display_name)}</p>
                 </div>
             }
@@ -451,18 +445,38 @@ fn ChannelIntro() -> impl IntoView {
                     .clone()
                     .map(|d| tr().intro_channel_with(&d))
                     .unwrap_or_else(|| tr().intro_channel.to_owned());
+                let head = view! { <span class="ch-kind">{kind_icon(&Mark::of(&ch), 26)}</span><span>{title}</span> };
+                // The name of a group opens its details, as it does in the header.
+                let title = if matches!(ch.kind, ChatKind::Group { .. }) {
+                    view! {
+                        <button class="intro-title person-link" title=tr().about_channel on:click=move |_| c.details.set(Some(DetailsTab::About))>{head}</button>
+                    }
+                    .into_any()
+                } else {
+                    view! { <div class="intro-title">{head}</div> }.into_any()
+                };
                 view! {
                     <div class="intro">
-                        <div class="intro-title">
-                            <span class="ch-kind">{kind_icon(&Mark::of(&ch), 26)}</span>
-                            <span>{title}</span>
-                        </div>
+                        {title}
                         <p>{text}</p>
                     </div>
                 }
                 .into_any()
             }
         })
+    }
+}
+
+/// The big avatar and name at the start of a direct chat or the notes: both open the profile.
+fn intro_face(c: Ctx, user: User, name: String) -> impl IntoView {
+    let (face_id, name_id) = (user.id.clone(), user.id.clone());
+    view! {
+        <div class="intro-face">
+            <button class="face-btn" on:click=move |_| ops::open_profile(c, face_id.clone())>
+                <Avatar user=user size=120/>
+            </button>
+            <button class="intro-name person-link" on:click=move |_| ops::open_profile(c, name_id.clone())>{name}</button>
+        </div>
     }
 }
 

@@ -156,7 +156,7 @@ pub(super) enum Suggestion {
     All,
 }
 
-/// How well `name` matches the lowercase `query`: 0 — starts with it, 1 — one of the words does.
+/// How well `name` matches the lowercase `query`: 0 if it starts with it, 1 if one of its words does.
 fn mention_rank(name: &str, query: &str) -> Option<u8> {
     let name = name.to_lowercase();
     if name.starts_with(query) {

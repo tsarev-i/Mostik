@@ -462,11 +462,11 @@ pub(super) fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
                     <label class="field-label">{tr().visibility}</label>
                     <label class="pref-radio">
                         <input type="radio" name="visibility" prop:checked=move || !public.get() on:change=move |_| public.set(false)/>
-                        <span><b>{tr().vis_private}</b>" — "{tr().vis_private_hint}</span>
+                        <span><b>{tr().vis_private}</b>": "{tr().vis_private_hint}</span>
                     </label>
                     <label class="pref-radio">
                         <input type="radio" name="visibility" prop:checked=move || public.get() on:change=move |_| public.set(true)/>
-                        <span><b>{tr().vis_public}</b>" — "{tr().vis_public_hint}</span>
+                        <span><b>{tr().vis_public}</b>": "{tr().vis_public_hint}</span>
                     </label>
                     <div class="modal-actions">
                         <button class="btn primary" disabled=move || name.with(|n| n.trim().is_empty()) on:click=move |_| step.set(2)>{tr().next}</button>
@@ -681,14 +681,17 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
                                     members.get().into_iter().filter(move |m| q.is_empty() || m.profile.display_name.to_lowercase().contains(&q)).map(|m| {
                                     let id = m.profile.id.clone();
                                     let removable = admin.get() && id != me;
-                                    let (rm, pid) = (rm.clone(), id.clone());
+                                    let (rm, pid, name_id) = (rm.clone(), id.clone(), id.clone());
                                     view! {
                                         <div class="member-row">
                                             <button class="face-btn" on:click=move |_| { close(); ops::open_profile(c, pid.clone()); }>
                                                 <Avatar user=profile_face(&m.profile) size=36/>
                                             </button>
                                             <span class="dm-body">
-                                                <span class="dm-name">{m.profile.display_name.clone()}{(m.role == "admin").then(|| view! { <span class="role-tag">{tr().admin}</span> })}</span>
+                                                <span class="dm-name">
+                                                    <button class="person-link" on:click=move |_| { close(); ops::open_profile(c, name_id.clone()); }>{m.profile.display_name.clone()}</button>
+                                                    {(m.role == "admin").then(|| view! { <span class="role-tag">{tr().admin}</span> })}
+                                                </span>
                                                 <span class="dm-preview">{m.profile.position.clone().unwrap_or_default()}</span>
                                             </span>
                                             {removable.then(|| view! {

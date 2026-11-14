@@ -425,6 +425,7 @@ pub(super) fn ForwardedBlock(f: Forwarded) -> impl IntoView {
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| f.author_name.clone());
     let face = author.unwrap_or_else(|| User::named(f.author.clone(), name.clone()));
+    let author_id = f.author.clone();
     // Like the message's own text, it follows the names it mentions and the emoji set.
     let names = feed_names(c);
     let text = (!f.text.is_empty()).then(|| {
@@ -455,7 +456,9 @@ pub(super) fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     });
     view! {
         <div class="fwd">
-            <div class="fwd-head"><Avatar user=face size=20/><b>{name}</b></div>
+            <button class="fwd-head person-link" on:click=move |_| ops::open_profile(c, author_id.clone())>
+                <Avatar user=face size=20/><b>{name}</b>
+            </button>
             {text.map(|text| view! { <div class="msg-text">{text}</div> })}
             <Attachments list=f.attachments.clone()/>
             {footer}

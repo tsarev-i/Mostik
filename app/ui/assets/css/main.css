@@ -221,6 +221,8 @@
 .msg-head { display: flex; align-items: baseline; gap: 8px; }
 .msg-author { color: var(--text-strong); font-weight: 900; }
 .msg-author:hover { text-decoration: underline; cursor: pointer; }
+/* Names that open a profile or the details of a channel. */
+.person-link:hover { text-decoration: underline; }
 .msg-time { font-size: 12px; color: var(--text-muted); }
 .app-tag {
   padding: 0 3px;
