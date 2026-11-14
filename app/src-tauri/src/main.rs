@@ -197,19 +197,26 @@ fn main() {
                 return;
             }
             let app = window.app_handle();
+            // The page gets the point in logical pixels of the window. Tauri calls it physical,
+            // but passes on what the webview reports: physical pixels only on Windows; GTK and
+            // AppKit give logical ones, and scaling them again missed the pane under the cursor on
+            // a scaled screen.
+            let scale = if cfg!(windows) {
+                window.scale_factor().unwrap_or(1.0)
+            } else {
+                1.0
+            };
+            let logical = |p: &tauri::PhysicalPosition<f64>| (p.x / scale, p.y / scale);
             match drag {
                 tauri::DragDropEvent::Enter { position, .. } | tauri::DragDropEvent::Over { position } => {
-                    let _ = app.emit(backend::DRAG_EVENT, Some((position.x, position.y)));
+                    let _ = app.emit(backend::DRAG_EVENT, Some(logical(position)));
                 }
                 tauri::DragDropEvent::Drop { paths, position } => {
                     let _ = app.emit(backend::DRAG_EVENT, None::<(f64, f64)>);
                     let files = backend::allow_files(app, paths);
                     if !files.is_empty() {
-                        let dropped = backend::Dropped {
-                            files,
-                            x: position.x,
-                            y: position.y,
-                        };
+                        let (x, y) = logical(position);
+                        let dropped = backend::Dropped { files, x, y };
                         let _ = app.emit(backend::FILES_EVENT, &dropped);
                     }
                 }

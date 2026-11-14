@@ -231,11 +231,11 @@ fn pending_file(path: &std::path::Path) -> Option<PendingFile> {
 
 /// Files dropped onto the window: the [`PendingFile`]s to attach.
 pub const FILES_EVENT: &str = "mostik://files";
-/// Files are dragged over the chat window: where, in physical pixels; `None` when the drag
-/// leaves or ends.
+/// Files are dragged over the chat window: where, in logical pixels of the window; `None` when
+/// the drag leaves or ends.
 pub const DRAG_EVENT: &str = "mostik://drag";
 
-/// Files dropped onto the chat window and where, in physical pixels.
+/// Files dropped onto the chat window and where, in logical pixels of the window.
 #[derive(Serialize)]
 pub struct Dropped {
     pub files: Vec<PendingFile>,

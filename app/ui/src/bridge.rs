@@ -649,10 +649,10 @@ pub struct PendingFile {
 }
 
 pub const FILES_EVENT: &str = "mostik://files";
-/// Files are dragged over the window: where, in physical pixels; `None` when the drag ends.
+/// Files are dragged over the window: where, in logical pixels of the window; `None` when the drag ends.
 pub const DRAG_EVENT: &str = "mostik://drag";
 
-/// Files dropped onto the window and where, in physical pixels.
+/// Files dropped onto the window and where, in logical pixels of the window.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Dropped {
     pub files: Vec<PendingFile>,

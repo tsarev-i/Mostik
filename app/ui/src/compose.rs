@@ -435,10 +435,11 @@ fn has_field(area: &web_sys::Element) -> bool {
     area.query_selector(".composer-wrap").ok().flatten().is_some()
 }
 
-/// [`drop_zone`] for a point in physical pixels, as the app reports a drag from a file manager.
-pub fn drop_zone_physical(x: f64, y: f64) -> Option<DropZone> {
-    let scale = window().device_pixel_ratio().max(0.1);
-    drop_zone(x / scale, y / scale)
+/// [`drop_zone`] for a point in logical pixels of the window, as the app reports a drag from a
+/// file manager: CSS pixels times the zoom. Not `devicePixelRatio`: it holds the screen's scale too.
+pub fn drop_zone_logical(c: Ctx, x: f64, y: f64) -> Option<DropZone> {
+    let zoom = (f64::from(c.settings.with_untracked(|s| s.zoom)) / 100.0).max(0.1);
+    drop_zone(x / zoom, y / zoom)
 }
 
 /// Frames the chat or the thread pane the files dragged over it will be attached to; `None` takes
