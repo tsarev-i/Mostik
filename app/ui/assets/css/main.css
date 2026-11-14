@@ -50,7 +50,6 @@
   font-size: 18px;
   font-weight: 900;
 }
-.ch-title:hover { background: rgba(255, 255, 255, 0.08); }
 .ch-kind { display: grid; place-items: center; color: var(--text); }
 
 .ch-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
