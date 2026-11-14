@@ -6,7 +6,7 @@
 
 [![Последняя версия](https://img.shields.io/github/v/release/tsarev-i/Mostik?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/tsarev-i/Mostik/releases/latest)
 [![Лицензия MIT](https://img.shields.io/github/license/tsarev-i/Mostik?label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F)](LICENSE)
-
+[![]()]()
 [![Скачать для Linux (AppImage)](https://img.shields.io/badge/Linux-AppImage-2ea44f?logo=linux&logoColor=white)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_amd64.AppImage)
 [![Скачать для Windows (x64)](https://img.shields.io/badge/Windows-x64-2ea44f?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTAgMGgxMXYxMUgwem0xMyAwaDExdjExSDEzek0wIDEzaDExdjExSDB6bTEzIDBoMTF2MTFIMTN6Ii8+PC9zdmc+)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_x64-setup.exe)
 [![Скачать для macOS (Apple Silicon)](https://img.shields.io/badge/macOS-Apple%20Silicon-2ea44f?logo=apple&logoColor=white)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_aarch64.dmg)
