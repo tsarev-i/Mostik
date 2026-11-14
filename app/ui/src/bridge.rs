@@ -983,25 +983,6 @@ pub async fn add_custom_emoji(
 struct EmojiArgs<'a> {
     chat_id: &'a str,
     ts: Timestamp,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-}
-
-/// Renames an own custom emoji; returns the new sets.
-pub async fn rename_custom_emoji(
-    chat_id: &str,
-    ts: Timestamp,
-    name: &str,
-) -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
-    call(
-        "rename_custom_emoji",
-        EmojiArgs {
-            chat_id,
-            ts,
-            name: Some(name),
-        },
-    )
-    .await
 }
 
 /// Deletes an own custom emoji; returns the new sets.
@@ -1009,15 +990,7 @@ pub async fn delete_custom_emoji(
     chat_id: &str,
     ts: Timestamp,
 ) -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
-    call(
-        "delete_custom_emoji",
-        EmojiArgs {
-            chat_id,
-            ts,
-            name: None,
-        },
-    )
-    .await
+    call("delete_custom_emoji", EmojiArgs { chat_id, ts }).await
 }
 
 /// A file the user has just picked, for a preview: the backend serves only picked files.

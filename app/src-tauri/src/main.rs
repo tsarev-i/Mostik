@@ -249,7 +249,6 @@ fn main() {
             backend::service::custom_emoji,
             backend::service::pick_emoji_image,
             backend::service::add_custom_emoji,
-            backend::service::rename_custom_emoji,
             backend::service::delete_custom_emoji,
             backend::messages::delete_message,
             backend::messages::set_reaction,

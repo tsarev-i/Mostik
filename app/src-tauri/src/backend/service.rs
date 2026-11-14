@@ -32,7 +32,7 @@ use tokio::sync::Mutex;
 
 use super::chats::{chat_info_raw, put_notify_level};
 use super::files::pick;
-use super::messages::{history_page, original_plain};
+use super::messages::history_page;
 use super::{AppState, Live, PendingFile, Shared, live, push, rpc, rpc_ok, text};
 
 /// The custom emoji sets changed: the payload is the new list.
@@ -1110,34 +1110,6 @@ pub async fn add_custom_emoji(
     let msg = wire::gallery(&chat, &payload, vec![item], &ce::caption(&emoji.name));
     push(&live, msg).await?;
     refresh(&app, &live, &chat, orgs).await?;
-    emit(&app);
-    Ok(sets(&app))
-}
-
-/// Renames an own emoji: a new caption on its message keeps its reaction type.
-#[tauri::command]
-pub async fn rename_custom_emoji(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Timestamp,
-    name: String,
-) -> Result<Vec<EmojiSet>, String> {
-    if let Some(e) = name_error(&app, &name) {
-        return Err(e);
-    }
-    let live = live(&state).await?;
-    let _busy = hold(&state, &live).await.ok_or("signed out")?;
-    let taken = sets(&app)
-        .iter()
-        .any(|s| s.chat_id.0 == chat_id && s.emoji.iter().any(|e| e.name == name && e.ts != ts));
-    if taken {
-        return Err(taken_error(&app));
-    }
-    let original = original_plain(&live, &chat_id, ts).await?;
-    push(&live, wire::edit_whole(&original, &chat_id, ts, &ce::caption(&name))).await?;
-    let orgs = organizations_of(&app, &chat_id);
-    refresh(&app, &live, &chat_id, orgs).await?;
     emit(&app);
     Ok(sets(&app))
 }
