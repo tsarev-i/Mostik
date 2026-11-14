@@ -9,6 +9,7 @@ use leptos::html;
 use leptos::portal::Portal;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use mostik_core::Timestamp;
 use mostik_core::markup::{link_address, link_at, link_markup, pasted_link, typed_address};
 use wasm_bindgen::JsCast;
 
@@ -347,8 +348,9 @@ fn LinkDialog(field: Field, target: LinkTarget) -> impl IntoView {
 }
 
 /// Files pasted or dropped into a message are attached to it, as with "+": the app keeps their
-/// contents until the message goes. Returns whether there were any.
-fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
+/// contents until the message goes. `thread` is the parent of the thread whose field takes them,
+/// `None` for the chat's own field. Returns whether there were any.
+fn attach(c: Ctx, data: Option<web_sys::DataTransfer>, thread: Option<Timestamp>) -> bool {
     let files: Vec<web_sys::File> = data
         .and_then(|d| d.files())
         .map(|list| (0..list.length()).filter_map(|i| list.get(i)).collect())
@@ -360,8 +362,8 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
         c.error.set(Some(tr().only_in_app_files.into()));
         return true;
     }
-    // A large file takes a while to read: it goes to the chat it was pasted in, even if the user
-    // has moved on.
+    // A large file takes a while to read: it goes to the chat or thread it was pasted in, even if
+    // the user has moved on.
     let chat = c.current.get_untracked();
     spawn_local(async move {
         for f in files {
@@ -371,7 +373,7 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
                 Err(e) => Err(format!("{name}: {e:?}")),
             };
             match kept {
-                Ok(file) => crate::ops::attach_files(c, chat.clone(), vec![file]),
+                Ok(file) => crate::ops::attach_files(c, chat.clone(), thread, vec![file]),
                 Err(e) => return c.error.set(Some(e)),
             }
         }
@@ -381,14 +383,14 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
 
 /// Files pasted into a message are attached to it, unless they come with formatted text: a table
 /// copied from a spreadsheet or a document brings a picture of itself along, and then the text is
-/// what is meant. Returns whether the files were taken.
-pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent) -> bool {
+/// what is meant. `thread` as in [`attach`]. Returns whether the files were taken.
+pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent, thread: Option<Timestamp>) -> bool {
     let Some(data) = e.clipboard_data() else { return false };
     let has = |kind: &str| data.get_data(kind).is_ok_and(|t| !t.trim().is_empty());
     if has("text/plain") && has("text/html") {
         return false;
     }
-    let taken = attach(c, Some(data));
+    let taken = attach(c, Some(data), thread);
     if taken {
         e.prevent_default();
     }
@@ -400,15 +402,24 @@ pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent) -> bool {
 pub enum DropZone {
     /// The chat: its feed and message field. Files are attached to the message.
     Chat,
-    /// The thread pane: a thread reply takes no files, so they are refused with a hint.
+    /// The thread pane. Files are attached to the reply.
     Thread,
+}
+
+impl DropZone {
+    /// The parent of the thread whose field takes the files, `None` for the chat's own field.
+    pub fn thread(self, c: Ctx) -> Option<Timestamp> {
+        match self {
+            DropZone::Chat => None,
+            DropZone::Thread => c.thread.get_untracked(),
+        }
+    }
 }
 
 /// The drop zone under the point `(x, y)` of the page, in CSS pixels; `None` for the rest of the
 /// window (the sidebar, the headers), where a drop is ignored, as in Slack.
 pub fn drop_zone(x: f64, y: f64) -> Option<DropZone> {
     let el = document().element_from_point(x as f32, y as f32)?;
-    let has_field = |area: &web_sys::Element| area.query_selector(".composer-wrap").ok().flatten().is_some();
     if el.closest(".thread-pane").ok().flatten().is_some_and(|p| has_field(&p)) {
         return Some(DropZone::Thread);
     }
@@ -419,17 +430,29 @@ pub fn drop_zone(x: f64, y: f64) -> Option<DropZone> {
         .map(|_| DropZone::Chat)
 }
 
+/// Whether the area has a message field: the thread pane has none while it shows a profile.
+fn has_field(area: &web_sys::Element) -> bool {
+    area.query_selector(".composer-wrap").ok().flatten().is_some()
+}
+
 /// [`drop_zone`] for a point in physical pixels, as the app reports a drag from a file manager.
 pub fn drop_zone_physical(x: f64, y: f64) -> Option<DropZone> {
     let scale = window().device_pixel_ratio().max(0.1);
     drop_zone(x / scale, y / scale)
 }
 
-/// Shows or hides the frame around the chat that says the files dragged over it will be attached.
-pub fn highlight_drop(on: bool) {
-    if let Ok(Some(main)) = document().query_selector("main.main") {
-        let _ = main.class_list().toggle_with_force("drop-target", on);
-    }
+/// Frames the chat or the thread pane the files dragged over it will be attached to; `None` takes
+/// the frame away.
+pub fn highlight_drop(zone: Option<DropZone>) {
+    let frame = |selector: &str, on: bool| {
+        if let Ok(list) = document().query_selector_all(selector) {
+            for el in (0..list.length()).filter_map(|i| list.get(i)?.dyn_into::<web_sys::Element>().ok()) {
+                let _ = el.class_list().toggle_with_force("drop-target", on && has_field(&el));
+            }
+        }
+    };
+    frame("main.main", zone == Some(DropZone::Chat));
+    frame(".thread-pane", zone == Some(DropZone::Thread));
 }
 
 /// Drag and drop onto the chat: the files that reach the page (a picture dragged out of another
@@ -440,14 +463,13 @@ pub fn attach_dropped(c: Ctx) {
         e.data_transfer()
             .is_some_and(|d| d.types().includes(&"Files".into(), 0))
     };
-    // Over the chat or the thread pane the drop is taken (the pane refuses it with a hint);
-    // elsewhere the browser shows that it is not.
+    // Over the chat or the thread pane the drop is taken; elsewhere the browser shows that it is not.
     scoped_window_listener(ev::dragover, move |e| {
         if !has_files(&e) {
             return;
         }
         let zone = drop_zone(e.client_x().into(), e.client_y().into());
-        highlight_drop(zone == Some(DropZone::Chat));
+        highlight_drop(zone);
         if zone.is_some() {
             e.prevent_default();
         }
@@ -455,23 +477,15 @@ pub fn attach_dropped(c: Ctx) {
     // Leaving the window: no element takes the drag next.
     scoped_window_listener(ev::dragleave, |e| {
         if e.related_target().is_none() {
-            highlight_drop(false);
+            highlight_drop(None);
         }
     });
     scoped_window_listener(ev::drop, move |e| {
-        highlight_drop(false);
-        match drop_zone(e.client_x().into(), e.client_y().into()) {
-            Some(DropZone::Chat) => {}
-            Some(DropZone::Thread) => {
-                if has_files(&e) {
-                    e.prevent_default();
-                    c.notice.set(Some(tr().no_files_in_thread.into()));
-                }
-                return;
-            }
-            None => return,
-        }
-        if attach(c, e.data_transfer()) {
+        highlight_drop(None);
+        let Some(zone) = drop_zone(e.client_x().into(), e.client_y().into()) else {
+            return;
+        };
+        if attach(c, e.data_transfer(), zone.thread(c)) {
             e.prevent_default();
         }
     });

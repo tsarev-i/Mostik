@@ -15,6 +15,9 @@ use crate::{bridge, folders, hidden, ops, order, storage, time};
 use super::composer::EditDraft;
 use super::preferences::PrefTab;
 
+/// Where a message is written: a chat, and the parent of the thread for a thread reply.
+pub type Place = (ChatId, Option<Timestamp>);
+
 /// Window state shared by all components.
 #[derive(Clone, Copy)]
 pub struct Ctx {
@@ -76,9 +79,10 @@ pub struct Ctx {
     pub browsing: RwSignal<bool>,
     pub settings: RwSignal<Settings>,
     pub status_dialog: RwSignal<bool>,
-    /// Files attached to the main composer of each chat (picked in the dialog, dropped or
-    /// pasted), like the text drafts: a file attached in one chat never goes to another.
-    pub pending_files: RwSignal<std::collections::HashMap<ChatId, Vec<bridge::PendingFile>>>,
+    /// Files attached to each composer (picked in the dialog, dropped or pasted), by chat and the
+    /// thread's parent (`None` for the chat's own field): a file attached in one chat or thread
+    /// never goes to another.
+    pub pending_files: RwSignal<std::collections::HashMap<Place, Vec<bridge::PendingFile>>>,
     pub new_message: RwSignal<bool>,
     /// The "Create a channel" dialog.
     pub creating_channel: RwSignal<Option<NewChannel>>,

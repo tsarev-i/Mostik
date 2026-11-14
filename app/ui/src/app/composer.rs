@@ -301,7 +301,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     };
     let submit = move || {
         let text = draft.get_untracked().trim().to_owned();
-        let with_files = !thread && !ops::attached(c, &c.current.get_untracked()).is_empty();
+        let with_files = !ops::attached(c, &c.current.get_untracked(), parent()).is_empty();
         if (text.is_empty() && !with_files) || sending.get_untracked() {
             return;
         }
@@ -460,37 +460,35 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         }
     };
     let typing_text = move || if thread { None } else { typing_line(c, &c.current.get()) };
-    // The files attached in the open chat.
+    // The files attached in the open chat, or in its open thread for the thread's field.
     let files = move || {
-        let chat = c.current.get();
-        c.pending_files.with(|all| all.get(&chat).cloned().unwrap_or_default())
+        let key = (c.current.get(), if thread { c.thread.get() } else { None });
+        c.pending_files.with(|all| all.get(&key).cloned().unwrap_or_default())
     };
     view! {
         <div class=if thread { "composer-wrap in-thread" } else { "composer-wrap" }>
             <div class="composer">
                 {move || reply.get().map(|r| view! { <ReplyBar target=r/> })}
-                {(!thread).then(|| view! {
-                    <Show when=move || !files().is_empty()>
-                        <div class="pending-files">
-                            {move || files().into_iter().map(|f| {
-                                let path = f.path.clone();
-                                view! {
-                                    <span class="pending-file">
-                                        <span class="file-icon small">{if f.image { "🖼" } else { "📄" }}</span>
-                                        <span class="file-meta">
-                                            <span class="file-name">{f.name.clone()}</span>
-                                            <span class="file-size">{human_size(f.size)}</span>
-                                        </span>
-                                        <button class="pf-remove" title=tr().remove_file
-                                            on:click=move |_| ops::detach_file(c, &c.current.get_untracked(), &path)>
-                                            <Icon icon=I::X size=12/>
-                                        </button>
+                <Show when=move || !files().is_empty()>
+                    <div class="pending-files">
+                        {move || files().into_iter().map(|f| {
+                            let path = f.path.clone();
+                            view! {
+                                <span class="pending-file">
+                                    <span class="file-icon small">{if f.image { "🖼" } else { "📄" }}</span>
+                                    <span class="file-meta">
+                                        <span class="file-name">{f.name.clone()}</span>
+                                        <span class="file-size">{human_size(f.size)}</span>
                                     </span>
-                                }
-                            }).collect_view()}
-                        </div>
-                    </Show>
-                })}
+                                    <button class="pf-remove" title=tr().remove_file
+                                        on:click=move |_| ops::detach_file(c, &c.current.get_untracked(), parent(), &path)>
+                                        <Icon icon=I::X size=12/>
+                                    </button>
+                                </span>
+                            }
+                        }).collect_view()}
+                    </div>
+                </Show>
                 <crate::compose::FormatBar field/>
                 // A placeholder of its own: WebKit does not always restyle `attr()` in `::before` when
                 // the chat, and so the attribute, changes.
@@ -534,7 +532,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         }
                         on:keydown=on_key
                         on:paste=move |e: ev::ClipboardEvent| {
-                            if thread || !crate::compose::attach_pasted(c, &e) {
+                            if !crate::compose::attach_pasted(c, &e, parent()) {
                                 field.paste_link(&e);
                             }
                         }
@@ -579,26 +577,24 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     </div>
                 </Show>
                 <div class="composer-bottom">
-                    {(!thread).then(|| view! {
-                        <button class="cb round" title=tr().attach on:click=move |_| {
-                            if !c.live {
-                                return c.error.set(Some(tr().only_in_app_files.into()));
+                    <button class="cb round" title=tr().attach on:click=move |_| {
+                        if !c.live {
+                            return c.error.set(Some(tr().only_in_app_files.into()));
+                        }
+                        // The files go to the chat or thread the dialog was opened in.
+                        let (chat, thread_parent) = (c.current.get_untracked(), parent());
+                        spawn_local(async move {
+                            match bridge::pick_files().await {
+                                Ok(files) => ops::attach_files(c, chat, thread_parent, files),
+                                Err(e) => c.error.set(Some(e)),
                             }
-                            // The files go to the chat the dialog was opened in.
-                            let chat = c.current.get_untracked();
-                            spawn_local(async move {
-                                match bridge::pick_files().await {
-                                    Ok(files) => ops::attach_files(c, chat, files),
-                                    Err(e) => c.error.set(Some(e)),
-                                }
-                            });
-                        }><Icon icon=I::Plus size=16/></button>
-                    })}
+                        });
+                    }><Icon icon=I::Plus size=16/></button>
                     <crate::compose::EmojiButton field class="cb" size=18/>
                     {move || sending.get().then(|| view! { <span class="composer-hint">{tr().uploading}</span> })}
                     <span class="composer-hint">{if crate::app::enter_sends() { tr().hint_shift_enter } else { tr().hint_ctrl_enter }}</span>
                     <div class="spacer"></div>
-                    <div class=move || if (draft.with(|d| d.trim().is_empty()) && (thread || files().is_empty())) || sending.get() { "send-group empty" } else { "send-group" }>
+                    <div class=move || if (draft.with(|d| d.trim().is_empty()) && files().is_empty()) || sending.get() { "send-group empty" } else { "send-group" }>
                         <button class="send" title=tr().send on:click=move |_| submit()><Icon icon=I::Send size=16/></button>
                     </div>
                 </div>

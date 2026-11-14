@@ -113,19 +113,21 @@ pub async fn send(
     Ok(())
 }
 
-/// Sends the picked files with a caption; not available in demo mode.
+/// Sends the files attached in `chat` (in the thread of `thread`) with a caption; not available in
+/// demo mode.
 pub async fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>) -> Result<(), String> {
     if !c.live {
         return Err(tr().only_in_app_files.into());
     }
-    let paths: Vec<String> = attached(c, &chat).into_iter().map(|f| f.path).collect();
+    let paths: Vec<String> = attached(c, &chat, thread).into_iter().map(|f| f.path).collect();
     let sent = bridge::send_files(&chat.0, thread, paths.clone(), &with_mention_ids(c, &text)).await?;
     // Only what went: the user may have attached more while it was uploading.
+    let key = (chat, thread);
     c.pending_files.update(|all| {
-        if let Some(list) = all.get_mut(&chat) {
+        if let Some(list) = all.get_mut(&key) {
             list.retain(|f| !paths.contains(&f.path));
             if list.is_empty() {
-                all.remove(&chat);
+                all.remove(&key);
             }
         }
     });
@@ -135,10 +137,11 @@ pub async fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Times
     Ok(())
 }
 
-/// Attaches `files` to the message being written in `chat`; a file already there is not added again.
-pub fn attach_files(c: Ctx, chat: ChatId, files: Vec<bridge::PendingFile>) {
+/// Attaches `files` to the message being written in `chat`, or in its thread of `thread`; a file
+/// already there is not added again.
+pub fn attach_files(c: Ctx, chat: ChatId, thread: Option<Timestamp>, files: Vec<bridge::PendingFile>) {
     c.pending_files.update(|all| {
-        let list = all.entry(chat).or_default();
+        let list = all.entry((chat, thread)).or_default();
         for f in files {
             if !list.iter().any(|x| x.path == f.path) {
                 list.push(f);
@@ -147,14 +150,15 @@ pub fn attach_files(c: Ctx, chat: ChatId, files: Vec<bridge::PendingFile>) {
     });
 }
 
-/// Takes the file at `path` off the message being written in `chat`; a pasted file is no longer
-/// kept in memory.
-pub fn detach_file(c: Ctx, chat: &ChatId, path: &str) {
+/// Takes the file at `path` off the message being written in `chat` (in the thread of `thread`);
+/// a pasted file is no longer kept in memory.
+pub fn detach_file(c: Ctx, chat: &ChatId, thread: Option<Timestamp>, path: &str) {
+    let key = (chat.clone(), thread);
     c.pending_files.update(|all| {
-        if let Some(list) = all.get_mut(chat) {
+        if let Some(list) = all.get_mut(&key) {
             list.retain(|f| f.path != path);
             if list.is_empty() {
-                all.remove(chat);
+                all.remove(&key);
             }
         }
     });
@@ -168,10 +172,10 @@ pub fn detach_file(c: Ctx, chat: &ChatId, path: &str) {
     }
 }
 
-/// Files attached to the message being written in `chat`, untracked.
-pub fn attached(c: Ctx, chat: &ChatId) -> Vec<bridge::PendingFile> {
+/// Files attached to the message being written in `chat` (in the thread of `thread`), untracked.
+pub fn attached(c: Ctx, chat: &ChatId, thread: Option<Timestamp>) -> Vec<bridge::PendingFile> {
     c.pending_files
-        .with_untracked(|all| all.get(chat).cloned().unwrap_or_default())
+        .with_untracked(|all| all.get(&(chat.clone(), thread)).cloned().unwrap_or_default())
 }
 
 /// Replaces the text of `m`. The new text goes over the message as it is now: `m` is the copy

@@ -111,15 +111,13 @@ pub fn subscribe(c: Ctx) {
         .await;
         bridge::listen(bridge::DRAG_EVENT, move |at: Option<(f64, f64)>| {
             let zone = at.and_then(|(x, y)| crate::compose::drop_zone_physical(x, y));
-            crate::compose::highlight_drop(zone == Some(crate::compose::DropZone::Chat));
+            crate::compose::highlight_drop(zone);
         })
         .await;
         bridge::listen(bridge::FILES_EVENT, move |d: bridge::Dropped| {
-            crate::compose::highlight_drop(false);
-            match crate::compose::drop_zone_physical(d.x, d.y) {
-                Some(crate::compose::DropZone::Chat) => super::attach_files(c, c.current.get_untracked(), d.files),
-                Some(crate::compose::DropZone::Thread) => c.notice.set(Some(tr().no_files_in_thread.into())),
-                None => {}
+            crate::compose::highlight_drop(None);
+            if let Some(zone) = crate::compose::drop_zone_physical(d.x, d.y) {
+                super::attach_files(c, c.current.get_untracked(), zone.thread(c), d.files);
             }
         })
         .await;

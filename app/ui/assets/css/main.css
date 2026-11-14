@@ -8,8 +8,8 @@
   background: var(--bg);
 }
 
-/* Files dragged over the chat will be attached to the message. */
-.main.drop-target {
+/* Files dragged over the chat or the thread pane will be attached to the message. */
+.main.drop-target, .thread-pane.drop-target {
   outline: 2px dashed var(--link);
   outline-offset: -4px;
 }
