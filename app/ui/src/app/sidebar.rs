@@ -13,7 +13,7 @@ use crate::icons::{I, Icon};
 use crate::settings::{SidebarFilter, SidebarSort};
 use crate::{folders, hidden, ops, order};
 
-use super::avatar::{Avatar, Mark, chat_face, chat_person, display_title, kind_icon, status_badge};
+use super::avatar::{Avatar, Mark, chat_face, chat_person, display_title, kind_icon, status_view};
 use super::feed::typers;
 use super::menus::open_menu_below;
 use super::org::{in_current_org, org_name};
@@ -658,12 +658,39 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
     let c = ctx();
     let data = {
         let id = id.clone();
+        // Only what the row shows: a new message, the person's presence or anyone else's change
+        // would build it again, and the person's avatar would blink.
         Memo::new(move |_| {
             c.snap.with(|s| {
-                s.chat(&id)
-                    .map(|ch| (ch.clone(), display_title(s, ch), chat_face(s, ch)))
+                s.chat(&id).map(|ch| {
+                    (
+                        super::avatar::steady_chat(ch),
+                        display_title(s, ch),
+                        chat_face(s, ch).as_ref().map(super::avatar::face),
+                    )
+                })
             })
         })
+    };
+    let live = {
+        let id = id.clone();
+        Memo::new(move |_| c.active_calls.with(|a| a.contains_key(&id)))
+    };
+    // A call in a direct chat shows once: the person's "In meeting" is that very call.
+    let face_status = {
+        let id = id.clone();
+        Memo::new(move |_| {
+            let live = live.get();
+            c.snap.with(|s| {
+                let user = chat_person(s, s.chat(&id)?)?;
+                let in_this_call = live && user.status.as_ref().is_some_and(|st| st.in_meeting);
+                if in_this_call { None } else { user.status.clone() }
+            })
+        })
+    };
+    let has_draft = {
+        let id = id.clone();
+        Memo::new(move |_| c.drafts.with(|d| d.get(&id).is_some_and(|t| !t.trim().is_empty())))
     };
     let selected = {
         let id = id.clone();
@@ -767,18 +794,13 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
             };
             let you =
                 matches!(ch.kind, ChatKind::Notes).then(|| view! { <span class="sb-you">{tr().you_short}</span> });
-            let live = c.active_calls.with(|a| a.contains_key(&ch.id));
-            // A call in a direct chat shows once: the person's "In meeting" is that very call.
-            let face_status = c.snap.with(|s| {
-                let user = chat_person(s, &ch)?;
-                let in_this_call = live && user.status.as_ref().is_some_and(|st| st.in_meeting);
-                if in_this_call { None } else { status_badge(user) }
-            });
+            let live = live.get();
+            let face_status = face_status.get().as_ref().map(status_view);
             let badge = (ch.mentions > 0).then(|| view! { <span class="badge">{ch.mentions}</span> });
             let live_call = live.then(|| {
                 view! { <span class="sb-call" title=tr().call_live_hint><Icon icon=I::Headphones size=13/></span> }
             });
-            let has_draft = !selected.get() && c.drafts.with(|d| d.get(&ch.id).is_some_and(|t| !t.trim().is_empty()));
+            let has_draft = !selected.get() && has_draft.get();
             let pencil = (has_draft && ch.mentions == 0)
                 .then(|| view! { <span class="sb-pencil"><Icon icon=I::Compose size=13/></span> });
             // "×" on hover hides the chat, as closing a conversation in Slack. Not a nested button:

@@ -231,6 +231,17 @@ fn pending_file(path: &std::path::Path) -> Option<PendingFile> {
 
 /// Files dropped onto the window: the [`PendingFile`]s to attach.
 pub const FILES_EVENT: &str = "mostik://files";
+/// Files are dragged over the chat window: where, in logical pixels of the window; `None` when
+/// the drag leaves or ends.
+pub const DRAG_EVENT: &str = "mostik://drag";
+
+/// Files dropped onto the chat window and where, in logical pixels of the window.
+#[derive(Serialize)]
+pub struct Dropped {
+    pub files: Vec<PendingFile>,
+    pub x: f64,
+    pub y: f64,
+}
 
 /// Allows sending the files (dialog, drag and drop) and returns their description for the UI.
 pub fn allow_files(app: &AppHandle, paths: &[std::path::PathBuf]) -> Vec<PendingFile> {
@@ -248,7 +259,7 @@ pub struct AppState {
     pub prefs: StdMutex<Prefs>,
     allowed_files: StdMutex<BTreeSet<String>>,
     /// Contents of the files pasted or dropped into the message field, by their [`KEPT`](files::KEPT) path.
-    kept_files: StdMutex<BTreeMap<String, Vec<u8>>>,
+    kept_files: StdMutex<BTreeMap<String, bytes::Bytes>>,
     live: Mutex<Option<Arc<Live>>>,
     session: Session,
     reconnecting: AtomicBool,

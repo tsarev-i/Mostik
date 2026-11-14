@@ -109,14 +109,16 @@ pub fn subscribe(c: Ctx) {
             jump_to_message(c, t.chat_id, t.ts, t.thread_parent);
         })
         .await;
-        bridge::listen(bridge::FILES_EVENT, move |files: Vec<bridge::PendingFile>| {
-            c.pending_files.update(|p| {
-                for f in files {
-                    if !p.iter().any(|x| x.path == f.path) {
-                        p.push(f);
-                    }
-                }
-            });
+        bridge::listen(bridge::DRAG_EVENT, move |at: Option<(f64, f64)>| {
+            let zone = at.and_then(|(x, y)| crate::compose::drop_zone_logical(c, x, y));
+            crate::compose::highlight_drop(zone);
+        })
+        .await;
+        bridge::listen(bridge::FILES_EVENT, move |d: bridge::Dropped| {
+            crate::compose::highlight_drop(None);
+            if let Some(zone) = crate::compose::drop_zone_logical(c, d.x, d.y) {
+                super::attach_files(c, c.current.get_untracked(), zone.thread(c), d.files);
+            }
         })
         .await;
         bridge::listen(bridge::CALL_EVENT, move |call: Option<bridge::CallInfo>| {

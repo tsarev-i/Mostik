@@ -44,8 +44,36 @@ pub(super) fn presence_class(u: &User) -> &'static str {
 
 /// Status emoji after the name, with the status text in a hover tip.
 pub(super) fn status_badge(u: &User) -> Option<AnyView> {
-    let st = u.status.clone()?;
-    Some(view! { <span class="status-emoji" data-tip=status_tip(&st)>{status_icon(&st, 14)}</span> }.into_any())
+    u.status.as_ref().map(status_view)
+}
+
+/// The emoji of status `st` with its text in the hover tip.
+pub(super) fn status_view(st: &CustomStatus) -> AnyView {
+    view! { <span class="status-emoji" data-tip=status_tip(st)>{status_icon(st, 14)}</span> }.into_any()
+}
+
+/// Chat `ch` without what changes with every message (the last time, how far it has been read),
+/// for views that show none of it: they are not built again for each message.
+pub(super) fn steady_chat(ch: &Chat) -> Chat {
+    Chat {
+        last_ts: 0,
+        peer_seen_ts: 0,
+        unread: ch.unread.min(1),
+        ..ch.clone()
+    }
+}
+
+/// A person as an [`Avatar`] draws them, without what changes often and the picture does not
+/// show: presence (the dot follows it by itself) and the job title. Views built from it are built
+/// again only when the name, photo or status changes: a new `<img>` shows the initials until the
+/// photo has loaded again, and the face blinks.
+pub(crate) fn face(u: &User) -> User {
+    User {
+        title: None,
+        presence: Presence::Offline,
+        availability: Availability::default(),
+        ..u.clone()
+    }
 }
 
 /// The hover tip of a status: its emoji and text. An emoji alone has nothing more to say.
@@ -221,16 +249,24 @@ pub(crate) fn Avatar(user: User, #[prop(default = 36)] size: u32, #[prop(optiona
         avatar_color(&user.id.0),
         size * 2 / 5,
     );
-    let dot = presence.then(|| view! { <span class=presence_class(&user)></span> });
-    // The photo goes over the initials; if it fails to load, the initials stay.
+    // The dot follows the person's presence by itself: the avatar is not built again for it.
+    let dot = presence.then(|| {
+        let (c, id, known) = (use_context::<super::Ctx>(), user.id.clone(), presence_class(&user));
+        let class = move || {
+            c.and_then(|c| c.snap.with(|s| s.user(&id).map(presence_class)))
+                .unwrap_or(known)
+        };
+        view! { <span class=class></span> }
+    });
+    // The photo goes over the initials; if it fails to load, it hides and the initials stay. Hidden,
+    // not taken out: when the view around is built again, the same `<img>` stays and does not
+    // load again, so the photo does not blink.
     let photo = user.avatar.clone().map(|id| {
         let failed = RwSignal::new(false);
         let src = avatar_url(&id, size);
         view! {
-            <Show when=move || !failed.get()>
-                <img class="avatar-img" src=src.clone() alt="" style=format!("border-radius:{radius}px")
-                    on:error=move |_| failed.set(true)/>
-            </Show>
+            <img class="avatar-img" src=src alt="" style=format!("border-radius:{radius}px")
+                hidden=move || failed.get() on:error=move |_| failed.set(true)/>
         }
     });
     view! {

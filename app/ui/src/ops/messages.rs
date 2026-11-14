@@ -113,34 +113,96 @@ pub async fn send(
     Ok(())
 }
 
-/// Sends the picked files with a caption; not available in demo mode.
+/// Sends the files attached in `chat` (in the thread of `thread`) with a caption; not available in
+/// demo mode.
 pub async fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>) -> Result<(), String> {
     if !c.live {
         return Err(tr().only_in_app_files.into());
     }
-    let paths: Vec<String> = c.pending_files.get_untracked().into_iter().map(|f| f.path).collect();
-    let sent = bridge::send_files(&chat.0, thread, paths, &with_mention_ids(c, &text)).await?;
-    c.pending_files.set(vec![]);
+    let paths: Vec<String> = attached(c, &chat, thread).into_iter().map(|f| f.path).collect();
+    let sent = bridge::send_files(&chat.0, thread, paths.clone(), &with_mention_ids(c, &text)).await?;
+    // Only what went: the user may have attached more while it was uploading.
+    let key = (chat, thread);
+    c.pending_files.update(|all| {
+        if let Some(list) = all.get_mut(&key) {
+            list.retain(|f| !paths.contains(&f.path));
+            if list.is_empty() {
+                all.remove(&key);
+            }
+        }
+    });
     for m in sent {
         upsert(c, m, None);
     }
     Ok(())
 }
 
+/// Attaches `files` to the message being written in `chat`, or in its thread of `thread`; a file
+/// already there is not added again.
+pub fn attach_files(c: Ctx, chat: ChatId, thread: Option<Timestamp>, files: Vec<bridge::PendingFile>) {
+    c.pending_files.update(|all| {
+        let list = all.entry((chat, thread)).or_default();
+        for f in files {
+            if !list.iter().any(|x| x.path == f.path) {
+                list.push(f);
+            }
+        }
+    });
+}
+
+/// Takes the file at `path` off the message being written in `chat` (in the thread of `thread`);
+/// a pasted file is no longer kept in memory.
+pub fn detach_file(c: Ctx, chat: &ChatId, thread: Option<Timestamp>, path: &str) {
+    let key = (chat.clone(), thread);
+    c.pending_files.update(|all| {
+        if let Some(list) = all.get_mut(&key) {
+            list.retain(|f| f.path != path);
+            if list.is_empty() {
+                all.remove(&key);
+            }
+        }
+    });
+    if c.live {
+        let path = path.to_owned();
+        spawn_local(async move {
+            if let Err(e) = bridge::forget_file(&path).await {
+                leptos::logging::warn!("forget_file: {e}");
+            }
+        });
+    }
+}
+
+/// Files attached to the message being written in `chat` (in the thread of `thread`), untracked.
+pub fn attached(c: Ctx, chat: &ChatId, thread: Option<Timestamp>) -> Vec<bridge::PendingFile> {
+    c.pending_files
+        .with_untracked(|all| all.get(&(chat.clone(), thread)).cloned().unwrap_or_default())
+}
+
+/// Replaces the text of `m`. The new text goes over the message as it is now: `m` is the copy
+/// taken when the editor opened, and its reactions and marks may have changed since.
 pub async fn edit(c: Ctx, m: Message, text: String) -> Result<(), String> {
     let text = with_mention_ids(c, &text);
     if c.live {
         bridge::edit_message(&m, &text).await?;
     }
-    upsert(
-        c,
-        Message {
-            text,
-            edited: true,
-            ..m
-        },
-        None,
-    );
+    let now = c.snap.with_untracked(|s| {
+        s.messages
+            .iter()
+            .find(|x| x.chat_id == m.chat_id && x.ts == m.ts)
+            .cloned()
+    });
+    // Gone meanwhile (deleted, or the chat was left): nothing to show it in.
+    if let Some(now) = now {
+        upsert(
+            c,
+            Message {
+                text,
+                edited: true,
+                ..now
+            },
+            None,
+        );
+    }
     Ok(())
 }
 

@@ -47,9 +47,11 @@ pub(super) fn MessageRow(
     });
     let mine = author_id == me_id;
     let key = (chat_id.clone(), ts);
+    // Only what the line shows of the author: their presence changes as they write, and the
+    // avatar would be built again and blink.
     let author = {
         let id = author_id.clone();
-        Memo::new(move |_| c.snap.with(|s| s.user(&id).cloned()))
+        Memo::new(move |_| c.snap.with(|s| s.user(&id).map(super::avatar::face)))
     };
     let text = Memo::new(move |_| msg.with(|m| (m.text.clone(), m.edited)));
     let important = Memo::new(move |_| msg.with(|m| m.important));
@@ -199,9 +201,10 @@ pub(super) fn MessageRow(
                             // Follows the set: it may arrive after the message, and an emoji may be renamed.
                             let (chat, glyph) = (chat_id.clone(), r.emoji.clone());
                             let glyph = move || match crate::custom::by_kind(c, &chat, kind) {
-                                Some(e) => crate::custom::image(&e, "custom-emoji").into_any(),
+                                // The button's tooltip says who reacted: the image has none to cover it.
+                                Some(e) => crate::custom::image_untitled(&e, "custom-emoji").into_any(),
                                 None if mostik_core::custom_emoji::is_custom_reaction(kind) => {
-                                    view! { <span class="emoji" title=tr().unknown_custom_emoji>"▫️"</span> }.into_any()
+                                    view! { <span class="emoji">"▫️"</span> }.into_any()
                                 }
                                 None => view! { <span class="emoji">{glyph.clone()}</span> }.into_any(),
                             };
@@ -394,6 +397,7 @@ fn reaction_title(s: &Snapshot, r: &Reaction, custom: Option<&mostik_core::custo
     if names.is_empty() && !r.mine {
         return match custom {
             Some(e) => mostik_core::custom_emoji::caption(&e.name),
+            None if mostik_core::custom_emoji::is_custom_reaction(r.kind) => tr().unknown_custom_emoji.to_owned(),
             None => reactions::name(r.kind).unwrap_or("").to_owned(),
         };
     }
@@ -421,6 +425,7 @@ pub(super) fn ForwardedBlock(f: Forwarded) -> impl IntoView {
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| f.author_name.clone());
     let face = author.unwrap_or_else(|| User::named(f.author.clone(), name.clone()));
+    let author_id = f.author.clone();
     // Like the message's own text, it follows the names it mentions and the emoji set.
     let names = feed_names(c);
     let text = (!f.text.is_empty()).then(|| {
@@ -451,7 +456,9 @@ pub(super) fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     });
     view! {
         <div class="fwd">
-            <div class="fwd-head"><Avatar user=face size=20/><b>{name}</b></div>
+            <button class="fwd-head person-link" on:click=move |_| ops::open_profile(c, author_id.clone())>
+                <Avatar user=face size=20/><b>{name}</b>
+            </button>
             {text.map(|text| view! { <div class="msg-text">{text}</div> })}
             <Attachments list=f.attachments.clone()/>
             {footer}
@@ -642,7 +649,7 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
                     });
                 };
                 view! {
-                    <button class="file-card" title=tr().download_and_open on:click=download>
+                    <button class="file-card" title=tr().download on:click=download>
                         <span class="file-icon"><Icon icon=I::Files size=22/></span>
                         <span class="file-meta">
                             <span class="file-name">{a.name.clone()}</span>

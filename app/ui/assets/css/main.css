@@ -8,6 +8,12 @@
   background: var(--bg);
 }
 
+/* Files dragged over the chat or the thread pane will be attached to the message. */
+.main.drop-target, .thread-pane.drop-target {
+  outline: 2px dashed var(--link);
+  outline-offset: -4px;
+}
+
 .ch-header {
   flex: none;
   background: var(--bg-raised);
@@ -44,7 +50,6 @@
   font-size: 18px;
   font-weight: 900;
 }
-.ch-title:hover { background: rgba(255, 255, 255, 0.08); }
 .ch-kind { display: grid; place-items: center; color: var(--text); }
 
 .ch-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
@@ -216,6 +221,8 @@
 .msg-head { display: flex; align-items: baseline; gap: 8px; }
 .msg-author { color: var(--text-strong); font-weight: 900; }
 .msg-author:hover { text-decoration: underline; cursor: pointer; }
+/* Names that open a profile or the details of a channel. */
+.person-link:hover { text-decoration: underline; }
 .msg-time { font-size: 12px; color: var(--text-muted); }
 .app-tag {
   padding: 0 3px;

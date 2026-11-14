@@ -226,7 +226,8 @@ pub fn EmojiPicker(
             match crate::bridge::delete_custom_emoji(&chat.0, e.ts).await {
                 Ok(sets) => {
                     ctx.custom.set(sets);
-                    on_close.run(());
+                    // The user may have closed the picker while the delete went.
+                    on_close.try_run(());
                 }
                 Err(err) => ctx.error.set(Some(err)),
             }

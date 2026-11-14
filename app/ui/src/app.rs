@@ -91,7 +91,7 @@ pub fn App() -> impl IntoView {
         typing: RwSignal::new(vec![]),
         last_typing: RwSignal::new(0.0),
         exhausted: RwSignal::new(HashSet::new()),
-        loading_older: RwSignal::new(false),
+        loading_older: RwSignal::new(Default::default()),
         editing: RwSignal::new(None),
         edit_draft: StoredValue::new(None),
         confirm_delete: RwSignal::new(None),
@@ -115,7 +115,7 @@ pub fn App() -> impl IntoView {
         browsing: RwSignal::new(false),
         settings,
         status_dialog: RwSignal::new(false),
-        pending_files: RwSignal::new(vec![]),
+        pending_files: RwSignal::new(std::collections::HashMap::new()),
         new_message: RwSignal::new(false),
         creating_channel: RwSignal::new(None),
         details: RwSignal::new(None),
@@ -142,6 +142,16 @@ pub fn App() -> impl IntoView {
         hidden: RwSignal::new(hidden::load()),
         folders: folder_list,
         sections: Memo::new(move |_| snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f)))),
+        org_now: Memo::new(move |_| {
+            let chosen = org.get();
+            snap.with(|s| {
+                s.organizations
+                    .iter()
+                    .find(|o| Some(o.id) == chosen)
+                    .or(s.organizations.first())
+                    .cloned()
+            })
+        }),
         folder_edit: RwSignal::new(None),
         custom: RwSignal::new(vec![]),
         adding_emoji: RwSignal::new(false),

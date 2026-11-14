@@ -9,6 +9,7 @@ use leptos::html;
 use leptos::portal::Portal;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use mostik_core::Timestamp;
 use mostik_core::markup::{link_address, link_at, link_markup, pasted_link, typed_address};
 use wasm_bindgen::JsCast;
 
@@ -214,6 +215,44 @@ fn link_keys() -> &'static str {
 /// picker's search takes the focus.
 type PickerAt = ((f64, f64), (Option<u32>, Option<u32>));
 
+/// An emoji button for a message field: opens the picker and inserts the emoji where the caret or
+/// selection was when it opened, then gives the focus back to the field.
+#[component]
+pub fn EmojiButton(field: Field, class: &'static str, size: u32) -> impl IntoView {
+    let picker: RwSignal<Option<PickerAt>> = RwSignal::new(None);
+    let open_picker = move |e: ev::MouseEvent| {
+        if let Some(el) = field.area.get_untracked() {
+            picker.set(Some((crate::emoji::anchor_of(&e), selection(&el))));
+        }
+    };
+    view! {
+        // The press keeps the focus and selection in the field.
+        <button class=class title=tr().emoji_btn on:mousedown=|e: ev::MouseEvent| e.prevent_default() on:click=open_picker>
+            <Icon icon=I::Smile size=size/>
+        </button>
+        {move || picker.get().map(|(at, sel)| {
+            let c = expect_context::<Ctx>();
+            // Read once: the picker would be built again, losing what is typed in its search, at
+            // every change of the snapshot or the emoji sets.
+            let custom = untrack(|| crate::custom::for_chat(c, &c.current.get_untracked()));
+            view! {
+                <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
+                    custom=custom can_add=c.live
+                    on_close=Callback::new(move |_| {
+                        picker.set(None);
+                        if let Some(el) = field.area.get_untracked() {
+                            let _ = el.focus();
+                        }
+                    })
+                    on_pick=Callback::new(move |glyph: String| {
+                        picker.set(None);
+                        field.insert_at(&glyph, sel);
+                    })/>
+            }
+        })}
+    }
+}
+
 /// Formatting buttons of a message field: each wraps the selection in Telemost markup markers or
 /// takes them off, "Link" opens the "Add link" dialog. A press keeps the focus and selection in the
 /// field. `emoji` adds an emoji button, for a field without one of its own.
@@ -221,12 +260,6 @@ type PickerAt = ((f64, f64), (Option<u32>, Option<u32>));
 pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
     let fmt = move |before: &'static str, after: &'static str| move |_| field.wrap(before, after);
     let hint = |name: &str, keys: &str| format!("{name} ({keys})");
-    let picker: RwSignal<Option<PickerAt>> = RwSignal::new(None);
-    let open_picker = move |e: ev::MouseEvent| {
-        if let Some(el) = field.area.get_untracked() {
-            picker.set(Some((crate::emoji::anchor_of(&e), selection(&el))));
-        }
-    };
     view! {
         <div class="composer-toolbar" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
             <button class="fmt" title=hint(tr().fmt_bold, "Ctrl+B") on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
@@ -240,27 +273,10 @@ pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
             <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>
             {emoji.then(|| view! {
                 <span class="sep"></span>
-                <button class="fmt" title=tr().emoji_btn on:click=open_picker><Icon icon=I::Smile size=16/></button>
+                <EmojiButton field class="fmt" size=16/>
             })}
         </div>
         {move || field.link.get().map(|target| view! { <LinkDialog field target/> })}
-        {move || picker.get().map(|(at, sel)| {
-            let c = expect_context::<Ctx>();
-            view! {
-                <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
-                    custom=crate::custom::for_chat(c, &c.current.get_untracked()) can_add=c.live
-                    on_close=Callback::new(move |_| {
-                        picker.set(None);
-                        if let Some(el) = field.area.get_untracked() {
-                            let _ = el.focus();
-                        }
-                    })
-                    on_pick=Callback::new(move |glyph: String| {
-                        picker.set(None);
-                        field.insert_at(&glyph, sel);
-                    })/>
-            }
-        })}
     }
 }
 
@@ -332,8 +348,9 @@ fn LinkDialog(field: Field, target: LinkTarget) -> impl IntoView {
 }
 
 /// Files pasted or dropped into a message are attached to it, as with "+": the app keeps their
-/// contents until the message goes. Returns whether there were any.
-fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
+/// contents until the message goes. `thread` is the parent of the thread whose field takes them,
+/// `None` for the chat's own field. Returns whether there were any.
+fn attach(c: Ctx, data: Option<web_sys::DataTransfer>, thread: Option<Timestamp>) -> bool {
     let files: Vec<web_sys::File> = data
         .and_then(|d| d.files())
         .map(|list| (0..list.length()).filter_map(|i| list.get(i)).collect())
@@ -345,6 +362,9 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
         c.error.set(Some(tr().only_in_app_files.into()));
         return true;
     }
+    // A large file takes a while to read: it goes to the chat or thread it was pasted in, even if
+    // the user has moved on.
+    let chat = c.current.get_untracked();
     spawn_local(async move {
         for f in files {
             let name = file_name(&f.name(), &f.type_());
@@ -353,7 +373,7 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
                 Err(e) => Err(format!("{name}: {e:?}")),
             };
             match kept {
-                Ok(file) => c.pending_files.update(|p| p.push(file)),
+                Ok(file) => crate::ops::attach_files(c, chat.clone(), thread, vec![file]),
                 Err(e) => return c.error.set(Some(e)),
             }
         }
@@ -363,34 +383,110 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>) -> bool {
 
 /// Files pasted into a message are attached to it, unless they come with formatted text: a table
 /// copied from a spreadsheet or a document brings a picture of itself along, and then the text is
-/// what is meant. Returns whether the files were taken.
-pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent) -> bool {
+/// what is meant. `thread` as in [`attach`]. Returns whether the files were taken.
+pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent, thread: Option<Timestamp>) -> bool {
     let Some(data) = e.clipboard_data() else { return false };
     let has = |kind: &str| data.get_data(kind).is_ok_and(|t| !t.trim().is_empty());
     if has("text/plain") && has("text/html") {
         return false;
     }
-    let taken = attach(c, Some(data));
+    let taken = attach(c, Some(data), thread);
     if taken {
         e.prevent_default();
     }
     taken
 }
 
-/// Drag and drop onto the window: the files that reach the page (a picture dragged out of another
+/// Where files dropped onto the window go.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DropZone {
+    /// The chat: its feed and message field. Files are attached to the message.
+    Chat,
+    /// The thread pane. Files are attached to the reply.
+    Thread,
+}
+
+impl DropZone {
+    /// The parent of the thread whose field takes the files, `None` for the chat's own field.
+    pub fn thread(self, c: Ctx) -> Option<Timestamp> {
+        match self {
+            DropZone::Chat => None,
+            DropZone::Thread => c.thread.get_untracked(),
+        }
+    }
+}
+
+/// The drop zone under the point `(x, y)` of the page, in CSS pixels; `None` for the rest of the
+/// window (the sidebar, the headers), where a drop is ignored, as in Slack.
+pub fn drop_zone(x: f64, y: f64) -> Option<DropZone> {
+    let el = document().element_from_point(x as f32, y as f32)?;
+    if el.closest(".thread-pane").ok().flatten().is_some_and(|p| has_field(&p)) {
+        return Some(DropZone::Thread);
+    }
+    el.closest("main.main")
+        .ok()
+        .flatten()
+        .filter(has_field)
+        .map(|_| DropZone::Chat)
+}
+
+/// Whether the area has a message field: the thread pane has none while it shows a profile.
+fn has_field(area: &web_sys::Element) -> bool {
+    area.query_selector(".composer-wrap").ok().flatten().is_some()
+}
+
+/// [`drop_zone`] for a point in logical pixels of the window, as the app reports a drag from a
+/// file manager: CSS pixels times the zoom. Not `devicePixelRatio`: it holds the screen's scale too.
+pub fn drop_zone_logical(c: Ctx, x: f64, y: f64) -> Option<DropZone> {
+    let zoom = (f64::from(c.settings.with_untracked(|s| s.zoom)) / 100.0).max(0.1);
+    drop_zone(x / zoom, y / zoom)
+}
+
+/// Frames the chat or the thread pane the files dragged over it will be attached to; `None` takes
+/// the frame away.
+pub fn highlight_drop(zone: Option<DropZone>) {
+    let frame = |selector: &str, on: bool| {
+        if let Ok(list) = document().query_selector_all(selector) {
+            for el in (0..list.length()).filter_map(|i| list.get(i)?.dyn_into::<web_sys::Element>().ok()) {
+                let _ = el.class_list().toggle_with_force("drop-target", on && has_field(&el));
+            }
+        }
+    };
+    frame("main.main", zone == Some(DropZone::Chat));
+    frame(".thread-pane", zone == Some(DropZone::Thread));
+}
+
+/// Drag and drop onto the chat: the files that reach the page (a picture dragged out of another
 /// program) are attached to the message. Files from a file manager do not get here: the app takes
 /// them itself and sends `mostik://files`.
 pub fn attach_dropped(c: Ctx) {
-    // Files are accepted anywhere in the window, not only over the text field.
-    scoped_window_listener(ev::dragover, |e| {
-        if e.data_transfer()
+    let has_files = |e: &web_sys::DragEvent| {
+        e.data_transfer()
             .is_some_and(|d| d.types().includes(&"Files".into(), 0))
-        {
+    };
+    // Over the chat or the thread pane the drop is taken; elsewhere the browser shows that it is not.
+    scoped_window_listener(ev::dragover, move |e| {
+        if !has_files(&e) {
+            return;
+        }
+        let zone = drop_zone(e.client_x().into(), e.client_y().into());
+        highlight_drop(zone);
+        if zone.is_some() {
             e.prevent_default();
         }
     });
+    // Leaving the window: no element takes the drag next.
+    scoped_window_listener(ev::dragleave, |e| {
+        if e.related_target().is_none() {
+            highlight_drop(None);
+        }
+    });
     scoped_window_listener(ev::drop, move |e| {
-        if attach(c, e.data_transfer()) {
+        highlight_drop(None);
+        let Some(zone) = drop_zone(e.client_x().into(), e.client_y().into()) else {
+            return;
+        };
+        if attach(c, e.data_transfer(), zone.thread(c)) {
             e.prevent_default();
         }
     });

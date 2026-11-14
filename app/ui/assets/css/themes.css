@@ -106,7 +106,6 @@
 :root[data-mode="light"] .msg-actions button:hover,
 :root[data-mode="light"] .btn:hover,
 :root[data-mode="light"] .huddle-btn:hover,
-:root[data-mode="light"] .ch-title:hover { background: rgba(0, 0, 0, 0.06); }
 :root[data-mode="light"] .reaction { background: rgba(0, 0, 0, 0.05); }
 :root[data-mode="light"] .reaction:hover { border-color: rgba(0, 0, 0, 0.3); }
 :root[data-mode="light"] .reaction.mine { background: #e8f5fa; border-color: var(--accent-blue); }

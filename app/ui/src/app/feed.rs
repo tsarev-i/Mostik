@@ -21,8 +21,15 @@ pub(super) fn ChannelHeader() -> impl IntoView {
     let info = Memo::new(move |_| {
         let id = c.current.get();
         c.snap.with(|s| {
-            s.chat(&id)
-                .map(|ch| (ch.clone(), display_title(s, ch), chat_face(s, ch)))
+            // Only what is shown: a new message (the chat's last time, its reads) or the peer's
+            // presence would build it again, and the peer's avatar would blink.
+            s.chat(&id).map(|ch| {
+                (
+                    super::avatar::steady_chat(ch),
+                    display_title(s, ch),
+                    chat_face(s, ch).as_ref().map(super::avatar::face),
+                )
+            })
         })
     });
     view! {
@@ -181,14 +188,40 @@ pub(super) fn MessageList() -> impl IntoView {
         let Some(el) = list_ref.try_get_untracked().flatten() else {
             return;
         };
-        if stick.try_get_untracked() == Some(true) {
-            el.set_scroll_top(el.scroll_height());
+        let top = el.scroll_top();
+        // A scroll whose event has not come yet (a wheel step just now) is the user's: the kept
+        // message has moved by it in the view, and that is not to be undone. A step up lets go of
+        // the bottom, as in `on_scroll`.
+        let unseen = last_top.try_get_value().flatten().map_or(0, |last| top - last);
+        let target = if stick.try_get_untracked() == Some(true) && unseen >= 0 {
+            el.scroll_height() - el.client_height()
         } else if let Some((ts, offset)) = keep.try_get_value().flatten()
             && let Some(now) = row_offset(&el, ts)
         {
-            el.set_scroll_top(el.scroll_top() + (now - offset).round() as i32);
+            top + (now - (offset - f64::from(unseen))).round() as i32
+        } else {
+            top
+        };
+        if target != top {
+            el.set_scroll_top(target);
         }
+        // This scroll is not the user's: its event, or the next change before it, must not take
+        // it for theirs.
+        last_top.try_set_value(Some(el.scroll_top()));
     };
+    // A message the user has just sent takes the list to the bottom, wherever it was scrolled,
+    // as in Slack: otherwise it would land below the view.
+    Effect::new(move |seen: Option<Option<Timestamp>>| {
+        let me = c.snap.with_untracked(|s| s.me.clone());
+        let last = messages.with(|list| list.last().map(|m| (m.ts, m.author == me)));
+        let newest = last.map(|(ts, _)| ts);
+        if let (Some(Some(before)), Some((ts, true))) = (seen, last)
+            && ts > before
+        {
+            stick.set(true);
+        }
+        newest
+    });
     Effect::new(move |_| {
         messages.track();
         // When the loading stops, an older page has come or the start of the chat shows above.
@@ -201,14 +234,53 @@ pub(super) fn MessageList() -> impl IntoView {
             stick.set(false);
         }
     });
-    // Pictures and videos get their height only once loaded: keep the view in place then too.
+    // A short page may not fill the list, and then there is no scrolling to load older messages:
+    // load them until the list scrolls or the history ends. Checked after every change of the list
+    // and of the loading, once laid out, however the chat was opened.
+    Effect::new(move |_| {
+        let id = c.current.get();
+        messages.track();
+        let busy = c.loading_older.with(|l| l.contains(&id)) || c.exhausted.with(|e| e.contains(&id));
+        // Before the latest page comes, the list has nothing to go on from.
+        if busy || !c.live || !ops::history_loaded(&id) {
+            return;
+        }
+        request_animation_frame(move || {
+            let Some(el) = list_ref.try_get_untracked().flatten() else {
+                return;
+            };
+            if c.current.get_untracked() == id && el.scroll_height() <= el.client_height() {
+                ops::load_older(c);
+            }
+        });
+    });
+    // Pictures and videos get their height only once loaded: keep the view in place then too, if
+    // the loaded one is above the message kept in place (one below it moves nothing in the view).
     // `load` does not bubble, so it is caught on the way down.
     Effect::new(move |attached: Option<bool>| {
         if attached == Some(true) {
             return true;
         }
         let Some(el) = list_ref.get() else { return false };
-        let on_load = wasm_bindgen::closure::Closure::<dyn Fn()>::new(restore);
+        let on_load = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::Event)>::new(move |e: web_sys::Event| {
+            let Some(list) = list_ref.try_get_untracked().flatten() else {
+                return;
+            };
+            let kept = keep.try_get_value().flatten();
+            let above = match (
+                kept,
+                e.target()
+                    .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok()),
+            ) {
+                (Some((ts, _)), Some(media)) => row_offset(&list, ts).is_none_or(|row| {
+                    media.get_bounding_client_rect().top() - list.get_bounding_client_rect().top() < row
+                }),
+                _ => true,
+            };
+            if stick.try_get_untracked() == Some(true) || above {
+                restore();
+            }
+        });
         for event in ["load", "loadedmetadata"] {
             let _ = el.add_event_listener_with_callback_and_bool(
                 event,
@@ -252,7 +324,7 @@ pub(super) fn MessageList() -> impl IntoView {
                 let done = !c.live || c.exhausted.with(|e| e.contains(&id));
                 if done {
                     view! { <ChannelIntro/> }.into_any()
-                } else if c.loading_older.get() {
+                } else if c.loading_older.with(|l| l.contains(&id)) {
                     view! { <div class="loading-older"><div class="spinner small"></div></div> }.into_any()
                 } else {
                     view! { <div class="loading-older"></div> }.into_any()
@@ -336,8 +408,15 @@ fn ChannelIntro() -> impl IntoView {
     let info = Memo::new(move |_| {
         let id = c.current.get();
         c.snap.with(|s| {
-            s.chat(&id)
-                .map(|ch| (ch.clone(), display_title(s, ch), chat_face(s, ch)))
+            // Only what is shown: a new message (the chat's last time, its reads) or the peer's
+            // presence would build it again, and the peer's avatar would blink.
+            s.chat(&id).map(|ch| {
+                (
+                    super::avatar::steady_chat(ch),
+                    display_title(s, ch),
+                    chat_face(s, ch).as_ref().map(super::avatar::face),
+                )
+            })
         })
     });
     move || {
@@ -345,10 +424,7 @@ fn ChannelIntro() -> impl IntoView {
             // Like "This is your space" in Slack.
             (ChatKind::Notes, Some(me)) => view! {
                 <div class="intro notes">
-                    <div class="intro-face">
-                        <Avatar user=me.clone() size=120/>
-                        <span class="intro-name">{tr().me_suffix(&me.display_name)}</span>
-                    </div>
+                    {intro_face(c, me.clone(), tr().me_suffix(&me.display_name))}
                     <p>
                         <b>{tr().intro_notes_bold}</b>
                         {tr().intro_notes_text}
@@ -358,10 +434,7 @@ fn ChannelIntro() -> impl IntoView {
             .into_any(),
             (ChatKind::Direct { .. }, Some(peer)) => view! {
                 <div class="intro notes">
-                    <div class="intro-face">
-                        <Avatar user=peer.clone() size=120/>
-                        <span class="intro-name">{peer.display_name.clone()}</span>
-                    </div>
+                    {intro_face(c, peer.clone(), peer.display_name.clone())}
                     <p>{tr().intro_dm(&peer.display_name)}</p>
                 </div>
             }
@@ -372,18 +445,38 @@ fn ChannelIntro() -> impl IntoView {
                     .clone()
                     .map(|d| tr().intro_channel_with(&d))
                     .unwrap_or_else(|| tr().intro_channel.to_owned());
+                let head = view! { <span class="ch-kind">{kind_icon(&Mark::of(&ch), 26)}</span><span>{title}</span> };
+                // The name of a group opens its details, as it does in the header.
+                let title = if matches!(ch.kind, ChatKind::Group { .. }) {
+                    view! {
+                        <button class="intro-title person-link" title=tr().about_channel on:click=move |_| c.details.set(Some(DetailsTab::About))>{head}</button>
+                    }
+                    .into_any()
+                } else {
+                    view! { <div class="intro-title">{head}</div> }.into_any()
+                };
                 view! {
                     <div class="intro">
-                        <div class="intro-title">
-                            <span class="ch-kind">{kind_icon(&Mark::of(&ch), 26)}</span>
-                            <span>{title}</span>
-                        </div>
+                        {title}
                         <p>{text}</p>
                     </div>
                 }
                 .into_any()
             }
         })
+    }
+}
+
+/// The big avatar and name at the start of a direct chat or the notes: both open the profile.
+fn intro_face(c: Ctx, user: User, name: String) -> impl IntoView {
+    let (face_id, name_id) = (user.id.clone(), user.id.clone());
+    view! {
+        <div class="intro-face">
+            <button class="face-btn" on:click=move |_| ops::open_profile(c, face_id.clone())>
+                <Avatar user=user size=120/>
+            </button>
+            <button class="intro-name person-link" on:click=move |_| ops::open_profile(c, name_id.clone())>{name}</button>
+        </div>
     }
 }
 

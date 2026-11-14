@@ -78,7 +78,14 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
             });
         }
     });
-    let cancel = move || c.editing.set(None);
+    // Closing the editor gives the focus back to the field it was opened from, as in Slack: ↑
+    // works again and typing goes on.
+    let in_thread = msg.thread_parent.is_some();
+    let close = move || {
+        c.editing.set(None);
+        focus_composer(in_thread);
+    };
+    let cancel = close;
     let save = {
         let msg = msg.clone();
         move || {
@@ -92,13 +99,22 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
                 return c.confirm_delete.set(Some(msg.clone()));
             }
             if t == original {
-                return c.editing.set(None);
+                return close();
             }
             busy.set(true);
             let m = msg.clone();
+            let key = (msg.chat_id.clone(), msg.ts);
             spawn_local(async move {
                 match ops::edit(c, m, t).await {
-                    Ok(()) => c.editing.set(None),
+                    // Only if it is still this message's editor: while the edit went, the user may
+                    // have opened another one.
+                    Ok(())
+                        if c.editing
+                            .with_untracked(|e| e.as_ref().is_some_and(|e| (&e.chat_id, e.ts) == (&key.0, key.1))) =>
+                    {
+                        close()
+                    }
+                    Ok(()) => {}
                     Err(e) => ops::failed(c, tr().err_not_sent, e),
                 }
                 // Saved, the editor closes and its signals go.
@@ -153,6 +169,31 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
     }
 }
 
+/// Puts the focus, with the caret at the end, in the composer of the chat or of the open thread,
+/// unless the user has put it somewhere else while a save was going.
+fn focus_composer(thread: bool) {
+    let elsewhere = document()
+        .active_element()
+        .is_some_and(|a| a.tag_name() != "BODY" && a.closest(".inline-edit").ok().flatten().is_none());
+    if elsewhere {
+        return;
+    }
+    let selector = if thread {
+        ".composer-wrap.in-thread .editor"
+    } else {
+        ".composer-wrap:not(.in-thread) .editor"
+    };
+    let found = document()
+        .query_selector(selector)
+        .ok()
+        .flatten()
+        .and_then(|el| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(el).ok());
+    if let Some(el) = found {
+        let _ = el.focus();
+        crate::editor::set_caret(&el, utf16_len(&crate::editor::value(&el)));
+    }
+}
+
 /// Scrolls the message list just enough for the whole in-place editor (text and buttons) to show,
 /// with the gap from `scroll-margin` in the CSS.
 fn reveal_editor(area: &web_sys::HtmlElement) {
@@ -170,7 +211,6 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     let sending = RwSignal::new(false);
     let area = NodeRef::<html::Div>::new();
     let parent = move || if thread { c.thread.get_untracked() } else { None };
-    let emoji_at: RwSignal<Option<(f64, f64)>> = RwSignal::new(None);
     let suggestions: RwSignal<Vec<Suggestion>> = RwSignal::new(vec![]);
     let suggest_sel = RwSignal::new(0usize);
 
@@ -261,7 +301,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     };
     let submit = move || {
         let text = draft.get_untracked().trim().to_owned();
-        let with_files = !thread && !c.pending_files.with_untracked(Vec::is_empty);
+        let with_files = !ops::attached(c, &c.current.get_untracked(), parent()).is_empty();
         if (text.is_empty() && !with_files) || sending.get_untracked() {
             return;
         }
@@ -420,32 +460,35 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         }
     };
     let typing_text = move || if thread { None } else { typing_line(c, &c.current.get()) };
+    // The files attached in the open chat, or in its open thread for the thread's field.
+    let files = move || {
+        let key = (c.current.get(), if thread { c.thread.get() } else { None });
+        c.pending_files.with(|all| all.get(&key).cloned().unwrap_or_default())
+    };
     view! {
         <div class=if thread { "composer-wrap in-thread" } else { "composer-wrap" }>
             <div class="composer">
                 {move || reply.get().map(|r| view! { <ReplyBar target=r/> })}
-                {(!thread).then(|| view! {
-                    <Show when=move || !c.pending_files.with(Vec::is_empty)>
-                        <div class="pending-files">
-                            {move || c.pending_files.get().into_iter().map(|f| {
-                                let path = f.path.clone();
-                                view! {
-                                    <span class="pending-file">
-                                        <span class="file-icon small">{if f.image { "🖼" } else { "📄" }}</span>
-                                        <span class="file-meta">
-                                            <span class="file-name">{f.name.clone()}</span>
-                                            <span class="file-size">{human_size(f.size)}</span>
-                                        </span>
-                                        <button class="pf-remove" title=tr().remove_file
-                                            on:click=move |_| c.pending_files.update(|p| p.retain(|x| x.path != path))>
-                                            <Icon icon=I::X size=12/>
-                                        </button>
+                <Show when=move || !files().is_empty()>
+                    <div class="pending-files">
+                        {move || files().into_iter().map(|f| {
+                            let path = f.path.clone();
+                            view! {
+                                <span class="pending-file">
+                                    <span class="file-icon small">{if f.image { "🖼" } else { "📄" }}</span>
+                                    <span class="file-meta">
+                                        <span class="file-name">{f.name.clone()}</span>
+                                        <span class="file-size">{human_size(f.size)}</span>
                                     </span>
-                                }
-                            }).collect_view()}
-                        </div>
-                    </Show>
-                })}
+                                    <button class="pf-remove" title=tr().remove_file
+                                        on:click=move |_| ops::detach_file(c, &c.current.get_untracked(), parent(), &path)>
+                                        <Icon icon=I::X size=12/>
+                                    </button>
+                                </span>
+                            }
+                        }).collect_view()}
+                    </div>
+                </Show>
                 <crate::compose::FormatBar field/>
                 // A placeholder of its own: WebKit does not always restyle `attr()` in `::before` when
                 // the chat, and so the attribute, changes.
@@ -489,7 +532,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         }
                         on:keydown=on_key
                         on:paste=move |e: ev::ClipboardEvent| {
-                            if thread || !crate::compose::attach_pasted(c, &e) {
+                            if !crate::compose::attach_pasted(c, &e, parent()) {
                                 field.paste_link(&e);
                             }
                         }
@@ -534,43 +577,24 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     </div>
                 </Show>
                 <div class="composer-bottom">
-                    {(!thread).then(|| view! {
-                        <button class="cb round" title=tr().attach on:click=move |_| {
-                            if !c.live {
-                                return c.error.set(Some(tr().only_in_app_files.into()));
+                    <button class="cb round" title=tr().attach on:click=move |_| {
+                        if !c.live {
+                            return c.error.set(Some(tr().only_in_app_files.into()));
+                        }
+                        // The files go to the chat or thread the dialog was opened in.
+                        let (chat, thread_parent) = (c.current.get_untracked(), parent());
+                        spawn_local(async move {
+                            match bridge::pick_files().await {
+                                Ok(files) => ops::attach_files(c, chat, thread_parent, files),
+                                Err(e) => c.error.set(Some(e)),
                             }
-                            spawn_local(async move {
-                                match bridge::pick_files().await {
-                                    Ok(files) => c.pending_files.update(|p| {
-                                        for f in files {
-                                            if !p.iter().any(|x| x.path == f.path) { p.push(f); }
-                                        }
-                                    }),
-                                    Err(e) => c.error.set(Some(e)),
-                                }
-                            });
-                        }><Icon icon=I::Plus size=16/></button>
-                    })}
-                    <button class="cb" title=tr().emoji_btn on:click=move |e| emoji_at.set(Some(crate::emoji::anchor_of(&e)))>
-                        <Icon icon=I::Smile size=18/>
-                    </button>
-                    {move || emoji_at.get().map(|at| view! {
-                        <crate::emoji::EmojiPicker source=crate::emoji::Source::Text anchor=(at.0 + 324.0, at.1)
-                            custom=crate::custom::for_chat(c, &c.current.get_untracked()) can_add=c.live
-                            on_close=Callback::new(move |_| emoji_at.set(None))
-                            on_pick=Callback::new(move |glyph: String| {
-                                emoji_at.set(None);
-                                if let Some(el) = area.get_untracked() {
-                                    let text = insert_text(&el, &glyph, 0);
-                                    remember(&text);
-                                    set_draft.set(text);
-                                }
-                            })/>
-                    })}
+                        });
+                    }><Icon icon=I::Plus size=16/></button>
+                    <crate::compose::EmojiButton field class="cb" size=18/>
                     {move || sending.get().then(|| view! { <span class="composer-hint">{tr().uploading}</span> })}
                     <span class="composer-hint">{if crate::app::enter_sends() { tr().hint_shift_enter } else { tr().hint_ctrl_enter }}</span>
                     <div class="spacer"></div>
-                    <div class=move || if (draft.with(|d| d.trim().is_empty()) && (thread || c.pending_files.with(Vec::is_empty))) || sending.get() { "send-group empty" } else { "send-group" }>
+                    <div class=move || if (draft.with(|d| d.trim().is_empty()) && files().is_empty()) || sending.get() { "send-group empty" } else { "send-group" }>
                         <button class="send" title=tr().send on:click=move |_| submit()><Icon icon=I::Send size=16/></button>
                     </div>
                 </div>

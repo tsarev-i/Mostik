@@ -649,6 +649,16 @@ pub struct PendingFile {
 }
 
 pub const FILES_EVENT: &str = "mostik://files";
+/// Files are dragged over the window: where, in logical pixels of the window; `None` when the drag ends.
+pub const DRAG_EVENT: &str = "mostik://drag";
+
+/// Files dropped onto the window and where, in logical pixels of the window.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dropped {
+    pub files: Vec<PendingFile>,
+    pub x: f64,
+    pub y: f64,
+}
 /// The custom emoji sets changed.
 pub const EMOJI_EVENT: &str = "mostik://emoji";
 /// The backend showed a notification: play the sound.
@@ -660,6 +670,15 @@ pub struct OpenTarget {
     pub chat_id: ChatId,
     pub ts: Timestamp,
     pub thread_parent: Option<Timestamp>,
+}
+
+/// A file taken off the message: the app no longer keeps a pasted one.
+pub async fn forget_file(path: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        path: &'a str,
+    }
+    call("forget_file", Args { path }).await
 }
 
 pub async fn pick_files() -> Result<Vec<PendingFile>, String> {
@@ -964,25 +983,6 @@ pub async fn add_custom_emoji(
 struct EmojiArgs<'a> {
     chat_id: &'a str,
     ts: Timestamp,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<&'a str>,
-}
-
-/// Renames an own custom emoji; returns the new sets.
-pub async fn rename_custom_emoji(
-    chat_id: &str,
-    ts: Timestamp,
-    name: &str,
-) -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
-    call(
-        "rename_custom_emoji",
-        EmojiArgs {
-            chat_id,
-            ts,
-            name: Some(name),
-        },
-    )
-    .await
 }
 
 /// Deletes an own custom emoji; returns the new sets.
@@ -990,15 +990,7 @@ pub async fn delete_custom_emoji(
     chat_id: &str,
     ts: Timestamp,
 ) -> Result<Vec<mostik_core::custom_emoji::EmojiSet>, String> {
-    call(
-        "delete_custom_emoji",
-        EmojiArgs {
-            chat_id,
-            ts,
-            name: None,
-        },
-    )
-    .await
+    call("delete_custom_emoji", EmojiArgs { chat_id, ts }).await
 }
 
 /// A file the user has just picked, for a preview: the backend serves only picked files.

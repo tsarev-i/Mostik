@@ -328,99 +328,66 @@ fn PrefUpdates() -> impl IntoView {
 }
 
 /// Custom emoji of the organization, as in Slack's "Customize workspace": "Add emoji" opens the
-/// same dialog as the emoji picker; your own can be renamed or deleted.
+/// same dialog as the emoji picker; your own can be deleted.
 #[component]
 fn PrefEmoji() -> impl IntoView {
     let c = ctx();
     let error: RwSignal<Option<String>> = RwSignal::new(None);
-    // The emoji being renamed (its message time) with the new name, and the one to confirm deleting.
-    let renaming: RwSignal<Option<(Timestamp, String)>> = RwSignal::new(None);
+    // The emoji to confirm deleting (its message time).
     let deleting: RwSignal<Option<Timestamp>> = RwSignal::new(None);
     // Runs once Telemost answers, maybe after the preferences closed.
     let done = move |r: Result<Vec<mostik_core::custom_emoji::EmojiSet>, String>| match r {
         Ok(sets) => {
             c.custom.set(sets);
-            renaming.try_set(None);
             deleting.try_set(None);
         }
         Err(e) => {
             error.try_set(Some(e));
         }
     };
-    let row = move |e: mostik_core::custom_emoji::CustomEmoji, chat: ChatId, taken: bool| {
-        let (me, author) = c.snap.with_untracked(|s| {
-            let author = s
-                .user(&e.owner)
-                .filter(|u| u.has_name())
-                .map_or_else(|| tr().unknown_user.to_owned(), |u| u.display_name.clone());
-            (s.me.clone(), author)
-        });
-        let mine = e.owner == me;
-        let ts = e.ts;
-        let code = mostik_core::custom_emoji::caption(&e.name);
-        let old = e.name.clone();
-        let (chat_r, chat_d) = (chat.clone(), chat);
-        let save = move || {
-            let Some((_, n)) = renaming.get_untracked() else { return };
-            let chat = chat_r.clone();
-            spawn_local(async move { done(bridge::rename_custom_emoji(&chat.0, ts, n.trim()).await) });
-        };
-        let save_click = save.clone();
-        let remove = move |_| {
-            let chat = chat_d.clone();
-            spawn_local(async move { done(bridge::delete_custom_emoji(&chat.0, ts).await) });
-        };
-        let actions = mine.then(|| view! {
+    let row =
+        move |e: mostik_core::custom_emoji::CustomEmoji, chat: ChatId, taken: bool| {
+            let (me, author) = c.snap.with_untracked(|s| {
+                let author = s
+                    .user(&e.owner)
+                    .filter(|u| u.has_name())
+                    .map_or_else(|| tr().unknown_user.to_owned(), |u| u.display_name.clone());
+                (s.me.clone(), author)
+            });
+            let mine = e.owner == me;
+            let ts = e.ts;
+            let code = mostik_core::custom_emoji::caption(&e.name);
+            let remove = move |_| {
+                let chat = chat.clone();
+                spawn_local(async move { done(bridge::delete_custom_emoji(&chat.0, ts).await) });
+            };
+            let actions = mine.then(|| view! {
             <span class="emoji-actions">
-                {move || match (renaming.get().is_some_and(|(t, _)| t == ts), deleting.get() == Some(ts)) {
-                    (true, _) => {
-                        let save = save_click.clone();
-                        view! {
-                            <button class="btn small" on:click=move |_| renaming.set(None)>{tr().cancel}</button>
-                            <button class="btn primary small" on:click=move |_| save()>{tr().save}</button>
-                        }.into_any()
-                    }
-                    (_, true) => {
-                        let remove = remove.clone();
-                        view! {
-                            <button class="btn small" on:click=move |_| deleting.set(None)>{tr().cancel}</button>
-                            <button class="btn danger small" on:click=remove>{tr().delete}</button>
-                        }.into_any()
-                    }
-                    _ => {
-                        let old = old.clone();
-                        view! {
-                            <button class="btn small" on:click=move |_| { deleting.set(None); renaming.set(Some((ts, old.clone()))) }>{tr().emoji_rename}</button>
-                            <button class="btn small" on:click=move |_| { renaming.set(None); deleting.set(Some(ts)) }>{tr().delete}</button>
-                        }.into_any()
-                    }
+                {move || if deleting.get() == Some(ts) {
+                    let remove = remove.clone();
+                    view! {
+                        <button class="btn small" on:click=move |_| deleting.set(None)>{tr().cancel}</button>
+                        <button class="btn danger small" on:click=remove>{tr().delete}</button>
+                    }.into_any()
+                } else {
+                    view! {
+                        <button class="btn small" on:click=move |_| deleting.set(Some(ts))>{tr().delete}</button>
+                    }.into_any()
                 }}
             </span>
         });
-        let label = move || match renaming.get().filter(|(t, _)| *t == ts) {
-            Some((_, n)) => {
-                let save = save.clone();
-                view! {
-                    <input class="text-input emoji-name-input" prop:value=n
-                        on:input=move |ev| renaming.set(Some((ts, event_target_value(&ev))))
-                        on:keydown=move |ev: ev::KeyboardEvent| if ev.key() == "Enter" { ev.prevent_default(); save() }/>
-                }
-                .into_any()
+            view! {
+                <div class="emoji-row">
+                    {crate::custom::image(&e, "emoji-preview")}
+                    <span class="emoji-label">
+                        <span class="emoji-code">{code}</span>
+                        <span class="emoji-author">{format!("{} {author}", tr().emoji_author)}</span>
+                        {taken.then(|| view! { <span class="emoji-taken">{tr().emoji_taken}</span> })}
+                    </span>
+                    {actions}
+                </div>
             }
-            None => view! { <span class="emoji-code">{code.clone()}</span> }.into_any(),
         };
-        view! {
-            <div class="emoji-row">
-                {crate::custom::image(&e, "emoji-preview")}
-                <span class="emoji-label">
-                    {label}
-                    <span class="emoji-author">{format!("{} {author}", tr().emoji_author)}</span>
-                    {taken.then(|| view! { <span class="emoji-taken">{tr().emoji_taken}</span> })}
-                </span>
-                {actions}
-            </div>
-        }
-    };
     let list = move || {
         let me = c.snap.with(|s| s.me.clone());
         match crate::custom::current(c) {

@@ -19,11 +19,13 @@ use crate::app::Ctx;
 use crate::bridge;
 
 pub use calls::{call_user, leave_call, start_call};
-pub use chats::{jump_to_message, leave_chat, load_older, mark_chat_read, navigate, open_chat, recount_soon};
+pub use chats::{
+    history_loaded, jump_to_message, leave_chat, load_older, mark_chat_read, navigate, open_chat, recount_soon,
+};
 pub use links::{message_link, open_url};
 pub use messages::{
-    ReplyTarget, delete, edit, forward, mark_unread, pin_message, send, send_files, start_reply, toggle_important,
-    toggle_reaction, typing,
+    ReplyTarget, attach_files, attached, delete, detach_file, edit, forward, mark_unread, pin_message, send,
+    send_files, start_reply, toggle_important, toggle_reaction, typing,
 };
 pub use people::{expire_presence, message_user, open_profile, refresh_me, refresh_presence, set_status};
 pub use session::{apply_boot, install_update, sign_out, subscribe};

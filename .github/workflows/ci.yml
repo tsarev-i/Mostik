@@ -189,11 +189,18 @@ jobs:
           cargo tauri build --ci ${{ matrix.build-args }} \
             --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":true}}'
 
+      # Without the version in the names (Mostik_amd64.AppImage): the README links to
+      # releases/latest/download/<name>, which then always gives the newest bundle.
       - name: Collect bundles
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           shopt -s nullglob
           mkdir -p dist
-          cp target/{,*/}release/bundle/*/*.{AppImage,exe,app.tar.gz}{,.sig} target/{,*/}release/bundle/*/*.dmg dist/
+          for file in target/{,*/}release/bundle/*/*.{AppImage,exe,app.tar.gz}{,.sig} target/{,*/}release/bundle/*/*.dmg; do
+            name=${file##*/}
+            cp "$file" "dist/${name/_${VERSION}_/_}"
+          done
           ls -l dist
 
       - uses: actions/upload-artifact@v7

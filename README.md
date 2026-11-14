@@ -4,6 +4,13 @@
 
 Неофициальный клиент чатов Яндекс Телемоста для Linux, Windows и macOS.
 
+[![Последняя версия](https://img.shields.io/github/v/release/tsarev-i/Mostik?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/tsarev-i/Mostik/releases/latest)
+[![Лицензия MIT](https://img.shields.io/github/license/tsarev-i/Mostik?label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F)](LICENSE)
+[![]()]()
+[![Скачать для Linux (AppImage)](https://img.shields.io/badge/Linux-AppImage-2ea44f?logo=linux&logoColor=white)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_amd64.AppImage)
+[![Скачать для Windows (x64)](https://img.shields.io/badge/Windows-x64-2ea44f?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTAgMGgxMXYxMUgwem0xMyAwaDExdjExSDEzek0wIDEzaDExdjExSDB6bTEzIDBoMTF2MTFIMTN6Ii8+PC9zdmc+)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_x64-setup.exe)
+[![Скачать для macOS (Apple Silicon)](https://img.shields.io/badge/macOS-Apple%20Silicon-2ea44f?logo=apple&logoColor=white)](https://github.com/tsarev-i/Mostik/releases/latest/download/Mostik_aarch64.dmg)
+
 > [!WARNING]
 > Мостик не связан с ООО «Яндекс» и не поддерживается им. Он работает через недокументированный
 > протокол веб-клиента Телемоста, который может измениться в любой момент.
@@ -17,7 +24,7 @@
 - Правка, удаление, реакции, упоминания, отметка «важное», разметка и блоки кода.
 - Ответ на сообщение и цитирование выделенного фрагмента, совместимые с официальным клиентом.
 - Свои emoji в тексте и в реакциях, общие для всех в организации, кто пользуется Мостиком.
-- Файлы и картинки: через «+», перетаскиванием или вставкой из буфера обмена.
+- Файлы и картинки в чате и в треде: через «+», перетаскиванием или вставкой из буфера обмена.
 - Отметки о прочтении, при наведении на время своего сообщения.
 - Обновления в реальном времени, уведомления, значок в трее, статусы и присутствие, «Не беспокоить» вместе с Телемостом.
 - Поиск по загруженным сообщениям (Ctrl+K).
@@ -30,16 +37,12 @@
 |---|---|
 | ![Мостик: светлая тема «Мох», панель действий над сообщением](docs/screenshots/light.png) | ![Мостик: настройки оформления, темы Мостика и классические](docs/screenshots/preferences.png) |
 
-## Установка
+## Обновления
 
-Скачайте файл из [последнего релиза](https://github.com/tsarev-i/Mostik/releases/latest):
+Мостик проверяет релизы на GitHub при запуске и раз в 4 часа. Когда выходит новая версия, в верхней
+панели появляется кнопка «Обновить»; без вашего клика ничего не устанавливается. Обновления подписаны,
+и Мостик проверяет подпись перед установкой. Автоматическую проверку можно выключить в настройках.
 
-- Linux: `Mostik_*_amd64.AppImage`, перед первым запуском `chmod +x`.
-- Windows: установщик `Mostik_*_x64-setup.exe`.
-- macOS (только Apple Silicon, M1 и новее): образ `Mostik_*_aarch64.dmg`, перетащите Мостик в «Программы».
-  Сборка не подписана сертификатом Apple, поэтому при первом запуске macOS его блокирует:
-  разрешите запуск в «Системные настройки -> Конфиденциальность и безопасность -> Всё равно открыть»
-  или выполните `xattr -dr com.apple.quarantine /Applications/Mostik.app`.
 
 ## Вход и данные
 
@@ -55,10 +58,11 @@
 
 Написан на Rust (Tauri 2 и Leptos). Понадобятся Rust 1.94+, цель `wasm32-unknown-unknown`,
 `wasm-bindgen-cli` той же версии, что `wasm-bindgen` в `Cargo.lock`, и `tauri-cli` 2.
-На Linux ещё WebKitGTK 4.1:
+На Linux ещё WebKitGTK 4.1, библиотека значка в трее и ALSA для звуков:
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev   # Debian/Ubuntu
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev   # Debian/Ubuntu
+sudo pacman -S --needed base-devel webkit2gtk-4.1 libayatana-appindicator librsvg alsa-lib rustup   # Arch Linux
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130 --locked
 cargo install tauri-cli --version 2.12.4 --locked
@@ -75,7 +79,7 @@ cargo test --workspace                           # тесты
 На Windows скрипты запускаются из Git Bash. Инструменты разработчика в отладочной сборке
 включаются переменной `MOSTIK_DEVTOOLS=1`. Диагностика подключения (`probe*.json` в каталоге
 данных приложения: структура ответов и шаблоны идентификаторов, без текстов, имён и значений
-cookie) пишется в отладочной сборке, а в релизной — с переменной `MOSTIK_PROBE=1`.
+cookie) пишется в отладочной сборке, а в релизной только с переменной `MOSTIK_PROBE=1`.
 
 | Путь | Что внутри |
 |---|---|
@@ -84,6 +88,11 @@ cookie) пишется в отладочной сборке, а в релизн�
 | `app/ui` | Интерфейс на Leptos (wasm) |
 | `app/src-tauri` | Десктоп-оболочка на Tauri 2: вход, хранение сессии, уведомления, трей |
 | `docs/design.md` | Размеры, цвета и поведение интерфейса |
+
+## Ошибки и предложения
+
+Пишите в [Issues](https://github.com/tsarev-i/Mostik/issues). К ошибке приложите версию Мостика
+(«О программе» в верхней панели), систему и шаги, после которых она появляется.
 
 ## Лицензия
 

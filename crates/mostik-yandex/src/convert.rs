@@ -273,7 +273,9 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
         chat_id,
         ts,
         author: UserId(s(info, &["From", "Guid"]).unwrap_or_default().to_owned()),
-        text: if forwarded.is_empty() || plain.get("Text").is_some() {
+        // A forward without a comment has no text of its own (not "this type is not supported");
+        // a reply's text is its `Text`, or the caption of the pictures it carries.
+        text: if forwarded.is_empty() || plain.get("Text").is_some() || s(plain, &["Gallery", "Text"]).is_some() {
             plain_text(plain)
         } else {
             String::new()
@@ -1852,6 +1854,23 @@ mod tests {
         };
         let to = m.reply_to().expect("a reply");
         assert!(to.text.is_empty() && to.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_reply_with_pictures_keeps_their_caption() {
+        let sm = json!({"ClientMessage": {"Plain": {"ChatId": "0/0/g",
+                "Gallery": {"Items": [{"Image": {"FileInfo": {"Id2": "disk/x1", "Name": "a.png", "Size": 3}, "Width": 8, "Height": 6}}],
+                    "Text": "caption"},
+                "ForwardedMessageRefs": [{"ChatId": "0/0/g", "Timestamp": 42}]}},
+            "ForwardedMessages": [{"Payload": {"ChatId": "0/0/g", "Timestamp": 42, "Text": {"MessageText": "question"}},
+                "ServerMessageInfo": {"From": {"Guid": "a"}, "Timestamp": 42}}],
+            "ServerMessageInfo": {"From": {"Guid": "b"}, "Timestamp": 100}});
+        let Parsed::Message(m) = parse_server_message(&sm, None, None) else {
+            panic!("not a message")
+        };
+        assert!(m.reply_to().is_some());
+        assert_eq!(m.text, "caption");
+        assert_eq!(m.attachments.len(), 1);
     }
 
     #[test]

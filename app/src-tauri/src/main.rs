@@ -187,11 +187,41 @@ fn main() {
             });
         })
         .on_window_event(|window, event| {
-            // Files dropped onto the window, as in Slack, are attached to the message.
-            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
-                let files = backend::allow_files(window.app_handle(), paths);
-                if !files.is_empty() {
-                    let _ = window.app_handle().emit(backend::FILES_EVENT, &files);
+            // Files dropped onto the chat, as in Slack, are attached to the message. The page
+            // learns where the drag is, to highlight the chat and to decide where the files go.
+            // The other windows (the call and sign-in windows) take no files.
+            let tauri::WindowEvent::DragDrop(drag) = event else {
+                return;
+            };
+            if window.label() != "main" {
+                return;
+            }
+            let app = window.app_handle();
+            // The page gets the point in logical pixels of the window. Tauri calls it physical,
+            // but passes on what the webview reports: physical pixels only on Windows; GTK and
+            // AppKit give logical ones, and scaling them again missed the pane under the cursor on
+            // a scaled screen.
+            let scale = if cfg!(windows) {
+                window.scale_factor().unwrap_or(1.0)
+            } else {
+                1.0
+            };
+            let logical = |p: &tauri::PhysicalPosition<f64>| (p.x / scale, p.y / scale);
+            match drag {
+                tauri::DragDropEvent::Enter { position, .. } | tauri::DragDropEvent::Over { position } => {
+                    let _ = app.emit(backend::DRAG_EVENT, Some(logical(position)));
+                }
+                tauri::DragDropEvent::Drop { paths, position } => {
+                    let _ = app.emit(backend::DRAG_EVENT, None::<(f64, f64)>);
+                    let files = backend::allow_files(app, paths);
+                    if !files.is_empty() {
+                        let (x, y) = logical(position);
+                        let dropped = backend::Dropped { files, x, y };
+                        let _ = app.emit(backend::FILES_EVENT, &dropped);
+                    }
+                }
+                _ => {
+                    let _ = app.emit(backend::DRAG_EVENT, None::<(f64, f64)>);
                 }
             }
         })
@@ -219,7 +249,6 @@ fn main() {
             backend::service::custom_emoji,
             backend::service::pick_emoji_image,
             backend::service::add_custom_emoji,
-            backend::service::rename_custom_emoji,
             backend::service::delete_custom_emoji,
             backend::messages::delete_message,
             backend::messages::set_reaction,
@@ -262,6 +291,7 @@ fn main() {
             backend::chats::chat_details,
             backend::files::pick_files,
             backend::files::keep_file,
+            backend::files::forget_file,
             backend::files::send_files,
             backend::presence::presence,
             backend::presence::set_status,

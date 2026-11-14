@@ -368,7 +368,7 @@ impl WebClient {
         message_id: &str,
         filename: &str,
         content_type: &str,
-        bytes: Vec<u8>,
+        bytes: bytes::Bytes,
     ) -> Result<String, WebError> {
         // Like `encodeURI` in the web client: the chat ID goes in with its slashes as is,
         // only the file name is encoded (and a `/` in it is escaped so it cannot break the path).
@@ -377,7 +377,6 @@ impl WebClient {
             FILES_HOST,
             encode_uri_component(filename)
         );
-        let bytes = bytes::Bytes::from(bytes);
         let mut retried = false;
         let (status, body) = loop {
             let csrf = self.csrf_token().await?;

@@ -37,6 +37,12 @@ pub fn image(e: &CustomEmoji, class: &'static str) -> impl IntoView + use<> {
     view! { <img class=class src=bridge::emoji_url(&e.file_id) alt=code.clone() title=code draggable="false"/> }
 }
 
+/// The image of a custom emoji inside a control that has its own tooltip (a reaction says who
+/// reacted): no `title` of its own, which would cover the control's.
+pub fn image_untitled(e: &CustomEmoji, class: &'static str) -> impl IntoView + use<> {
+    view! { <img class=class src=bridge::emoji_url(&e.file_id) alt=ce::caption(&e.name) draggable="false"/> }
+}
+
 /// Emoji names starting with or containing `query`, for the `:` suggestions in the composer.
 pub fn suggest(c: Ctx, query: &str, limit: usize) -> Vec<CustomEmoji> {
     let q = query.to_lowercase();

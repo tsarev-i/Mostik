@@ -16,7 +16,10 @@ pub(super) fn Rail() -> impl IntoView {
     let c = ctx();
     let org = move || org_name(c);
     let initial = move || org_name(c).chars().next().unwrap_or('?').to_string();
-    let me = move || c.snap.with(|s| s.user(&s.me).cloned());
+    // Only what is shown, so that the pictures are not built again with each change of the snapshot.
+    let me_face = Memo::new(move |_| c.snap.with(|s| s.user(&s.me).map(super::avatar::face)));
+    let me = move || me_face.get();
+    let org_picture = Memo::new(move |_| org_avatar(c));
     let item = move |icon: I, label: &'static str, mode: ViewMode| {
         view! {
             <button class="rail-item" class:active=move || c.view.get() == mode || (mode == ViewMode::Home && c.view.get().is_home_page())
@@ -45,9 +48,9 @@ pub(super) fn Rail() -> impl IntoView {
                     c.ctx_menu.set(Some(CtxMenu { x: r.right() + 8.0, y: r.top(), target: CtxTarget::Organizations }));
                 }>
                 {initial}
-                {move || org_avatar(c).map(|id| {
+                {move || org_picture.get().map(|id| {
                     let failed = RwSignal::new(false);
-                    view! { <Show when=move || !failed.get()><img class="ws-img" src=avatar_url(&id, 72) alt="" on:error=move |_| failed.set(true)/></Show> }
+                    view! { <img class="ws-img" src=avatar_url(&id, 72) alt="" hidden=move || failed.get() on:error=move |_| failed.set(true)/> }
                 })}
             </button>
             {item(I::Home, tr().rail_home, ViewMode::Home)}
