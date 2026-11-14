@@ -125,6 +125,9 @@ pub struct Ctx {
     pub folders: Memo<folders::Folders>,
     /// The sidebar sections: the Telemost ones with the folders.
     pub sections: Memo<Vec<Section>>,
+    /// The current organization (see `org::current_org`): what depends on it does not follow
+    /// every change of the snapshot.
+    pub org_now: Memo<Option<Organization>>,
     /// The "New section" / "Rename section" dialog.
     pub folder_edit: RwSignal<Option<FolderEdit>>,
     /// Custom emoji of the user's organizations.

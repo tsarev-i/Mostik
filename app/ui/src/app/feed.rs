@@ -21,8 +21,15 @@ pub(super) fn ChannelHeader() -> impl IntoView {
     let info = Memo::new(move |_| {
         let id = c.current.get();
         c.snap.with(|s| {
-            s.chat(&id)
-                .map(|ch| (ch.clone(), display_title(s, ch), chat_face(s, ch)))
+            // Only what is shown: a new message (the chat's last time, its reads) or the peer's
+            // presence would build it again, and the peer's avatar would blink.
+            s.chat(&id).map(|ch| {
+                (
+                    super::avatar::steady_chat(ch),
+                    display_title(s, ch),
+                    chat_face(s, ch).as_ref().map(super::avatar::face),
+                )
+            })
         })
     });
     view! {
@@ -401,8 +408,15 @@ fn ChannelIntro() -> impl IntoView {
     let info = Memo::new(move |_| {
         let id = c.current.get();
         c.snap.with(|s| {
-            s.chat(&id)
-                .map(|ch| (ch.clone(), display_title(s, ch), chat_face(s, ch)))
+            // Only what is shown: a new message (the chat's last time, its reads) or the peer's
+            // presence would build it again, and the peer's avatar would blink.
+            s.chat(&id).map(|ch| {
+                (
+                    super::avatar::steady_chat(ch),
+                    display_title(s, ch),
+                    chat_face(s, ch).as_ref().map(super::avatar::face),
+                )
+            })
         })
     });
     move || {

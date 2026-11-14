@@ -20,14 +20,7 @@ pub fn org_key(s: &Snapshot, chosen: Option<u64>) -> String {
 
 /// Current organization: the selected one, or the first if none is selected.
 pub(crate) fn current_org(c: Ctx) -> Option<Organization> {
-    let chosen = c.org.get();
-    c.snap.with(|s| {
-        s.organizations
-            .iter()
-            .find(|o| Some(o.id) == chosen)
-            .or(s.organizations.first())
-            .cloned()
-    })
+    c.org_now.get()
 }
 
 pub(super) fn org_name(c: Ctx) -> String {

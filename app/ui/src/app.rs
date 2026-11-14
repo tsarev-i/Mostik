@@ -142,6 +142,16 @@ pub fn App() -> impl IntoView {
         hidden: RwSignal::new(hidden::load()),
         folders: folder_list,
         sections: Memo::new(move |_| snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f)))),
+        org_now: Memo::new(move |_| {
+            let chosen = org.get();
+            snap.with(|s| {
+                s.organizations
+                    .iter()
+                    .find(|o| Some(o.id) == chosen)
+                    .or(s.organizations.first())
+                    .cloned()
+            })
+        }),
         folder_edit: RwSignal::new(None),
         custom: RwSignal::new(vec![]),
         adding_emoji: RwSignal::new(false),

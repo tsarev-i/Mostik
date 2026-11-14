@@ -47,9 +47,11 @@ pub(super) fn MessageRow(
     });
     let mine = author_id == me_id;
     let key = (chat_id.clone(), ts);
+    // Only what the line shows of the author: their presence changes as they write, and the
+    // avatar would be built again and blink.
     let author = {
         let id = author_id.clone();
-        Memo::new(move |_| c.snap.with(|s| s.user(&id).cloned()))
+        Memo::new(move |_| c.snap.with(|s| s.user(&id).map(super::avatar::face)))
     };
     let text = Memo::new(move |_| msg.with(|m| (m.text.clone(), m.edited)));
     let important = Memo::new(move |_| msg.with(|m| m.important));
