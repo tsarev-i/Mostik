@@ -4,6 +4,7 @@
 mod avatar;
 mod composer;
 mod dialogs;
+pub(crate) mod drafts;
 mod feed;
 mod field;
 mod files;
@@ -53,8 +54,8 @@ use profile::{ProfilePane, StatusDialog};
 use rail::Rail;
 use sidebar::{Sidebar, chat_drag_to, chat_drop};
 use state::{
-    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, ctx, empty_snapshot, load_drafts, save_drafts,
-    set_locale, store_width, stored_width,
+    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, ctx, empty_snapshot, set_locale, store_width,
+    stored_width,
 };
 use topbar::TopBar;
 use views::{DraftsView, ThreadPane, ThreadsView};
@@ -95,7 +96,6 @@ pub fn App() -> impl IntoView {
         exhausted: RwSignal::new(HashSet::new()),
         loading_older: RwSignal::new(Default::default()),
         editing: RwSignal::new(None),
-        edit_draft: StoredValue::new(None),
         confirm_delete: RwSignal::new(None),
         confirm_leave: RwSignal::new(None),
         picker: RwSignal::new(None),
@@ -112,7 +112,6 @@ pub fn App() -> impl IntoView {
         highlight: RwSignal::new(None),
         hold_unread: RwSignal::new(None),
         forwarding: RwSignal::new(None),
-        replying: RwSignal::new(None),
         chat_tab: RwSignal::new(ChatTab::Messages),
         browsing: RwSignal::new(false),
         settings,
@@ -122,7 +121,7 @@ pub fn App() -> impl IntoView {
         creating_channel: RwSignal::new(None),
         details: RwSignal::new(None),
         view: RwSignal::new(ViewMode::Home),
-        drafts: RwSignal::new(load_drafts()),
+        drafts: RwSignal::new(drafts::load()),
         profile: RwSignal::new(None),
         profiles: RwSignal::new(std::collections::HashMap::new()),
         pref_tab: RwSignal::new(PrefTab::Notifications),
@@ -160,15 +159,6 @@ pub fn App() -> impl IntoView {
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
-    // A draft lives only while its message is being edited.
-    Effect::new(move |_| {
-        let key = c.editing.with(|e| e.as_ref().map(|m| (m.chat_id.clone(), m.ts)));
-        c.edit_draft.update_value(|d| {
-            if d.as_ref().map(|d| &d.key) != key.as_ref() {
-                *d = None;
-            }
-        });
-    });
     // Preferences: save, apply the language, time format and theme, and pass them to the backend.
     Effect::new(move |_| {
         let st = c.settings.get();
@@ -209,7 +199,7 @@ pub fn App() -> impl IntoView {
         Duration::from_secs(9 * 60),
     );
     set_interval(move || ops::expire_presence(c), Duration::from_secs(60));
-    Effect::new(move |_| c.drafts.with(save_drafts));
+    Effect::new(move |_| c.drafts.with(drafts::save));
     Effect::new(move |_| c.chat_order.with(order::save));
     Effect::new(move |_| c.hidden.with(hidden::save));
     // Sections an earlier Mostik kept in this browser move into Telemost folders, once.
@@ -436,8 +426,7 @@ pub fn App() -> impl IntoView {
             c.prefs.set(false);
         } else if c.about.get_untracked() {
             c.about.set(false);
-        } else if c.replying.with_untracked(Option::is_some) && c.editing.with_untracked(Option::is_none) {
-            c.replying.set(None);
+        } else if c.editing.with_untracked(Option::is_none) && drafts::cancel_reply(c) {
         } else {
             return;
         }

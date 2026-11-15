@@ -493,6 +493,7 @@ pub(super) fn drop_chat(c: Ctx, id: &ChatId) {
     FRESH.with_borrow_mut(|f| f.remove(id));
     set_cursor(id, None);
     stop_older(c, id);
+    crate::app::drafts::forget_chat(c, id);
     c.snap.update(|s| {
         s.chats.retain(|ch| &ch.id != id);
         s.messages.retain(|m| &m.chat_id != id);

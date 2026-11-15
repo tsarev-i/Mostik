@@ -39,7 +39,7 @@ fn with_mention_ids(c: Ctx, text: &str) -> String {
 }
 
 /// What the composer replies to: a message of its chat or thread, and the quoted fragment.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReplyTarget {
     pub msg: Message,
     pub quote: Option<String>,
@@ -69,7 +69,8 @@ impl ReplyTarget {
 pub fn start_reply(c: Ctx, msg: Message, quote: Option<String>) {
     c.editing.set(None);
     let quote = quote.map(|q| q.trim().to_owned()).filter(|q| !q.is_empty());
-    c.replying.set(Some(ReplyTarget { msg, quote }));
+    let key = crate::app::drafts::DraftKey::field(msg.chat_id.clone(), msg.thread_parent);
+    crate::app::drafts::set_reply(c, &key, Some(ReplyTarget { msg, quote }));
 }
 
 pub async fn send(

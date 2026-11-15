@@ -90,7 +90,7 @@ pub(super) fn Sidebar() -> impl IntoView {
                         <span class="sb-icon"><Icon icon=I::Send size=15/></span>
                         <span class="sb-name">{tr().drafts_and_sent}</span>
                         {move || {
-                            let n = c.drafts.with(|d| d.values().filter(|v| !v.trim().is_empty()).count());
+                            let n = c.drafts.with(super::drafts::listed);
                             (n > 0).then(|| view! { <span class="sb-draft-count"><Icon icon=I::Compose size=13/>{n}</span> })
                         }}
                     </button>
@@ -441,7 +441,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                                 filter,
                                 hide_muted,
                                 now,
-                                c.drafts.with(|d| d.get(&ch.id).is_some_and(|t| !t.trim().is_empty())),
+                                c.drafts.with(|d| super::drafts::chat_has_text(d, &ch.id)),
                             )
                     })
                     .filter(|ch| in_current_org(c, ch))
@@ -844,7 +844,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
     };
     let has_draft = {
         let id = id.clone();
-        Memo::new(move |_| c.drafts.with(|d| d.get(&id).is_some_and(|t| !t.trim().is_empty())))
+        Memo::new(move |_| c.drafts.with(|d| super::drafts::chat_has_text(d, &id)))
     };
     let selected = {
         let id = id.clone();

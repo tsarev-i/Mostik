@@ -9,10 +9,11 @@ use leptos::task::spawn_local;
 use mostik_core::*;
 
 use crate::i18n::Lang;
+#[cfg(feature = "demo")]
+use crate::ops;
 use crate::settings::Settings;
-use crate::{bridge, folders, hidden, ops, order, storage, time};
+use crate::{bridge, folders, hidden, order, storage, time};
 
-use super::composer::EditDraft;
 use super::preferences::PrefTab;
 
 /// Where a message is written: a chat, and the parent of the thread for a thread reply.
@@ -42,10 +43,6 @@ pub struct Ctx {
     /// Chats an older history page is being loaded for.
     pub loading_older: RwSignal<std::collections::HashSet<ChatId>>,
     pub editing: RwSignal<Option<Message>>,
-    /// The text being edited, outside the editor: a message line built again (the message list
-    /// shown again after the pinned message, the text changed on another device) picks the
-    /// draft up again.
-    pub edit_draft: StoredValue<Option<EditDraft>>,
     pub confirm_delete: RwSignal<Option<Message>>,
     /// Channel the user is about to leave from the sidebar menu: waits for confirmation.
     pub confirm_leave: RwSignal<Option<ChatId>>,
@@ -71,8 +68,6 @@ pub struct Ctx {
     pub hold_unread: RwSignal<Option<ChatId>>,
     /// Message being forwarded (the "Forward message" dialog).
     pub forwarding: RwSignal<Option<Message>>,
-    /// Message the composer of its chat or thread replies to: the bar above the field.
-    pub replying: RwSignal<Option<ops::ReplyTarget>>,
     /// The tab of the chat header that is open.
     pub chat_tab: RwSignal<ChatTab>,
     /// The "Browse channels" dialog.
@@ -89,8 +84,8 @@ pub struct Ctx {
     pub details: RwSignal<Option<DetailsTab>>,
     /// What is selected in the rail and sidebar: home, direct messages or "Drafts & sent".
     pub view: RwSignal<ViewMode>,
-    /// Per-chat drafts, as in Slack; kept between runs.
-    pub drafts: RwSignal<std::collections::HashMap<ChatId, String>>,
+    /// What every message field has not sent yet: text, caret and reply (see [`super::drafts`]).
+    pub drafts: RwSignal<super::drafts::Drafts>,
     /// Profile open in the right panel and the loaded profiles.
     pub profile: RwSignal<Option<UserId>>,
     pub profiles: RwSignal<std::collections::HashMap<UserId, UserProfile>>,
@@ -370,18 +365,6 @@ impl ViewMode {
     pub fn is_home_page(self) -> bool {
         matches!(self, ViewMode::Drafts | ViewMode::Threads)
     }
-}
-
-const DRAFTS_KEY: &str = "mostik.drafts";
-
-pub(super) fn load_drafts() -> std::collections::HashMap<ChatId, String> {
-    storage::load::<Vec<(ChatId, String)>>(DRAFTS_KEY)
-        .map(|v| v.into_iter().collect())
-        .unwrap_or_default()
-}
-
-pub(super) fn save_drafts(d: &std::collections::HashMap<ChatId, String>) {
-    storage::save(DRAFTS_KEY, &d.iter().collect::<Vec<_>>());
 }
 
 #[derive(Clone, PartialEq)]

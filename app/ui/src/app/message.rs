@@ -553,6 +553,7 @@ fn ReplyBlock(f: Forwarded, chat: ChatId, thread_parent: Option<Timestamp>) -> i
 #[component]
 pub(super) fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
     let c = ctx();
+    let key = super::drafts::DraftKey::field(target.msg.chat_id.clone(), target.msg.thread_parent);
     let m = &target.msg;
     let (name, line) = c.snap.with_untracked(|s| {
         (
@@ -572,7 +573,7 @@ pub(super) fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
                 <span class="reply-author">{label}</span>
                 <span class="reply-line">{line}</span>
             </div>
-            <button class="icon-btn" title=tr().cancel_reply on:click=move |_| c.replying.set(None)>
+            <button class="icon-btn" title=tr().cancel_reply on:click=move |_| super::drafts::set_reply(c, &key, None)>
                 <Icon icon=I::X size=14/>
             </button>
         </div>
