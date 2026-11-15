@@ -19,7 +19,7 @@ pub fn start_call(c: Ctx, chat: ChatId) {
     if let Some(current) = c.call.get_untracked() {
         // One call at a time, as in Slack: bring the current one back instead.
         focus_call(c);
-        if current.chat_id.as_deref() != Some(chat.0.as_str()) {
+        if current.chat_id.as_ref() != Some(&chat) {
             report(c, tr().call_busy.into());
         }
         return;

@@ -38,10 +38,7 @@ fn open_from_notification(app: &AppHandle) {
         if performed.action_id() != "tap" {
             return;
         }
-        let Some(target) = performed
-            .notification()
-            .and_then(|n| backend::OpenTarget::from_extra(n.extra()))
-        else {
+        let Some(target) = performed.notification().and_then(|n| backend::open_target(n.extra())) else {
             return;
         };
         let app = handle.clone();
@@ -310,4 +307,144 @@ fn main() {
                 let _ = std::fs::remove_dir_all(tray_dir());
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use mostik_ipc::cmd;
+
+    /// Tauri knows a command by the name of its function, which the compiler cannot match with
+    /// the `Command` types the UI calls: the handler must register exactly [`cmd::ALL`].
+    #[test]
+    fn registered_commands_are_the_shared_ones() {
+        let src = include_str!("main.rs");
+        let start = src.find("generate_handler![").expect("handler list") + "generate_handler![".len();
+        let end = start + src[start..].find(']').expect("end of the handler list");
+        // A commented-out line is not registered.
+        let list: String = src[start..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut registered: Vec<&str> = list
+            .split(',')
+            .filter_map(|path| path.trim().rsplit("::").next())
+            .filter(|name| !name.is_empty())
+            .collect();
+        registered.sort_unstable();
+        let mut shared: Vec<&str> = cmd::ALL.iter().map(|c| c.name).collect();
+        shared.sort_unstable();
+        assert_eq!(registered, shared);
+    }
+
+    /// The parameters a command may take: the app, its state, the raw request (`keep_file`) and
+    /// its arguments as one struct, [`cmd::ARGS`]. Anything else would be a top-level JSON key
+    /// the UI does not send.
+    const PARAMS: [&str; 4] = ["app", "state", "request", cmd::ARGS];
+
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("source folder") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Splits `params` at the commas outside `<…>` and `(…)`.
+    fn split_params(params: &str) -> Vec<&str> {
+        let (mut depth, mut start, mut out) = (0i32, 0, Vec::new());
+        for (i, c) in params.char_indices() {
+            match c {
+                '<' | '(' => depth += 1,
+                '>' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    out.push(params[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(params[start..].trim());
+        out.into_iter().filter(|p| !p.is_empty()).collect()
+    }
+
+    /// The compiler ties a command function to its `Command` type through `Args<cmd::X>` and
+    /// `Out<cmd::X>`; what it cannot check is checked here: the function is named as the type's
+    /// `NAME`, takes `Args` and returns `Out` of that same type (not another command's), takes
+    /// `args` exactly when the command has JSON arguments, and has no other parameters than
+    /// [`PARAMS`].
+    #[test]
+    fn commands_take_their_shared_args() {
+        // Built from parts, so this test's own text is not taken for a command.
+        let marker = concat!("#[tauri", "::command]");
+        let mut files = Vec::new();
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut seen = Vec::new();
+        for file in files {
+            let src = std::fs::read_to_string(&file).expect("source file");
+            for (at, _) in src.match_indices(marker) {
+                // Only the attribute on a line of its own, not a mention in a comment.
+                let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+                if !src[line_start..at].trim().is_empty() {
+                    continue;
+                }
+                let sig = &src[at + marker.len()..];
+                let sig = &sig[..sig.find('{').expect("function body")];
+                let name_at = sig.find("fn ").expect("fn") + 3;
+                let open = name_at + sig[name_at..].find('(').expect("parameters");
+                let name = sig[name_at..open].trim();
+                let mut depth = 0;
+                let close = open
+                    + sig[open..]
+                        .char_indices()
+                        .find(|&(_, c)| {
+                            depth += match c {
+                                '(' => 1,
+                                ')' => -1,
+                                _ => 0,
+                            };
+                            depth == 0
+                        })
+                        .expect("end of the parameters")
+                        .0;
+                let (mut args, mut request) = (None, false);
+                for param in split_params(&sig[open + 1..close]) {
+                    let (param, ty) = param.split_once(':').expect("typed parameter");
+                    let param = param.trim().trim_start_matches("mut ");
+                    assert!(PARAMS.contains(&param), "{name}: parameter `{param}`");
+                    if param == cmd::ARGS {
+                        args = Some(ty.trim().to_owned());
+                    }
+                    request |= param == "request";
+                }
+                let info = cmd::ALL
+                    .iter()
+                    .find(|c| c.name == name)
+                    .unwrap_or_else(|| panic!("{name}: not in cmd::ALL"));
+                let bare = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+                let ty = info.ty;
+                // `()` takes nothing; `RawBody` (`keep_file`) reads the raw request instead.
+                let expected_args = (!matches!(info.args, "()" | "RawBody")).then(|| format!("Args<cmd::{ty}>"));
+                assert_eq!(args.map(|a| bare(&a)), expected_args, "{name}: arguments");
+                // The raw request is for a command whose body is not JSON, and such a command needs it.
+                assert_eq!(request, info.args == "RawBody", "{name}: `request` parameter");
+                let ret = bare(sig[close + 1..].trim().strip_prefix("->").unwrap_or(""));
+                assert!(
+                    ret == format!("Result<Out<cmd::{ty}>,String>") || ret == format!("Out<cmd::{ty}>"),
+                    "{name}: returns `{ret}`, not `Out<cmd::{ty}>`"
+                );
+                seen.push(name.to_owned());
+            }
+        }
+        seen.sort_unstable();
+        let mut all: Vec<String> = cmd::ALL.iter().map(|c| c.name.to_owned()).collect();
+        all.sort_unstable();
+        assert_eq!(seen, all);
+    }
 }

@@ -36,6 +36,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "windows-native", "apple-native"] }
 mime_guess = "2"
 mostik-core.workspace = true
+mostik-ipc.workspace = true
 mostik-yandex.workspace = true
 # Notification sounds, played here rather than in the webview: WebKitGTK plays audio through
 # GStreamer, which the AppImage does not carry, and may hold back audio of a hidden window.

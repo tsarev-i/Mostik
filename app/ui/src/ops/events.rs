@@ -107,6 +107,8 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             c.snap.update(|s| learn_users(s, users));
             merge_threads(c, threads);
         }
+        // The backend normally swallows it and sends `ChatAdded` instead.
+        LiveEvent::Joined { .. } => {}
         LiveEvent::ChatRemoved { chat_id } => drop_chat(c, &chat_id),
         LiveEvent::ChatChanged {
             chat_id,

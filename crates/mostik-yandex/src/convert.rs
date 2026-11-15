@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 
 use mostik_core::*;
-use serde::Serialize;
 use serde_json::{Value, json};
 
 fn s<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
@@ -654,119 +653,8 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
     (out, users.into_values().collect())
 }
 
-/// UI event built from a Xiva push.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum LiveEvent {
-    /// New or changed message; `author` in case the UI does not know the sender, `mentioned`
-    /// for the names of the people it mentions.
-    Upsert {
-        message: Box<Message>,
-        author: Option<User>,
-        mentioned: Vec<User>,
-    },
-    /// A message was deleted; `thread_parent` is set for a thread reply.
-    Deleted {
-        chat_id: ChatId,
-        ts: Timestamp,
-        thread_parent: Option<Timestamp>,
-    },
-    Typing {
-        chat_id: ChatId,
-        user: UserId,
-    },
-    /// Resulting reactions of a message after someone changed them; `users` are the people
-    /// who reacted, for their names.
-    Reactions {
-        chat_id: ChatId,
-        ts: Timestamp,
-        reactions: Vec<Reaction>,
-        users: Vec<User>,
-    },
-    /// The user read the chat (possibly on another device).
-    Seen {
-        chat_id: ChatId,
-    },
-    /// Someone else read the chat up to message `ts`; `reads` are that message's counters, if
-    /// it is the user's.
-    PeerSeen {
-        chat_id: ChatId,
-        user: UserId,
-        ts: Timestamp,
-        reads: Option<Reads>,
-    },
-    /// The user read the thread of message `parent` in `chat_id` (possibly on another device).
-    ThreadSeen {
-        chat_id: ChatId,
-        parent: Timestamp,
-    },
-    /// A person came online (their `Heartbeat` arrived).
-    Online {
-        user: UserId,
-    },
-    /// A person changed their availability or custom status.
-    Status(PresenceInfo),
-    /// A message was pinned in the chat (`ts`) or unpinned (`None`).
-    Pinned {
-        chat_id: ChatId,
-        ts: Option<Timestamp>,
-    },
-    /// A chat the list did not have yet, for example a direct chat someone has just started:
-    /// it goes into `section`; `users` are people the UI may not know yet.
-    ChatAdded {
-        chat: Chat,
-        section: String,
-        users: Vec<User>,
-    },
-    /// The connection to Telemost went up or down.
-    Connection {
-        online: bool,
-    },
-    /// Directory profiles (photo, position, real name) of authors that came with a history page.
-    Users {
-        users: Vec<User>,
-    },
-    /// The followed threads fetched again after a reply in a thread the list did not have.
-    Threads {
-        threads: Vec<FollowedThread>,
-        users: Vec<User>,
-    },
-    /// The user is in a new chat: created it, was added to it, or someone started a direct chat.
-    /// The backend fetches the chat and sends [`LiveEvent::ChatAdded`]; the UI never gets this.
-    Joined {
-        chat_id: ChatId,
-    },
-    /// The user left the chat or was removed from it.
-    ChatRemoved {
-        chat_id: ChatId,
-    },
-    /// The chat's name, description or member count changed; `None` is "not reported".
-    ChatChanged {
-        chat_id: ChatId,
-        name: Option<String>,
-        description: Option<String>,
-        member_count: Option<u32>,
-    },
-    /// The chat folders of every organization, after a change on any device.
-    Folders {
-        folders: Vec<ChatFolder>,
-    },
-    /// The pinned ("starred") chats, after a change on any device.
-    Starred {
-        chats: Vec<ChatId>,
-    },
-    /// What every chat notifies about, after a change on any device: chats not listed notify
-    /// about everything.
-    Mutings {
-        chats: Vec<(ChatId, NotifyLevel)>,
-    },
-    /// A call in a chat changed: people joined or left, or it ended.
-    Meeting(Meeting),
-    /// Notifications were paused or resumed ("Do not disturb"), on any device.
-    Paused {
-        pause: Option<Pause>,
-    },
-}
+/// UI event built from a Xiva push; the type is shared with the UI.
+pub use mostik_core::event::LiveEvent;
 
 /// Parses the body of a `delivery` push. `None` means the event is not of interest yet.
 pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {

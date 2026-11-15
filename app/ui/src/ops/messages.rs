@@ -83,7 +83,7 @@ pub async fn send(
     let me = c.snap.with_untracked(|s| s.me.clone());
     let reply_ref = reply.as_ref().map(|r| bridge::ReplyRef {
         ts: r.msg.ts,
-        quote: r.quote.as_deref(),
+        quote: r.quote.clone(),
     });
     let mut message = if c.live {
         bridge::send_message(&chat.0, &text, thread, reply_ref).await?

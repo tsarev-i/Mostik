@@ -4,6 +4,7 @@
 use std::sync::Mutex as StdMutex;
 
 use mostik_core::{Message, NotifyLevel, User};
+use mostik_ipc::cmd::{self, Args, Out, SoundArgs};
 use mostik_yandex::clock;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -144,7 +145,8 @@ pub(super) fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, au
 
 /// Plays a notification sound: the preview in the preferences.
 #[tauri::command]
-pub fn play_sound(id: String) {
+pub fn play_sound(args: Args<cmd::PlaySound>) -> Out<cmd::PlaySound> {
+    let SoundArgs { id } = args;
     crate::sound::play(&id);
 }
 
@@ -176,7 +178,7 @@ fn notification_icon(app: &AppHandle) -> Option<String> {
 
 /// "Show an example" in the notification preferences.
 #[tauri::command]
-pub fn test_notification(app: AppHandle) -> Result<(), String> {
+pub fn test_notification(app: AppHandle) -> Result<Out<cmd::TestNotification>, String> {
     let mut builder = app
         .notification()
         .builder()
