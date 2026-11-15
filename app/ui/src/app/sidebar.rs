@@ -341,7 +341,7 @@ fn found(s: &Snapshot, ch: &Chat, query: &str) -> bool {
         || notes.is_some_and(|n| n.contains(&query))
 }
 
-/// Whether "Find a conversation" finds anything in the sidebar sections.
+/// Whether "Find a conversation" finds anything in the sidebar sections, hidden chats included.
 fn any_found(c: Ctx) -> bool {
     c.sb_query.with(|q| {
         c.sections.with(|list| {
@@ -349,7 +349,7 @@ fn any_found(c: Ctx) -> bool {
                 list.iter()
                     .flat_map(|sec| sec.chats.iter())
                     .filter_map(|id| s.chat(id))
-                    .any(|ch| in_current_org(c, ch) && !c.hidden.with(|h| hidden::hides(h, ch)) && found(s, ch, q))
+                    .any(|ch| in_current_org(c, ch) && found(s, ch, q))
             })
         })
     })
@@ -445,7 +445,8 @@ fn SidebarSection(section: Section) -> impl IntoView {
                             )
                     })
                     .filter(|ch| in_current_org(c, ch))
-                    .filter(|ch| !c.hidden.with(|h| hidden::hides(h, ch)))
+                    // "Find a conversation" finds hidden chats too: opening one brings it back.
+                    .filter(|ch| !query.is_empty() || !c.hidden.with(|h| hidden::hides(h, ch)))
                     .map(|ch| ch.id.clone())
                     .collect::<Vec<_>>()
             })
