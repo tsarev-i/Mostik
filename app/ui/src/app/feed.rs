@@ -13,7 +13,7 @@ use crate::{ops, time};
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_badge};
 use super::menus::open_menu_below_end;
 use super::message::MessageRow;
-use super::state::{Ctx, CtxMenu, CtxTarget, DetailsTab, close_menus, ctx};
+use super::state::{ChatTab, Ctx, CtxMenu, CtxTarget, DetailsTab, close_menus, ctx};
 
 #[component]
 pub(super) fn ChannelHeader() -> impl IntoView {
@@ -114,12 +114,15 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                 </div>
             </div>
             <nav class="ch-tabs">
-                <button class="tab" class:active=move || !c.pins_tab.get() on:click=move |_| c.pins_tab.set(false)>
+                <button class="tab" class:active=move || c.chat_tab.get() == ChatTab::Messages on:click=move |_| c.chat_tab.set(ChatTab::Messages)>
                     <Icon icon=I::Chat size=14/><span>{tr().tab_messages}</span>
+                </button>
+                <button class="tab" class:active=move || c.chat_tab.get() == ChatTab::Files on:click=move |_| c.chat_tab.set(ChatTab::Files)>
+                    <Icon icon=I::Files size=14/><span>{tr().tab_files}</span>
                 </button>
                 // Like the "Pins" tab in Slack: only if the chat has a pinned message.
                 {move || info.get().and_then(|(ch, _, _)| ch.pinned).map(|_| view! {
-                    <button class="tab" class:active=move || c.pins_tab.get() on:click=move |_| c.pins_tab.set(true)>
+                    <button class="tab" class:active=move || c.chat_tab.get() == ChatTab::Pins on:click=move |_| c.chat_tab.set(ChatTab::Pins)>
                         <Icon icon=I::Pin size=14/><span>{tr().tab_pins}</span>
                     </button>
                 })}
@@ -402,7 +405,7 @@ pub(super) fn PinsView() -> impl IntoView {
     Effect::new(move |_| {
         if let Some((id, ts, None)) = data.get() {
             ops::jump_to_message(c, id, ts, None);
-            c.pins_tab.set(true);
+            c.chat_tab.set(ChatTab::Pins);
         }
     });
     view! {
@@ -412,7 +415,7 @@ pub(super) fn PinsView() -> impl IntoView {
                 Some((id, ts, Some(m))) => view! {
                     <div class="pin-card">
                         <MessageRow msg=m grouped=false/>
-                        <button class="link" on:click=move |_| { c.pins_tab.set(false); ops::jump_to_message(c, id.clone(), ts, None); }>{tr().view_in_chat}</button>
+                        <button class="link" on:click=move |_| { c.chat_tab.set(ChatTab::Messages); ops::jump_to_message(c, id.clone(), ts, None); }>{tr().view_in_chat}</button>
                     </div>
                 }.into_any(),
                 Some((_, _, None)) => view! { <div class="loading-older"><div class="spinner small"></div></div> }.into_any(),

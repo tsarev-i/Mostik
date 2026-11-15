@@ -6,6 +6,7 @@ mod composer;
 mod dialogs;
 mod feed;
 mod field;
+mod files;
 mod menus;
 mod message;
 mod org;
@@ -35,7 +36,7 @@ pub(crate) use avatar::{Avatar, display_title};
 pub(crate) use field::{place_caret, selection, wrap_selection};
 pub(crate) use org::current_org;
 pub use org::org_key;
-pub use state::{Ctx, Phase, ViewMode, enter_sends};
+pub use state::{ChatTab, Ctx, Phase, ViewMode, enter_sends};
 
 use avatar::HoverTip;
 use composer::Composer;
@@ -44,6 +45,7 @@ use dialogs::{
     ForwardDialog, LeaveDialog, NewMessageDialog,
 };
 use feed::{ChannelHeader, MessageList, PinsView};
+use files::FilesView;
 use menus::ContextMenu;
 use org::ORG_KEY;
 use preferences::{AddEmojiDialog, PrefTab, PreferencesDialog};
@@ -111,7 +113,7 @@ pub fn App() -> impl IntoView {
         hold_unread: RwSignal::new(None),
         forwarding: RwSignal::new(None),
         replying: RwSignal::new(None),
-        pins_tab: RwSignal::new(false),
+        chat_tab: RwSignal::new(ChatTab::Messages),
         browsing: RwSignal::new(false),
         settings,
         status_dialog: RwSignal::new(false),
@@ -619,10 +621,10 @@ fn Workspace() -> impl IntoView {
                         } else {
                             view! {
                                 <ChannelHeader/>
-                                {move || if c.pins_tab.get() {
-                                    view! { <PinsView/> }.into_any()
-                                } else {
-                                    view! { <MessageList/><Composer/> }.into_any()
+                                {move || match c.chat_tab.get() {
+                                    ChatTab::Pins => view! { <PinsView/> }.into_any(),
+                                    ChatTab::Files => view! { <FilesView/> }.into_any(),
+                                    ChatTab::Messages => view! { <MessageList/><Composer/> }.into_any(),
                                 }}
                             }.into_any()
                         }}

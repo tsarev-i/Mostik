@@ -73,8 +73,8 @@ pub struct Ctx {
     pub forwarding: RwSignal<Option<Message>>,
     /// Message the composer of its chat or thread replies to: the bar above the field.
     pub replying: RwSignal<Option<ops::ReplyTarget>>,
-    /// The "Pinned" tab in the chat header is open.
-    pub pins_tab: RwSignal<bool>,
+    /// The tab of the chat header that is open.
+    pub chat_tab: RwSignal<ChatTab>,
     /// The "Browse channels" dialog.
     pub browsing: RwSignal<bool>,
     pub settings: RwSignal<Settings>,
@@ -343,6 +343,15 @@ pub fn enter_sends() -> bool {
 pub enum DetailsTab {
     About,
     Members,
+}
+
+/// The tabs of the chat header, as in Slack: the messages, the pinned message, the files.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatTab {
+    #[default]
+    Messages,
+    Pins,
+    Files,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

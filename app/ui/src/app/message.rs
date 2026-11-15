@@ -579,6 +579,17 @@ pub(super) fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
     }
 }
 
+/// Saves attachment `id` named `name` to "Downloads" and shows it in its folder, as a click on its
+/// card does; the toast says where it went.
+pub(super) fn save_attachment(c: Ctx, id: String, name: String) {
+    spawn_local(async move {
+        match bridge::save_file(&id, &name).await {
+            Ok(path) => c.notice.set(Some(format!("{}: {path}", tr().saved_to))),
+            Err(e) => ops::failed(c, tr().err_download, e),
+        }
+    });
+}
+
 pub(super) fn human_size(bytes: u64) -> String {
     tr().size(bytes)
 }
@@ -639,15 +650,7 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
                     }.into_any();
                 }
                 let (id, name) = (a.file_id.clone(), a.name.clone());
-                let download = move |_| {
-                    let (id, name) = (id.clone(), name.clone());
-                    spawn_local(async move {
-                        match bridge::save_file(&id, &name).await {
-                            Ok(path) => c.notice.set(Some(format!("{}: {path}", tr().saved_to))),
-                            Err(e) => ops::failed(c, tr().err_download, e),
-                        }
-                    });
-                };
+                let download = move |_| save_attachment(c, id.clone(), name.clone());
                 view! {
                     <button class="file-card" title=tr().download on:click=download>
                         <span class="file-icon"><Icon icon=I::Files size=22/></span>

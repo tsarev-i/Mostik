@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use mostik_core::*;
 
-use crate::app::Ctx;
+use crate::app::{ChatTab, Ctx};
 use crate::bridge;
 use crate::i18n::tr;
 
@@ -21,7 +21,7 @@ pub fn open_chat(c: Ctx, id: ChatId) {
     let in_front = c.current.get_untracked() == id
         && (!c.live || history_loaded(&id))
         && !c.view.get_untracked().is_home_page()
-        && !c.pins_tab.get_untracked()
+        && c.chat_tab.get_untracked() == ChatTab::Messages
         && !c.hidden.with_untracked(|h| h.contains_key(&id));
     if in_front {
         return;
@@ -172,7 +172,7 @@ fn add_older_page(c: Ctx, id: &ChatId, before: Timestamp, page: bridge::HistoryP
 /// if the chat history needs to be loaded from the server.
 fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
     c.hold_unread.set(None);
-    c.pins_tab.set(false);
+    c.chat_tab.set(ChatTab::Messages);
     let prev = c.current.get_untracked();
     if record && !prev.0.is_empty() && prev != id {
         c.nav_back.update(|b| {
@@ -285,6 +285,11 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
     let load = if same {
         if c.view.get_untracked().is_home_page() {
             c.view.set(crate::app::ViewMode::Home);
+        }
+        // The message is shown in the list: the "Files" tab gives way to it. ("Pinned" loads its
+        // message this way and stays.)
+        if c.chat_tab.get_untracked() == ChatTab::Files {
+            c.chat_tab.set(ChatTab::Messages);
         }
         false
     } else {
