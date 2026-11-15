@@ -9,7 +9,8 @@ use crate::bridge;
 use crate::i18n::tr;
 
 use super::chats::open_chat;
-use super::{failed, now_mcs};
+use super::snapshot::sort_sections;
+use super::{failed, learn_users, now_mcs};
 
 /// Opens the "Profile" panel (in place of the thread, as in Slack) and loads data from the directory.
 pub fn open_profile(c: Ctx, user: UserId) {
@@ -49,21 +50,39 @@ pub fn message_user(c: Ctx, user: UserId) {
     }
     spawn_local(async move {
         match bridge::open_dm(&user.0).await {
-            Ok(chat) => {
-                let id = chat.id.clone();
-                c.snap.update(|s| {
-                    if s.chat(&id).is_none() {
-                        s.chats.push(chat);
-                        if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == "dms") {
-                            sec.chats.push(id.clone());
-                        }
-                    }
-                });
-                open_chat(c, id);
-            }
+            Ok(dm) => open_chat(c, add_direct_chat(c, dm)),
             Err(e) => failed(c, tr().err_open_dm, e),
         }
     });
+}
+
+/// Puts a direct chat `open_dm` opened into the list, with its peer: a new chat is in neither
+/// until the next start. A name or photo the directory did not give comes from the profile the
+/// user opened the chat from. Returns the chat's id.
+pub(super) fn add_direct_chat(c: Ctx, dm: mostik_ipc::DirectChat) -> ChatId {
+    let mostik_ipc::DirectChat { chat, mut peer } = dm;
+    if let Some(p) = c.profiles.with_untracked(|m| m.get(&peer.id).cloned()) {
+        if !peer.has_name() && !p.display_name.is_empty() {
+            peer.display_name = p.display_name;
+        }
+        peer.avatar = peer.avatar.or(p.avatar);
+    }
+    let id = chat.id.clone();
+    c.snap.update(|s| {
+        learn_users(s, vec![peer]);
+        if s.chat(&id).is_some() {
+            return;
+        }
+        let section = chat.home_section();
+        if let Some(sec) = s.sections.iter_mut().find(|sec| sec.id == section)
+            && !sec.chats.contains(&id)
+        {
+            sec.chats.push(id.clone());
+        }
+        s.chats.push(chat);
+        sort_sections(s);
+    });
+    id
 }
 
 /// How long after a pushed `Heartbeat` a person stays online, whatever a poll says

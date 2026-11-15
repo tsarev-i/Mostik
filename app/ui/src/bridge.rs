@@ -280,7 +280,7 @@ pub async fn user_profile(guid: &str) -> Result<mostik_core::UserProfile, String
     .await
 }
 
-pub async fn open_dm(guid: &str) -> Result<mostik_core::Chat, String> {
+pub async fn open_dm(guid: &str) -> Result<mostik_ipc::DirectChat, String> {
     call::<cmd::OpenDm>(cmd::GuidArgs {
         guid: UserId(guid.into()),
     })

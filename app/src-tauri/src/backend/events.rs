@@ -242,7 +242,7 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
             }
             // Known from now on even if the fetch failed: its messages are not held again.
             None => {
-                sh.titles.insert(chat_id.clone(), String::new());
+                sh.titles.entry(chat_id.clone()).or_default();
             }
         }
         // Emitted under the lock: events that arrive meanwhile wait and come after these.

@@ -92,7 +92,7 @@ pub fn call_user(c: Ctx, user: UserId) {
     }
     spawn_local(async move {
         match bridge::open_dm(&user.0).await {
-            Ok(chat) => start_call(c, chat.id),
+            Ok(dm) => start_call(c, super::people::add_direct_chat(c, dm)),
             Err(e) => failed(c, tr().err_open_dm, e),
         }
     });

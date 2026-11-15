@@ -108,9 +108,17 @@ impl Shared {
     }
 
     /// A chat the user is in from now on: `title` for its notifications, and its name for
-    /// `@channel` mentions if it is public.
+    /// `@channel` mentions if it is public. A stand-in title (none, or an unknown person's) does
+    /// not replace a real one: two fetches of a new chat may end in any order.
     fn note_chat(&mut self, chat: &Chat, title: String) {
-        self.titles.insert(chat.id.0.clone(), title);
+        let stand_in = title.is_empty() || title == mostik_core::UNKNOWN_USER;
+        let known = self
+            .titles
+            .get(&chat.id.0)
+            .is_some_and(|t| !t.is_empty() && t != mostik_core::UNKNOWN_USER);
+        if !(stand_in && known) {
+            self.titles.insert(chat.id.0.clone(), title);
+        }
         let public = chat.kind == ChatKind::Group { public: true };
         if public && !chat.name.is_empty() && !self.channels.contains(&chat.name) {
             self.channels.push(chat.name.clone());
@@ -336,5 +344,31 @@ fn rpc_ok(v: &Value) -> Result<(), String> {
         let code = v.pointer("/data/code").and_then(Value::as_str).unwrap_or("?");
         let text = v.pointer("/data/text").and_then(Value::as_str).unwrap_or("");
         Err(format!("Telemost: {code} {text}").trim().to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two fetches of a new direct chat may end in any order: a later one that did not learn the
+    /// name leaves the name the other one recorded.
+    #[test]
+    fn a_stand_in_title_does_not_replace_a_name() {
+        let chat = Chat::new(
+            ChatId("u0_u1".into()),
+            ChatKind::Direct {
+                peer: UserId("u1".into()),
+            },
+        );
+        let mut sh = Shared::default();
+        sh.note_chat(&chat, String::new());
+        assert_eq!(sh.titles["u0_u1"], "");
+        sh.note_chat(&chat, "Ann".into());
+        sh.note_chat(&chat, mostik_core::UNKNOWN_USER.into());
+        sh.note_chat(&chat, String::new());
+        assert_eq!(sh.titles["u0_u1"], "Ann");
+        sh.note_chat(&chat, "Anna".into());
+        assert_eq!(sh.titles["u0_u1"], "Anna");
     }
 }

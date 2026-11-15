@@ -475,7 +475,7 @@ commands! {
 
     // People and chats.
     UserProfile = "user_profile", GuidArgs => mostik_core::UserProfile;
-    OpenDm = "open_dm", GuidArgs => Chat;
+    OpenDm = "open_dm", GuidArgs => crate::DirectChat;
     SearchPeople = "search_people", PeopleSearchArgs => Vec<mostik_core::UserProfile>;
     SearchMessages = "search_messages", MessageSearchArgs => FoundMessages;
     CreateChannel = "create_channel", CreateChannelArgs => Chat;

@@ -12,7 +12,7 @@ use mostik_yandex::convert;
 use serde_json::{Value, json};
 use tauri::AppHandle;
 
-use super::{AppState, Live, live, rpc, rpc_ok, service, web_error};
+use super::{AppState, Live, fill_profiles, live, rpc, rpc_ok, service, web_error};
 
 /// A person's profile for the "Profile" panel.
 #[tauri::command]
@@ -33,7 +33,8 @@ pub async fn user_profile(
         .ok_or_else(|| "profile not found".to_owned())
 }
 
-/// Direct chat with a person: existing or new (`create_private_chat` is idempotent).
+/// Direct chat with a person: existing or new (`create_private_chat` is idempotent), with the
+/// person's name and photo from the directory: a new chat and its peer are not in the UI's list yet.
 #[tauri::command]
 pub async fn open_dm(state: tauri::State<'_, AppState>, args: Args<cmd::OpenDm>) -> Result<Out<cmd::OpenDm>, String> {
     let GuidArgs { guid: UserId(guid) } = args;
@@ -51,8 +52,34 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, args: Args<cmd::OpenDm>)
         member_count: 2,
         ..Chat::new(ChatId(id.to_owned()), convert::chat_kind(id, Some(&live.me), false))
     };
-    note_chat(&live, &chat);
-    Ok(chat)
+    let peer = match &chat.kind {
+        ChatKind::Direct { peer } => peer.clone(),
+        _ => live.me.clone(),
+    };
+    let mut users = [User::named(peer, "")];
+    fill_profiles(&live.web, &mut users).await;
+    let [mut peer] = users;
+    if let Ok(mut sh) = live.shared.lock() {
+        if !peer.has_name()
+            && let Some(name) = sh.names.get(&peer.id.0)
+        {
+            peer.display_name = name.clone();
+        }
+        // A chat without a name is not recorded: the `StateSync` about it or its first message
+        // fetches it again, and the name with it, for the list and the notifications.
+        if peer.has_name() {
+            sh.learn_names([&peer]);
+            let title = match chat.kind {
+                ChatKind::Direct { .. } => peer.display_name.clone(),
+                _ => mostik_core::group_label(&chat.name),
+            };
+            sh.note_chat(&chat, title);
+        }
+    }
+    if !peer.has_name() {
+        peer.display_name = mostik_core::UNKNOWN_USER.into();
+    }
+    Ok(mostik_ipc::DirectChat { chat, peer })
 }
 
 /// Group details from `get_chats_info` (`{chat_ids: [...]}`).

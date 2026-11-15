@@ -11,7 +11,7 @@ pub mod cmd;
 
 use serde::{Deserialize, Serialize};
 
-use mostik_core::{ChatId, FollowedThread, Message, Snapshot, Timestamp, User};
+use mostik_core::{Chat, ChatId, FollowedThread, Message, Snapshot, Timestamp, User};
 
 /// Result of `bootstrap` and `login`: either the login screen or a ready snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +49,16 @@ pub struct Threads {
 pub struct FoundMessages {
     pub messages: Vec<Message>,
     pub users: Vec<User>,
+}
+
+/// A direct chat `open_dm` opened and the person it is with, as the directory knows them: a new
+/// chat is not in the list yet, nor may the person be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectChat {
+    pub chat: Chat,
+    /// The peer, or the user for the chat with oneself. The name is [`mostik_core::UNKNOWN_USER`]
+    /// when nobody knows it.
+    pub peer: User,
 }
 
 /// A chat's name, description, the user's role in it and its member count.
@@ -245,10 +255,10 @@ mod tests {
         );
     }
 
-    /// Pins only the keys of these two: `Message` and `User` are `mostik-core` types, and `User`
-    /// is pinned in `history_page_and_chat_details`.
+    /// Pins only the keys of these: `Chat`, `Message` and `User` are `mostik-core` types, and
+    /// `User` is pinned in `history_page_and_chat_details`.
     #[test]
-    fn threads_and_found_messages_keep_their_field_names() {
+    fn threads_found_messages_and_direct_chat_keep_their_field_names() {
         let ann = || User::named(UserId("u1".into()), "Ann");
         let ann_json = serde_json::to_value(ann()).unwrap();
         pinned(
@@ -263,7 +273,13 @@ mod tests {
                 messages: vec![],
                 users: vec![ann()],
             },
-            json!({ "messages": [], "users": [ann_json] }),
+            json!({ "messages": [], "users": [ann_json.clone()] }),
+        );
+        let chat = mostik_core::Chat::new(chat("u0_u1"), mostik_core::ChatKind::Direct { peer: ann().id });
+        let chat_json = serde_json::to_value(&chat).unwrap();
+        pinned(
+            DirectChat { chat, peer: ann() },
+            json!({ "chat": chat_json, "peer": ann_json }),
         );
     }
 
