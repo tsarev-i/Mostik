@@ -11,13 +11,12 @@ use mostik_core::*;
 
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::text_edit::utf16_len;
 use crate::{bridge, ops};
 
 use super::avatar::Avatar;
 use super::feed::typing_line;
-use super::field::{
-    Suggestion, emoji_query, insert_text, mention_query, mention_suggestions, place_caret, selection, utf16_len,
-};
+use super::field::{Suggestion, emoji_query, insert_text, mention_query, mention_suggestions, place_caret, selection};
 use super::message::{ReplyBar, human_size};
 use super::state::{ctx, enter_sends};
 
@@ -127,36 +126,27 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
     view! {
         <div class="inline-edit" on:click=|e| e.stop_propagation()>
             <div class="inline-edit-box">
-                <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
-                    on:input=move |_| {
+                <crate::compose::FieldArea field
+                    on_input=move |t: String| {
+                        text.set(t);
                         if let Some(el) = area.get_untracked() {
-                            text.set(crate::editor::tidy(&el, &crate::custom::lookup(c)));
                             reveal_editor(&el);
                         }
                     }
-                    on:beforeinput=move |e: ev::InputEvent| {
-                        if let Some(el) = area.get_untracked() {
-                            crate::editor::before_input(&el, &e, &crate::custom::lookup(c));
+                    on_key=move |e: ev::KeyboardEvent| match e.key().as_str() {
+                        "Escape" => { e.prevent_default(); e.stop_propagation(); cancel(); }
+                        "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
+                            e.prevent_default();
+                            save_key();
                         }
-                    }
-                    on:paste=move |e: ev::ClipboardEvent| { field.paste_link(&e); }
-                    on:keydown=move |e: ev::KeyboardEvent| {
-                        if e.is_composing() || field.hotkey(&e) { return; }
-                        match e.key().as_str() {
-                            "Escape" => { e.prevent_default(); e.stop_propagation(); cancel(); }
-                            "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
-                                e.prevent_default();
-                                save_key();
+                        "Enter" => {
+                            e.prevent_default();
+                            if let Some(el) = area.get_untracked() {
+                                text.set(insert_text(&el, "\n", 0));
                             }
-                            "Enter" => {
-                                e.prevent_default();
-                                if let Some(el) = area.get_untracked() {
-                                    text.set(insert_text(&el, "\n", 0));
-                                }
-                            }
-                            _ => {}
                         }
-                    }></div>
+                        _ => {}
+                    }/>
                 <crate::compose::FormatBar field emoji=true/>
             </div>
             <div class="inline-edit-actions">
@@ -399,9 +389,6 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         crate::compose::attach_dropped(c);
     }
     let on_key = move |ev: web_sys::KeyboardEvent| {
-        if ev.is_composing() || field.hotkey(&ev) {
-            return;
-        }
         let n = suggestions.with_untracked(Vec::len);
         if n > 0 {
             match ev.key().as_str() {
@@ -494,15 +481,10 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 // the chat, and so the attribute, changes.
                 <div class="editor-box">
                     <div class="editor-placeholder" hidden=move || !draft.with(String::is_empty)>{placeholder}</div>
-                    <div
-                        class="editor"
-                        node_ref=area
-                        contenteditable="plaintext-only"
-                        role="textbox"
-                        aria-multiline="true"
-                        aria-placeholder=placeholder
-                        on:input=move |_| {
-                            let Some(text) = area.get_untracked().map(|el| crate::editor::tidy(&el, &crate::custom::lookup(c))) else { return };
+                    <crate::compose::FieldArea
+                        field
+                        placeholder=Signal::derive(placeholder)
+                        on_input=move |text: String| {
                             remember(&text);
                             set_draft.set(text);
                             ops::typing(c, c.current.get_untracked());
@@ -525,19 +507,10 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                             suggest_sel.set(0);
                             suggestions.set(found);
                         }
-                        on:beforeinput=move |e: ev::InputEvent| {
-                            if let Some(el) = area.get_untracked() {
-                                crate::editor::before_input(&el, &e, &crate::custom::lookup(c));
-                            }
-                        }
-                        on:keydown=on_key
-                        on:paste=move |e: ev::ClipboardEvent| {
-                            if !crate::compose::attach_pasted(c, &e, parent()) {
-                                field.paste_link(&e);
-                            }
-                        }
-                        on:blur=move |_| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
-                    ></div>
+                        on_key=on_key
+                        on_paste=move |e: ev::ClipboardEvent| crate::compose::attach_pasted(c, &e, parent())
+                        on_blur=move |_: ()| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
+                    />
                 </div>
                 <Show when=move || !suggestions.with(Vec::is_empty)>
                     <div class="emoji-suggest">

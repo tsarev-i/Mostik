@@ -32,7 +32,7 @@ use crate::{bridge, folders, hidden, ops, order, storage};
 
 // Paths the rest of the UI uses as `crate::app::…`.
 pub(crate) use avatar::{Avatar, display_title};
-pub(crate) use field::{insert_into, place_caret, selection, utf16_len, utf16_to_byte, wrap_selection};
+pub(crate) use field::{place_caret, selection, wrap_selection};
 pub(crate) use org::current_org;
 pub use org::org_key;
 pub use state::{Ctx, Phase, ViewMode, enter_sends};

@@ -7,6 +7,8 @@
 //! break as `\n`. Offsets are UTF-16 units of that text, the same units a textarea's selection uses.
 
 use mostik_core::markup::{EditSpan, Mark, edit_spans};
+
+use crate::text_edit::{delete_shown, insert_shown, past_markers, utf16_len, utf16_to_byte};
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement, Node};
 
@@ -65,10 +67,6 @@ pub fn value(el: &HtmlElement) -> String {
         out.pop();
     }
     out
-}
-
-fn utf16_len(s: &str) -> u32 {
-    s.encode_utf16().count() as u32
 }
 
 /// Offset in the text of a DOM position inside the field.
@@ -456,109 +454,6 @@ pub fn tidy(el: &HtmlElement, emoji: &dyn Fn(&str) -> Option<String>) -> String 
     text
 }
 
-/// The marked spans of the field's text as byte offsets: where each one starts, where its text
-/// starts and ends, and where it ends. Only spans with markers: a bare address is edited as text.
-fn marked_spans(text: &str) -> Vec<[usize; 4]> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    for span in edit_spans(text) {
-        match span {
-            EditSpan::Plain(t) => at += t.len(),
-            EditSpan::Marked { open, inner, close, .. } => {
-                let inner_at = at + open.len();
-                let close_at = inner_at + inner.len();
-                if !(open.is_empty() && close.is_empty()) {
-                    out.push([at, inner_at, close_at, close_at + close.len()]);
-                }
-                at = close_at + close.len();
-            }
-        }
-    }
-    out
-}
-
-/// `text` with UTF-16 offsets `start..end` deleted as the field shows them: the shown text goes,
-/// the hidden markers stay, and a span whose text goes whole goes with its markers. Returns the
-/// text and the caret; `None` when no marker is in or next to the range, so the browser can delete
-/// it itself: it would take a hidden marker next to the range along, as the same caret position.
-fn delete_shown(text: &str, start: u32, end: u32) -> Option<(String, u32)> {
-    let from = crate::app::utf16_to_byte(text, Some(start));
-    let to = crate::app::utf16_to_byte(text, Some(end)).max(from);
-    let spans = marked_spans(text);
-    let near = |a: usize, b: usize| a <= to && from <= b;
-    if !spans
-        .iter()
-        .any(|&[open, inner, close, end]| near(open, inner) || near(close, end))
-    {
-        return None;
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut caret = 0;
-    for (i, ch) in text.char_indices() {
-        let gone = match spans.iter().find(|&&[open, _, _, end]| open <= i && i < end) {
-            Some(&[_, inner, close, _]) if inner < close && from <= inner && close <= to => true,
-            Some(&[_, inner, close, _]) if i < inner || i >= close => false,
-            _ => from <= i && i < to,
-        };
-        if !gone {
-            out.push(ch);
-            if i < from {
-                caret += ch.len_utf16() as u32;
-            }
-        }
-    }
-    Some((out, caret))
-}
-
-/// UTF-16 offset `at` of the field's text moved back or forth over the hidden markers next to it.
-fn past_markers(text: &str, at: u32, back: bool) -> u32 {
-    let spans = marked_spans(text);
-    let mut at = crate::app::utf16_to_byte(text, Some(at));
-    while let Some(next) = spans.iter().find_map(|&[open, inner, close, end]| match back {
-        true if at == inner => Some(open),
-        true if at == end => Some(close),
-        false if at == open => Some(inner),
-        false if at == close => Some(end),
-        _ => None,
-    }) {
-        at = next;
-    }
-    utf16_len(&text[..at])
-}
-
-/// `text` with `data` typed at UTF-16 offset `at`, when `at` is where a link's caption starts or
-/// ends inside its hidden markers: the typed text goes outside the link, before `[` or after
-/// `](address)`, as it does at the end of a line. (Bold and the like go on as typed, until their
-/// hotkey ends them.) Returns the text and the caret; `None` elsewhere, where the browser types.
-fn insert_shown(text: &str, at: u32, data: &str) -> Option<(String, u32)> {
-    let byte = crate::app::utf16_to_byte(text, Some(at));
-    let mut from = 0;
-    let mut to = None;
-    for span in edit_spans(text) {
-        match span {
-            EditSpan::Plain(t) => from += t.len(),
-            EditSpan::Marked {
-                kind,
-                open,
-                inner,
-                close,
-            } => {
-                let (inner_at, close_at) = (from + open.len(), from + open.len() + inner.len());
-                let end = close_at + close.len();
-                if kind == Mark::Link && byte == close_at {
-                    to = Some(end);
-                } else if kind == Mark::Link && byte == inner_at {
-                    to = Some(from);
-                }
-                from = end;
-            }
-        }
-    }
-    let to = to?;
-    let out = format!("{}{data}{}", &text[..to], &text[to..]);
-    Some((out, utf16_len(&text[..to]) + utf16_len(data)))
-}
-
 /// The range a deletion of `unit` takes from the selection: the selection itself, or from the
 /// caret one `unit` back or forth. For a field where the browser gives no target range: Chromium
 /// gives none in a `plaintext-only` field.
@@ -638,7 +533,7 @@ pub fn before_input(el: &HtmlElement, ev: &web_sys::InputEvent, emoji: &dyn Fn(&
     // past formatted text, and the character before it (or after) is in that text.
     if shown == text {
         let to = past_markers(&text, if back { start } else { end }, back);
-        let byte = |at: u32| crate::app::utf16_to_byte(&text, Some(at));
+        let byte = |at: u32| utf16_to_byte(&text, Some(at));
         // Under a code block the caret is on a line of its own: going back takes it into the block.
         if text[byte(start.min(to))..byte(end.max(to))].contains("```") {
             if back {
@@ -679,65 +574,9 @@ pub fn before_input(el: &HtmlElement, ev: &web_sys::InputEvent, emoji: &dyn Fn(&
 mod tests {
     use super::*;
 
+    /// A bare address has no markers: the shape of the field has no empty marker spans.
     #[test]
-    fn deleting_keeps_markers() {
-        // The first character of struck text: its markers stay.
-        assert_eq!(delete_shown("a ~~bcd~~ e", 4, 5), Some(("a ~~cd~~ e".to_owned(), 4)));
-        // The last one, also with the closing marker in the range.
-        assert_eq!(delete_shown("a ~~bcd~~ e", 6, 7), Some(("a ~~bc~~ e".to_owned(), 6)));
-        assert_eq!(delete_shown("a ~~bcd~~ e", 6, 9), Some(("a ~~bc~~ e".to_owned(), 6)));
-        // Plain text next to a marker.
-        assert_eq!(delete_shown("a ~~bcd~~ e", 1, 2), Some(("a~~bcd~~ e".to_owned(), 1)));
-        assert_eq!(delete_shown("a ~~bcd~~ e", 9, 10), Some(("a ~~bcd~~e".to_owned(), 9)));
-        // A selection from plain text into struck text.
-        assert_eq!(delete_shown("a ~~bcd~~ e", 0, 5), Some(("~~cd~~ e".to_owned(), 0)));
-        // All the struck text: the markers go too.
-        assert_eq!(delete_shown("a ~~b~~ e", 4, 5), Some(("a  e".to_owned(), 2)));
-        assert_eq!(delete_shown("a ~~bcd~~ e", 1, 10), Some(("ae".to_owned(), 1)));
-        // A link keeps its address while its caption is edited.
-        assert_eq!(
-            delete_shown("[ab](https://x.ru)", 1, 2),
-            Some(("[b](https://x.ru)".to_owned(), 1))
-        );
-        // Only markers in the range: nothing shown to delete.
-        assert_eq!(delete_shown("a ~~b~~", 5, 7), Some(("a ~~b~~".to_owned(), 5)));
-        assert_eq!(delete_shown("a ~~b~~", 7, 7), Some(("a ~~b~~".to_owned(), 7)));
-        // Far from markers: the browser deletes.
-        assert_eq!(delete_shown("ab ~~c~~", 0, 1), None);
-        assert_eq!(delete_shown("abc", 1, 2), None);
-        // UTF-16 offsets: "👍" is two units.
-        assert_eq!(delete_shown("👍 **ab**", 5, 6), Some(("👍 **b**".to_owned(), 5)));
-    }
-
-    #[test]
-    fn typing_at_the_edge_of_formatting_goes_outside_it() {
-        // Right after a link's caption, in the middle of a line: after the link.
-        assert_eq!(
-            insert_shown("a [b](https://x.ru) c", 4, "x"),
-            Some(("a [b](https://x.ru)x c".to_owned(), 20))
-        );
-        // Right before its caption: before the link.
-        assert_eq!(
-            insert_shown("a [b](https://x.ru) c", 3, "x"),
-            Some(("a x[b](https://x.ru) c".to_owned(), 3))
-        );
-        // Inside a caption, at the edges of bold (it goes on until Ctrl+B ends it) or in plain text:
-        // the browser types.
-        assert_eq!(insert_shown("a [bc](https://x.ru) d", 4, "x"), None);
-        assert_eq!(insert_shown("a **b** c", 5, "x"), None);
-        assert_eq!(insert_shown("a **b** c", 1, "x"), None);
-    }
-
-    /// A bare address has no markers: next to it the browser types and deletes, the caret
-    /// steps as over text, and the shape of the field has no empty marker spans.
-    #[test]
-    fn a_bare_address_is_edited_as_text() {
-        assert_eq!(delete_shown("a https://x.ru b", 15, 16), None);
-        assert_eq!(delete_shown("a https://x.ru b", 1, 2), None);
-        assert_eq!(insert_shown("a https://x.ru b", 14, "x"), None);
-        assert_eq!(insert_shown("a https://x.ru b", 2, "x"), None);
-        assert_eq!(past_markers("a https://x.ru", 2, false), 2);
-        assert_eq!(past_markers("a https://x.ru", 14, true), 14);
+    fn a_bare_address_has_no_marker_spans() {
         assert_eq!(
             shape_of(&edit_spans("a https://x.ru")),
             vec![
@@ -745,15 +584,5 @@ mod tests {
                 ("f-link f-url".to_owned(), "https://x.ru".to_owned(), false)
             ]
         );
-    }
-
-    #[test]
-    fn caret_steps_over_markers() {
-        assert_eq!(past_markers("a ~~b~~", 7, true), 5);
-        assert_eq!(past_markers("a ~~b~~", 4, true), 2);
-        assert_eq!(past_markers("a ~~b~~", 2, false), 4);
-        assert_eq!(past_markers("~~a~~**b**", 5, true), 3);
-        assert_eq!(past_markers("~~a~~**b**", 3, false), 7);
-        assert_eq!(past_markers("a ~~b~~", 1, true), 1);
     }
 }
