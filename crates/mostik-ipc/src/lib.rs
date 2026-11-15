@@ -245,6 +245,28 @@ mod tests {
         );
     }
 
+    /// Pins only the keys of these two: `Message` and `User` are `mostik-core` types, and `User`
+    /// is pinned in `history_page_and_chat_details`.
+    #[test]
+    fn threads_and_found_messages_keep_their_field_names() {
+        let ann = || User::named(UserId("u1".into()), "Ann");
+        let ann_json = serde_json::to_value(ann()).unwrap();
+        pinned(
+            Threads {
+                threads: vec![],
+                users: vec![ann()],
+            },
+            json!({ "threads": [], "users": [ann_json.clone()] }),
+        );
+        pinned(
+            FoundMessages {
+                messages: vec![],
+                users: vec![ann()],
+            },
+            json!({ "messages": [], "users": [ann_json] }),
+        );
+    }
+
     #[test]
     fn update_status_and_call_info_edge_cases() {
         pinned(UpdateStatus::Unsupported, json!({ "state": "unsupported" }));

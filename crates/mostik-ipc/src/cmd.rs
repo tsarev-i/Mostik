@@ -668,6 +668,212 @@ mod tests {
         );
     }
 
+    fn chat() -> ChatId {
+        ChatId("c1".into())
+    }
+
+    fn guid() -> UserId {
+        UserId("u1".into())
+    }
+
+    /// The arguments of the history and message commands, key by key: the format changes only
+    /// on purpose, and each struct reads back what it wrote.
+    #[test]
+    fn history_and_message_args_are_pinned() {
+        pinned(
+            HistoryArgs {
+                chat_id: chat(),
+                before: Some(10),
+                thread: None,
+            },
+            json!({ "chatId": "c1", "before": 10, "thread": null }),
+        );
+        pinned(ChatArgs { chat_id: chat() }, json!({ "chatId": "c1" }));
+        pinned(
+            EditArgs {
+                chat_id: chat(),
+                ts: 10,
+                text: "x".into(),
+                thread: Some(5),
+                whole: true,
+            },
+            json!({ "chatId": "c1", "ts": 10, "text": "x", "thread": 5, "whole": true }),
+        );
+        pinned(
+            MsgArgs {
+                chat_id: chat(),
+                ts: 10,
+                thread: None,
+            },
+            json!({ "chatId": "c1", "ts": 10, "thread": null }),
+        );
+        pinned(
+            ReactionArgs {
+                chat_id: chat(),
+                ts: 10,
+                kind: 3,
+                add: false,
+                thread: None,
+            },
+            json!({ "chatId": "c1", "ts": 10, "kind": 3, "add": false, "thread": null }),
+        );
+        pinned(
+            ImportantArgs {
+                chat_id: chat(),
+                ts: 10,
+                important: true,
+                thread: None,
+            },
+            json!({ "chatId": "c1", "ts": 10, "important": true, "thread": null }),
+        );
+        pinned(
+            UnreadArgs {
+                chat_id: chat(),
+                ts: 10,
+                seq_no: 4,
+            },
+            json!({ "chatId": "c1", "ts": 10, "seqNo": 4 }),
+        );
+        pinned(
+            PinArgs {
+                chat_id: chat(),
+                ts: Some(10),
+            },
+            json!({ "chatId": "c1", "ts": 10 }),
+        );
+        // Unpinning: the UI leaves `ts` out.
+        let unpin: PinArgs = serde_json::from_value(json!({ "chatId": "c1" })).unwrap();
+        assert_eq!(
+            unpin,
+            PinArgs {
+                chat_id: chat(),
+                ts: None
+            }
+        );
+    }
+
+    /// The arguments of the file, people and chat commands, key by key.
+    #[test]
+    fn file_people_and_chat_args_are_pinned() {
+        pinned(
+            UrlArgs {
+                url: "https://telemost.yandex.ru/j/1".into(),
+            },
+            json!({ "url": "https://telemost.yandex.ru/j/1" }),
+        );
+        pinned(
+            PathArgs {
+                path: "kept:1/a.png".into(),
+            },
+            json!({ "path": "kept:1/a.png" }),
+        );
+        pinned(
+            SendFilesArgs {
+                chat_id: chat(),
+                thread: Some(5),
+                paths: vec!["/tmp/a.png".into()],
+                text: "".into(),
+            },
+            json!({ "chatId": "c1", "thread": 5, "paths": ["/tmp/a.png"], "text": "" }),
+        );
+        pinned(GuidArgs { guid: guid() }, json!({ "guid": "u1" }));
+        pinned(
+            PeopleSearchArgs {
+                query: "ann".into(),
+                chat_id: None,
+            },
+            json!({ "query": "ann", "chatId": null }),
+        );
+        pinned(
+            CreateChannelArgs {
+                name: "dev".into(),
+                description: "".into(),
+                members: vec![guid()],
+                public: true,
+            },
+            json!({ "name": "dev", "description": "", "members": ["u1"], "public": true }),
+        );
+        pinned(
+            MembersArgs {
+                chat_id: chat(),
+                guids: vec![guid()],
+                add: false,
+            },
+            json!({ "chatId": "c1", "guids": ["u1"], "add": false }),
+        );
+        pinned(
+            UpdateChatArgs {
+                chat_id: chat(),
+                name: "dev".into(),
+                description: "team".into(),
+            },
+            json!({ "chatId": "c1", "name": "dev", "description": "team" }),
+        );
+    }
+
+    /// The arguments of the chat list, presence, call, window, emoji and update commands, key by key.
+    #[test]
+    fn settings_and_window_args_are_pinned() {
+        pinned(
+            NotifyLevelArgs {
+                chat_id: chat(),
+                level: NotifyLevel::Mentions,
+            },
+            json!({ "chatId": "c1", "level": "mentions" }),
+        );
+        pinned(
+            StarArgs {
+                chat_id: chat(),
+                starred: true,
+            },
+            json!({ "chatId": "c1", "starred": true }),
+        );
+        pinned(
+            FoldersArgs {
+                org: "7".into(),
+                folders: vec![ChatFolder {
+                    id: "f1".into(),
+                    org: "7".into(),
+                    name: "Work".into(),
+                    chats: vec![chat()],
+                }],
+            },
+            json!({
+                "org": "7",
+                "folders": [{ "id": "f1", "org": "7", "name": "Work", "chats": ["c1"] }],
+            }),
+        );
+        pinned(GuidsArgs { guids: vec![guid()] }, json!({ "guids": ["u1"] }));
+        pinned(
+            StatusArgs {
+                availability: 2,
+                emoji: "🌴".into(),
+                text: "away".into(),
+                duration: Some(3600),
+            },
+            json!({ "availability": 2, "emoji": "🌴", "text": "away", "duration": 3600 }),
+        );
+        pinned(AnswerArgs { accept: true }, json!({ "accept": true }));
+        pinned(SoundArgs { id: "bell".into() }, json!({ "id": "bell" }));
+        pinned(
+            TitleArgs {
+                title: "Mostik (3)".into(),
+            },
+            json!({ "title": "Mostik (3)" }),
+        );
+        pinned(ZoomArgs { scale: 1.25 }, json!({ "scale": 1.25 }));
+        pinned(
+            DeleteEmojiArgs {
+                chat_id: chat(),
+                ts: 10,
+            },
+            json!({ "chatId": "c1", "ts": 10 }),
+        );
+        pinned(AutoUpdateArgs { enabled: false }, json!({ "enabled": false }));
+        pinned(NotifyMode::All, json!("all"));
+        pinned(NotifyMode::Nothing, json!("nothing"));
+    }
+
     /// The name is the type's name in snake case, so two swapped names (`LeaveChat` named
     /// "join_chat") fail here.
     #[test]
