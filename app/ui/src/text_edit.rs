@@ -156,10 +156,17 @@ pub(crate) fn past_markers(text: &str, at: u32, back: bool) -> u32 {
     utf16_len(&text[..at])
 }
 
-/// `text` with `data` typed at UTF-16 offset `at`, when `at` is where a link's caption starts or
-/// ends inside its hidden markers: the typed text goes outside the link, before `[` or after
-/// `](address)`, as it does at the end of a line. (Bold and the like go on as typed, until their
-/// hotkey ends them.) Returns the text and the caret; `None` elsewhere, where the browser types.
+/// `text` with `data` typed at UTF-16 offset `at`, when `at` is next to hidden markers:
+/// - where a link's caption starts or ends inside its markers: the typed text goes outside the
+///   link, before `[` or after `](address)`, as it does at the end of a line;
+/// - outside the markers of any formatting but a code block, where the browser would put the text
+///   inside: after `**` or `](address)` with text after them on the line (WebKitGTK moves a caret
+///   past invisible markers to the visible text before them), before `**` or `[` at the start of a
+///   line. At the end of a line the gap after the markers holds the caret, and elsewhere the
+///   browser types: its typing can be undone, this cannot.
+///
+/// (Bold and the like go on as typed inside their markers, until their hotkey ends them.) Returns
+/// the text and the caret; `None` elsewhere, where the browser types.
 pub(crate) fn insert_shown(text: &str, at: u32, data: &str) -> Option<(String, u32)> {
     let byte = utf16_to_byte(text, Some(at));
     let mut from = 0;
@@ -175,10 +182,17 @@ pub(crate) fn insert_shown(text: &str, at: u32, data: &str) -> Option<(String, u
             } => {
                 let (inner_at, close_at) = (from + open.len(), from + open.len() + inner.len());
                 let end = close_at + close.len();
+                // A code block has lines of its own, a bare address no markers.
+                let markers = kind != Mark::CodeBlock && !open.is_empty() && !close.is_empty();
                 if kind == Mark::Link && byte == close_at {
                     to = Some(end);
                 } else if kind == Mark::Link && byte == inner_at {
                     to = Some(from);
+                } else if markers
+                    && ((byte == end && text[end..].starts_with(|c: char| c != '\n'))
+                        || (byte == from && (from == 0 || text[..from].ends_with('\n'))))
+                {
+                    to = Some(byte);
                 }
                 from = end;
             }
@@ -365,11 +379,29 @@ mod tests {
             insert_shown("a [b](https://x.ru) c", 3, "x"),
             Some(("a x[b](https://x.ru) c".to_owned(), 3))
         );
-        // Inside a caption, at the edges of bold (it goes on until Ctrl+B ends it) or in plain text:
-        // the browser types.
+        // Past the link's hidden `](address)`, where the link dialog leaves the caret (#23): WebKitGTK
+        // would type into the caption.
+        assert_eq!(
+            insert_shown("a [b](https://x.ru) c", 19, "x"),
+            Some(("a [b](https://x.ru)x c".to_owned(), 20))
+        );
+        // Outside the markers of bold and code, with text after them or at the start of a line:
+        // there, not inside.
+        assert_eq!(insert_shown("a **b** c", 7, "x"), Some(("a **b**x c".to_owned(), 8)));
+        assert_eq!(insert_shown("`b` c", 3, "x"), Some(("`b`x c".to_owned(), 4)));
+        assert_eq!(insert_shown("**b** c", 0, "x"), Some(("x**b** c".to_owned(), 1)));
+        assert_eq!(insert_shown("a\n**b**", 2, "x"), Some(("a\nx**b**".to_owned(), 3)));
+        // After plain text before the markers, or at the end of a line: the browser types.
+        assert_eq!(insert_shown("a **b** c", 2, "x"), None);
+        assert_eq!(insert_shown("a **b**", 7, "x"), None);
+        assert_eq!(insert_shown("a **b**\nc", 7, "x"), None);
+        // Inside a caption, at the edges of bold inside its markers (it goes on until Ctrl+B ends
+        // it), around a code block or in plain text: the browser types.
         assert_eq!(insert_shown("a [bc](https://x.ru) d", 4, "x"), None);
         assert_eq!(insert_shown("a **b** c", 5, "x"), None);
+        assert_eq!(insert_shown("a **b** c", 4, "x"), None);
         assert_eq!(insert_shown("a **b** c", 1, "x"), None);
+        assert_eq!(insert_shown("```\nb\n```\nc", 9, "x"), None);
     }
 
     /// A bare address has no markers: next to it the browser types and deletes, and the caret
