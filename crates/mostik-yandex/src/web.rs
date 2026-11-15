@@ -300,10 +300,15 @@ impl WebClient {
         self.fetch(&file_url(file_id, size), limit, STALL_TIMEOUT).await
     }
 
-    /// Writes a file of the Messenger storage into `out` as it arrives, whatever its size.
-    /// Returns the number of bytes written.
-    pub async fn download(&self, file_id: &str, out: &mut (impl AsyncWrite + Unpin)) -> Result<u64, WebError> {
-        let mut download = self.open(&file_url(file_id, None), u64::MAX, STALL_TIMEOUT).await?;
+    /// Writes a file of the Messenger storage into `out` as it arrives. A file larger than `limit`
+    /// bytes is refused, or stopped once that much has come. Returns the number of bytes written.
+    pub async fn download(
+        &self,
+        file_id: &str,
+        out: &mut (impl AsyncWrite + Unpin),
+        limit: u64,
+    ) -> Result<u64, WebError> {
+        let mut download = self.open(&file_url(file_id, None), limit, STALL_TIMEOUT).await?;
         while let Some(chunk) = download.next().await? {
             out.write_all(&chunk).await?;
         }

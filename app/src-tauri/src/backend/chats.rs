@@ -12,7 +12,7 @@ use mostik_yandex::convert;
 use serde_json::{Value, json};
 use tauri::AppHandle;
 
-use super::{AppState, Live, fill_profiles, live, rpc, rpc_ok, service, web_error};
+use super::{AppState, Live, fill_profiles, live, note_files, rpc, rpc_ok, service, web_error};
 
 /// A person's profile for the "Profile" panel.
 #[tauri::command]
@@ -176,6 +176,7 @@ pub async fn search_messages(
             }
         }
     }
+    note_files(&state, &live.me, &messages);
     Ok(FoundMessages { messages, users })
 }
 

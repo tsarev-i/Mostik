@@ -21,7 +21,7 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
 use connection::Session;
-use files::FileCache;
+use files::{FileCache, note_files};
 
 pub mod calls;
 pub mod chats;
@@ -225,6 +225,11 @@ pub struct AppState {
     allowed_files: StdMutex<BTreeSet<String>>,
     /// Contents of the files pasted or dropped into the message field, by their [`KEPT`](files::KEPT) path.
     kept_files: StdMutex<BTreeMap<String, bytes::Bytes>>,
+    /// The attachments the UI may save (see [`files::KnownFiles`]): kept across reconnections, as
+    /// the UI keeps the messages it has loaded.
+    known_files: StdMutex<files::KnownFiles>,
+    /// How many attachments are being saved now.
+    saving: AtomicUsize,
     live: Mutex<Option<Arc<Live>>>,
     session: Session,
     reconnecting: AtomicBool,

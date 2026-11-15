@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::connection::{id_patterns, probing, write_probe};
 use super::notify::{mentions_me, notify};
-use super::{AppState, EVENT, Live, Shared, live, push, target_chat};
+use super::{AppState, EVENT, Live, Shared, live, note_files, push, target_chat};
 
 /// Threads the user follows, with unread counts, like Slack's "Threads". The UI asks once per
 /// connection and then keeps the list current from the pushes. The thread ID format goes to
@@ -35,12 +35,13 @@ pub async fn followed_threads(
             entry
         });
     }
-    let (threads, users) = remember_threads(&live, &v.map_err(|e| e.to_string())?);
+    let (threads, users) = remember_threads(&state, &live, &v.map_err(|e| e.to_string())?);
     Ok(Threads { threads, users })
 }
 
-/// Parses the followed threads and records them as the ones whose replies notify.
-fn remember_threads(live: &Live, v: &Value) -> (Vec<mostik_core::FollowedThread>, Vec<User>) {
+/// Parses the followed threads and records them as the ones whose replies notify, and their
+/// attachments as ones the UI may save.
+fn remember_threads(state: &AppState, live: &Live, v: &Value) -> (Vec<mostik_core::FollowedThread>, Vec<User>) {
     let (mut threads, users) = convert::followed_threads(v, Some(&live.me));
     if let Ok(mut sh) = live.shared.lock() {
         threads.retain(|t| !sh.service.contains(&t.parent.chat_id.0));
@@ -49,6 +50,7 @@ fn remember_threads(live: &Live, v: &Value) -> (Vec<mostik_core::FollowedThread>
             .map(|t| (t.parent.chat_id.0.clone(), t.parent.ts))
             .collect();
     }
+    note_files(state, &live.me, threads.iter().map(|t| &t.parent));
     (threads, users)
 }
 
@@ -63,7 +65,7 @@ async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
             .xiva
             .call("history", &wire::thread_list(0), 30)
             .await
-            .map(|v| remember_threads(&live, &v))
+            .map(|v| remember_threads(&app.state::<AppState>(), &live, &v))
             .map_err(|e| eprintln!("threads: {e}"))
             .ok(),
         _ => None,

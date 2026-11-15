@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter};
 
 use super::events::unnamed_mentions;
 use super::files::prefetch_previews;
-use super::{AppState, EVENT, Live, fill_profiles, live, push, target_chat};
+use super::{AppState, EVENT, Live, fill_profiles, live, note_files, push, target_chat};
 
 /// History page sizes. A page of 50 takes the server 0.5–1.5 s in a busy channel and 20 about
 /// 0.1–0.3 s, so a chat opens with a short page; older pages and threads take more at once.
@@ -87,6 +87,7 @@ pub async fn history(
         });
     }
     prefetch_previews(live.clone(), &data.messages);
+    note_files(&state, &live.me, &data.messages);
     let peer_seen = match thread {
         None => data.chats.first().map_or(0, |c| c.peer_seen_ts),
         Some(_) => 0,
