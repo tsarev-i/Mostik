@@ -1,6 +1,4 @@
-# Мостик (десктопный клиент чатов Яндекс Телемост)
-
-Неофициальный клиент чатов Яндекс Телемоста для Linux, Windows и macOS.
+# Мостик (неофициальный клиент чатов Яндекс Телемост)
 
 [![Последняя версия](https://img.shields.io/github/v/release/tsarev-i/Mostik?label=%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F)](https://github.com/tsarev-i/Mostik/releases/latest)
 [![Лицензия MIT](https://img.shields.io/github/license/tsarev-i/Mostik?label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F)](LICENSE)

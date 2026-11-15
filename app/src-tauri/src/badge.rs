@@ -89,7 +89,7 @@ fn with_dot(icon: &Image<'_>, color: [u8; 3]) -> Image<'static> {
     let (w, h) = (icon.width(), icon.height());
     let mut rgba = icon.rgba().to_vec();
     let size = w.min(h) as f32;
-    let (radius, ring) = (size * 0.22, size * 0.07);
+    let (radius, ring) = (size * 0.18, size * 0.06);
     let centre = (w as f32 - radius - ring / 2.0, h as f32 - radius - ring / 2.0);
     paint(&mut rgba, w, centre, radius, ring, color);
     Image::new_owned(rgba, w, h)
@@ -145,7 +145,7 @@ mod tests {
         // The dot: its colour, opaque.
         assert_eq!(pixel(&marked, 50, 50), [0xe0, 0x1e, 0x5a, 255]);
         // The ring around it: the icon is cut out.
-        assert_eq!(pixel(&marked, 47, 31)[3], 0);
+        assert_eq!(pixel(&marked, 50, 37)[3], 0);
         // The rest of the icon stays as it was.
         assert_eq!(pixel(&marked, 5, 5), [10, 20, 30, 255]);
         assert_eq!(pixel(&marked, 60, 5), [10, 20, 30, 255]);
