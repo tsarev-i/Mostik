@@ -187,6 +187,10 @@ pub struct SendFilesArgs {
     pub upload: Option<String>,
 }
 
+/// How [`SendFiles`] fails when an upload stops moving, after `<file name>: `. The UI shows it
+/// in its own words.
+pub const UPLOAD_STALLED: &str = "the upload stopped, check the connection";
+
 /// One file of a sending going on: [`CancelUpload`] stops its upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -871,6 +871,17 @@ pub(super) fn Outbox(#[prop(optional)] in_thread: bool) -> impl IntoView {
     }
 }
 
+/// Why a sending failed, in the interface's language where the backend's words are known.
+fn failure_reason(why: &str) -> String {
+    match why
+        .strip_suffix(mostik_ipc::cmd::UPLOAD_STALLED)
+        .and_then(|w| w.strip_suffix(": "))
+    {
+        Some(name) => format!("{name}: {}", tr().upload_stalled),
+        None => why.to_owned(),
+    }
+}
+
 /// One [`ops::Outgoing`] message.
 #[component]
 fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
@@ -930,7 +941,7 @@ fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
         let (retry, remove) = (id.clone(), id.clone());
         view! {
             <div class="out-failed">
-                <span class="out-why">{why}</span>
+                <span class="out-why">{failure_reason(&why)}</span>
                 <button class="btn small" on:click=move |_| ops::retry_upload(c, &retry)>{tr().retry}</button>
                 <button class="btn small" on:click=move |_| ops::drop_upload(c, &remove)>{tr().remove}</button>
             </div>

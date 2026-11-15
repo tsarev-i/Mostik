@@ -785,7 +785,7 @@ async fn upload_tracked(app: AppHandle, upload: Option<String>, file: Upload) ->
     };
     let result = tokio::select! {
         done = job => done.unwrap_or(Ok(Uploaded::Cancelled)),
-        () = stalled => Err(format!("{name}: the upload stopped, check the connection")),
+        () = stalled => Err(format!("{name}: {}", cmd::UPLOAD_STALLED)),
     };
     if let Some(key) = &key
         && let Ok(mut uploads) = state.uploads.lock()
