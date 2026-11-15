@@ -230,6 +230,8 @@ pub struct AppState {
     known_files: StdMutex<files::KnownFiles>,
     /// How many attachments are being saved now.
     saving: AtomicUsize,
+    /// The uploads of the sendings going on.
+    uploads: StdMutex<files::Uploads>,
     live: Mutex<Option<Arc<Live>>>,
     session: Session,
     reconnecting: AtomicBool,

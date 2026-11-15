@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mostik_core::{ChatId, Message, Timestamp, UserId};
-use mostik_ipc::cmd::{self, Args, FileArgs, Out, PathArgs, SendFilesArgs, UrlArgs};
+use mostik_ipc::cmd::{self, Args, FileArgs, Out, PathArgs, SendFilesArgs, UploadFileArgs, UrlArgs};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::id_pattern;
 use mostik_yandex::web::{WebClient, percent_decode};
 use mostik_yandex::wire::{self, request_id};
 use serde_json::{Value, json};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::messages::sent_from_reply;
 use super::{AppState, Live, PendingFile, allow_files, live, push, service, target_chat, text};
@@ -509,10 +509,71 @@ pub fn forget_file(state: tauri::State<'_, AppState>, args: Args<cmd::ForgetFile
     }
 }
 
+/// The upload progress of a sending, as [`mostik_ipc::UploadProgress`].
+pub const UPLOAD_EVENT: &str = "mostik://upload";
+
+/// How often the progress of an upload goes to the UI at most.
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How long an upload may go without sending a byte before it counts as failed: a hung connection
+/// would otherwise wait for the whole transfer time.
+const UPLOAD_STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the answer to an upload may take once the whole file has been handed over: the last
+/// megabytes may still be in the connection's buffers on a slow line.
+const UPLOAD_ANSWER: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// The uploads of the sendings going on, by the UI's id of the sending and the file's path, for
+/// [`cancel_upload`].
+#[derive(Default)]
+pub(super) struct Uploads {
+    running: std::collections::HashMap<(String, String), futures_util::future::AbortHandle>,
+    /// Files cancelled before their upload began.
+    cancelled: std::collections::BTreeSet<(String, String)>,
+    /// What of a failed sending has gone already, by its id: a retry sends only the rest.
+    sent: std::collections::HashMap<String, SentParts>,
+}
+
+/// The parts of a sending that have gone: its text (alone or as the caption of the gallery) and
+/// its files.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SentParts {
+    text: bool,
+    paths: std::collections::BTreeSet<String>,
+}
+
+/// Records a part of sending `upload` that has gone.
+fn mark_sent(state: &AppState, upload: Option<&String>, change: impl FnOnce(&mut SentParts)) {
+    if let Some(upload) = upload
+        && let Ok(mut uploads) = state.uploads.lock()
+    {
+        change(uploads.sent.entry(upload.clone()).or_default());
+    }
+}
+
+/// Stops the upload of one file of a sending: the message goes without it. A file whose upload
+/// has not begun yet is skipped when its turn comes.
+#[tauri::command]
+pub fn cancel_upload(state: tauri::State<'_, AppState>, args: Args<cmd::CancelUpload>) -> Out<cmd::CancelUpload> {
+    let UploadFileArgs { upload, path } = args;
+    if let Ok(mut uploads) = state.uploads.lock() {
+        let key = (upload, path);
+        match uploads.running.remove(&key) {
+            Some(abort) => abort.abort(),
+            None => {
+                uploads.cancelled.insert(key);
+            }
+        }
+    }
+}
+
 /// Uploads the files and sends them: images as one gallery with a caption, the rest one by one.
-/// For non-images the caption goes as a separate text message before them.
+/// For non-images the caption goes as a separate text message before them. With `upload` the UI
+/// gets the progress of each file and may cancel a file; a cancelled file is left out, and with
+/// every file cancelled only the caption goes, if there is one.
 #[tauri::command]
 pub async fn send_files(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     args: Args<cmd::SendFiles>,
 ) -> Result<Out<cmd::SendFiles>, String> {
@@ -521,6 +582,7 @@ pub async fn send_files(
         thread,
         paths,
         text,
+        upload,
     } = args;
     let live = live(&state).await?;
     let allowed = state.allowed_files.lock().map(|a| a.clone()).unwrap_or_default();
@@ -529,32 +591,69 @@ pub async fn send_files(
     }
     let target = target_chat(&chat_id, thread)?;
     let gallery_id = request_id();
+    // A retry of a sending that failed halfway sends only what has not gone.
+    let done = upload
+        .as_ref()
+        .and_then(|u| state.uploads.lock().ok()?.sent.get(u).cloned())
+        .unwrap_or_default();
+    let to_send: Vec<&String> = paths.iter().filter(|p| !done.paths.contains(*p)).collect();
     let kept: Vec<Option<bytes::Bytes>> = {
         let all = state.kept_files.lock().map_err(|e| e.to_string())?;
-        paths.iter().map(|p| all.get(p).cloned()).collect()
+        to_send.iter().map(|p| all.get(*p).cloned()).collect()
     };
-    // Files are read and uploaded a few at a time; `buffered` keeps their order for the gallery.
-    let uploads: Vec<_> = paths
+    // Files are read and uploaded a few at a time, the first failure stops the rest at once; the
+    // gallery keeps their order.
+    let uploads: Vec<_> = to_send
         .iter()
         .zip(kept)
-        .map(|(path, kept)| upload_one(live.web.clone_light(), target.clone(), gallery_id.clone(), path, kept))
+        .map(|(path, kept)| {
+            let file = Upload {
+                web: live.web.clone_light(),
+                target: target.clone(),
+                gallery_id: gallery_id.clone(),
+                path: (*path).clone(),
+                kept,
+            };
+            upload_tracked(app.clone(), upload.clone(), file)
+        })
         .collect();
-    let uploaded: Vec<Uploaded> = {
+    let uploaded: Result<Vec<(usize, Uploaded)>, String> = {
         use futures_util::{StreamExt, TryStreamExt};
-        futures_util::stream::iter(uploads)
-            .buffered(UPLOAD_CONCURRENCY)
-            .try_collect()
-            .await?
+        futures_util::stream::iter(
+            uploads
+                .into_iter()
+                .enumerate()
+                .map(|(i, job)| async move { job.await.map(|u| (i, u)) }),
+        )
+        .buffer_unordered(UPLOAD_CONCURRENCY)
+        .try_collect()
+        .await
     };
-    let (mut images, mut files) = (Vec::new(), Vec::new());
-    for u in uploaded {
+    if let Some(upload) = &upload
+        && let Ok(mut uploads) = state.uploads.lock()
+    {
+        uploads.running.retain(|(u, _), _| u != upload);
+        uploads.cancelled.retain(|(u, _)| u != upload);
+    }
+    let mut uploaded = uploaded?;
+    uploaded.sort_by_key(|(i, _)| *i);
+    let (mut images, mut image_paths, mut files) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, u) in uploaded {
         match u {
-            Uploaded::Image(item) => images.push(item),
-            Uploaded::File(payload, info) => files.push((payload, info)),
+            Uploaded::Image(item) => {
+                images.push(item);
+                image_paths.push(to_send[i].clone());
+            }
+            Uploaded::File(payload, info) => files.push((to_send[i].clone(), payload, info)),
+            Uploaded::Cancelled => {}
         }
     }
     let mut sent = Vec::new();
-    let text = text.trim().to_owned();
+    let text = if done.text {
+        String::new()
+    } else {
+        text.trim().to_owned()
+    };
     if !text.is_empty() && images.is_empty() {
         sent.push(
             send_plain(
@@ -566,14 +665,27 @@ pub async fn send_files(
             )
             .await?,
         );
+        mark_sent(&state, upload.as_ref(), |s| s.text = true);
     }
     if !images.is_empty() {
         let msg = wire::gallery(&target, &gallery_id, images, &text);
         sent.push(send_plain(&live, &chat_id, thread, msg, &text).await?);
+        mark_sent(&state, upload.as_ref(), |s| {
+            s.text = true;
+            s.paths.extend(image_paths);
+        });
     }
-    for (payload, info) in files {
+    for (path, payload, info) in files {
         let msg = json!({ "Plain": { "ChatId": target, "PayloadId": payload, "MiscFile": { "FileInfo": info } } });
         sent.push(send_plain(&live, &chat_id, thread, msg, "").await?);
+        mark_sent(&state, upload.as_ref(), |s| {
+            s.paths.insert(path);
+        });
+    }
+    if let Some(upload) = &upload
+        && let Ok(mut uploads) = state.uploads.lock()
+    {
+        uploads.sent.remove(upload);
     }
     if let Ok(mut kept) = state.kept_files.lock() {
         for p in &paths {
@@ -591,34 +703,140 @@ const UPLOAD_CONCURRENCY: usize = 3;
 enum Uploaded {
     Image(Value),
     File(String, Value),
+    /// The user cancelled it: it is left out.
+    Cancelled,
+}
+
+/// One file to upload into chat `target`; an image goes into the gallery `gallery_id`.
+struct Upload {
+    web: WebClient,
+    target: String,
+    gallery_id: String,
+    path: String,
+    kept: Option<bytes::Bytes>,
+}
+
+/// How far an upload has got and when it last moved, for the stall check.
+struct Progress {
+    sent: u64,
+    total: u64,
+    moved: std::time::Instant,
+    reported: Option<std::time::Instant>,
+}
+
+/// [`upload_one`] of a sending the UI follows (`upload`): the progress goes out as
+/// [`UPLOAD_EVENT`], [`cancel_upload`] stops the file, and a minute without a byte sent fails it.
+async fn upload_tracked(app: AppHandle, upload: Option<String>, file: Upload) -> Result<Uploaded, String> {
+    use futures_util::future::{AbortHandle, Abortable};
+
+    let key = upload.map(|u| (u, file.path.clone()));
+    let state = app.state::<AppState>();
+    let (abort, registration) = AbortHandle::new_pair();
+    if let Some(key) = &key
+        && let Ok(mut uploads) = state.uploads.lock()
+    {
+        if uploads.cancelled.remove(key) {
+            return Ok(Uploaded::Cancelled);
+        }
+        uploads.running.insert(key.clone(), abort);
+    }
+    let progress = Arc::new(std::sync::Mutex::new(Progress {
+        sent: 0,
+        total: 0,
+        moved: std::time::Instant::now(),
+        reported: None,
+    }));
+    let report = {
+        let (app, key, progress) = (app.clone(), key.clone(), progress.clone());
+        move |sent: u64, total: u64| {
+            let Ok(mut p) = progress.lock() else { return };
+            if sent != p.sent || total != p.total {
+                (p.sent, p.total, p.moved) = (sent, total, std::time::Instant::now());
+            }
+            let due = sent >= total || p.reported.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY);
+            if let Some((upload, path)) = &key
+                && due
+            {
+                p.reported = Some(std::time::Instant::now());
+                let event = mostik_ipc::UploadProgress {
+                    upload: upload.clone(),
+                    path: path.clone(),
+                    sent,
+                    total,
+                };
+                let _ = app.emit(UPLOAD_EVENT, event);
+            }
+        }
+    };
+    let name = file_name(&file.path);
+    let job = Abortable::new(upload_one(file, Arc::new(report)), registration);
+    // Once the whole file is handed over, the answer has a longer while to come.
+    let stalled = async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let stuck = progress.lock().is_ok_and(|p| {
+                let handed_over = p.total > 0 && p.sent >= p.total;
+                p.moved.elapsed() >= if handed_over { UPLOAD_ANSWER } else { UPLOAD_STALL }
+            });
+            if stuck {
+                break;
+            }
+        }
+    };
+    let result = tokio::select! {
+        done = job => done.unwrap_or(Ok(Uploaded::Cancelled)),
+        () = stalled => Err(format!("{name}: the upload stopped, check the connection")),
+    };
+    if let Some(key) = &key
+        && let Ok(mut uploads) = state.uploads.lock()
+    {
+        uploads.running.remove(key);
+    }
+    result
+}
+
+/// The name of the file at `path`, as it is uploaded.
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into())
 }
 
 /// Reads a file without blocking the runtime (unless its contents are `kept` in memory) and
-/// uploads it to the Messenger storage.
-async fn upload_one(
-    mut web: WebClient,
-    target: String,
-    gallery_id: String,
-    path: &str,
-    kept: Option<bytes::Bytes>,
-) -> Result<Uploaded, String> {
+/// uploads it to the Messenger storage, telling `progress` how many of how many bytes have gone.
+async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>) -> Result<Uploaded, String> {
+    let Upload {
+        mut web,
+        target,
+        gallery_id,
+        path,
+        kept,
+    } = file;
+    let path = path.as_str();
     let p = std::path::Path::new(path);
     let bytes = match kept {
         Some(bytes) => bytes,
         None => tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?.into(),
     };
-    let name = p
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".into());
+    let name = file_name(path);
     let mime = mime_guess::from_path(p).first_or_octet_stream();
     let size = bytes.len();
+    progress(0, size as u64);
     let dims = (mime.type_() == "image")
         .then(|| imagesize::blob_size(&bytes).ok())
         .flatten();
     let payload = if dims.is_some() { gallery_id } else { request_id() };
+    let total = size as u64;
     let id = web
-        .upload_file(&target, &payload, &name, mime.essence_str(), bytes)
+        .upload_file_with_progress(
+            &target,
+            &payload,
+            &name,
+            mime.essence_str(),
+            bytes,
+            Arc::new(move |sent| progress(sent, total)),
+        )
         .await
         .map_err(|e| e.to_string())?;
     let info = wire::file_info(&id, &name, size);
@@ -753,6 +971,22 @@ mod tests {
             known.rule(&me, "f1", "a.pdf").and_then(|r| r.saved),
             Some("/d/a.pdf".into())
         );
+    }
+
+    /// A retry of a sending that failed halfway knows what has gone; one without an id records nothing.
+    #[test]
+    fn sent_parts_are_kept_by_sending() {
+        let state = AppState::default();
+        let id = "up1".to_owned();
+        mark_sent(&state, None, |s| s.text = true);
+        assert!(state.uploads.lock().unwrap().sent.is_empty());
+        mark_sent(&state, Some(&id), |s| s.text = true);
+        mark_sent(&state, Some(&id), |s| {
+            s.paths.insert("/tmp/a.pdf".into());
+        });
+        let sent = state.uploads.lock().unwrap().sent.get(&id).cloned().unwrap();
+        assert!(sent.text);
+        assert_eq!(sent.paths.into_iter().collect::<Vec<_>>(), ["/tmp/a.pdf"]);
     }
 
     #[test]

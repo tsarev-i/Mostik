@@ -6,7 +6,7 @@ pub use mostik_ipc::cmd::ReplyRef;
 use mostik_ipc::cmd::{self, Command};
 pub use mostik_ipc::{
     Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent, Threads,
-    UpdateStatus,
+    UpdateStatus, UploadProgress,
 };
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
@@ -85,6 +85,8 @@ pub const RING_EVENT: &str = "mostik://ring";
 
 /// A new [`UpdateStatus`]: an update was found or is being installed.
 pub const UPDATE_EVENT: &str = "mostik://update";
+/// How far the upload of a file of a sending has got: [`UploadProgress`].
+pub const UPLOAD_EVENT: &str = "mostik://upload";
 
 pub async fn bootstrap() -> Result<Boot, String> {
     call::<cmd::Bootstrap>(()).await
@@ -387,19 +389,32 @@ pub async fn keep_file(name: &str, data: &js_sys::ArrayBuffer) -> Result<Pending
     serde_wasm_bindgen::from_value(value).map_err(|e| format!("{}: {e}", cmd::KeepFile::NAME))
 }
 
+/// Uploads and sends files; with `upload` their progress comes as [`UPLOAD_EVENT`] and
+/// [`cancel_upload`] may stop one.
 pub async fn send_files(
     chat_id: &str,
     thread: Option<Timestamp>,
     paths: Vec<String>,
     text: &str,
+    upload: Option<&str>,
 ) -> Result<Vec<Message>, String> {
     let args = cmd::SendFilesArgs {
         chat_id: ChatId(chat_id.into()),
         thread,
         paths,
         text: text.into(),
+        upload: upload.map(str::to_owned),
     };
     call::<cmd::SendFiles>(args).await
+}
+
+/// Stops the upload of the file at `path` of sending `upload`.
+pub async fn cancel_upload(upload: &str, path: &str) -> Result<(), String> {
+    let args = cmd::UploadFileArgs {
+        upload: upload.into(),
+        path: path.into(),
+    };
+    call::<cmd::CancelUpload>(args).await
 }
 
 pub async fn presence(guids: Vec<String>) -> Result<Vec<mostik_core::PresenceInfo>, String> {

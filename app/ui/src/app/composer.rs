@@ -305,14 +305,16 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             // A reply is a text message: attached files follow it without a caption. Files alone
             // keep the reply bar for the text that comes next.
             let replied = replying.is_some() && !text.is_empty();
+            // Files go on their own: the message shows in the feed with their upload at once, and
+            // the field is free.
             let result = match (replying.clone(), with_files) {
                 (Some(r), true) if !text.is_empty() => {
                     match ops::send(c, chat.clone(), text, thread_parent, Some(r)).await {
-                        Ok(()) => ops::send_files(c, chat, String::new(), thread_parent).await,
+                        Ok(()) => ops::send_files(c, chat, String::new(), thread_parent),
                         Err(e) => Err(e),
                     }
                 }
-                (_, true) => ops::send_files(c, chat, text, thread_parent).await,
+                (_, true) => ops::send_files(c, chat, text, thread_parent),
                 (r, false) => ops::send(c, chat, text, thread_parent, r).await,
             };
             // The composer may be gone by now (the user left the chat view while files uploaded).

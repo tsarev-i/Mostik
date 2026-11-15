@@ -117,6 +117,7 @@ pub fn App() -> impl IntoView {
         settings,
         status_dialog: RwSignal::new(false),
         pending_files: RwSignal::new(std::collections::HashMap::new()),
+        outbox: RwSignal::new(vec![]),
         new_message: RwSignal::new(false),
         creating_channel: RwSignal::new(None),
         details: RwSignal::new(None),

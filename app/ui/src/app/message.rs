@@ -829,3 +829,114 @@ mod tests {
         assert_eq!(preview(message("", vec![], vec![])), None);
     }
 }
+
+/// The messages with files on their way in the open chat, or in its open thread for the thread
+/// pane, at the end of the feed: the sender, the text and each file with how far its upload has
+/// got, as the official client shows them. A click on the circle of a file cancels it; a message
+/// that failed says so, with "Retry" and "Remove".
+#[component]
+pub(super) fn Outbox(#[prop(optional)] in_thread: bool) -> impl IntoView {
+    let c = ctx();
+    let here = Memo::new(move |_| {
+        let chat = c.current.get();
+        let thread = if in_thread { c.thread.get() } else { None };
+        if in_thread && thread.is_none() {
+            return vec![];
+        }
+        c.outbox.with(|o| {
+            o.iter()
+                .filter(|m| m.chat == chat && m.thread == thread)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    });
+    move || {
+        here.get()
+            .into_iter()
+            .map(|m| view! { <OutgoingRow out=m/> })
+            .collect_view()
+    }
+}
+
+/// One [`ops::Outgoing`] message.
+#[component]
+fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
+    let c = ctx();
+    let me = c.snap.with_untracked(|s| s.user(&s.me).cloned());
+    let name = me.as_ref().map(|u| u.display_name.clone()).unwrap_or_default();
+    let face = me.map(|u| view! { <Avatar user=u size=36/> });
+    let failed = out.failed.clone();
+    let status = match &failed {
+        Some(_) => view! { <span class="out-status failed">{tr().not_sent}</span> }.into_any(),
+        None => view! { <span class="out-status">{tr().sending}</span> }.into_any(),
+    };
+    let text = (!out.text.trim().is_empty()).then(|| {
+        let who = c.snap.with_untracked(|s| s.mention_names());
+        let me = c.snap.with_untracked(|s| s.me.clone());
+        let body = who.with(|who| render_text(&out.text, who, Me { id: &me.0, name: &name }, false));
+        view! { <div class="msg-text">{body}</div> }
+    });
+    let id = out.id.clone();
+    let files = out
+        .files
+        .iter()
+        .map(|f| {
+            let (id, path) = (id.clone(), f.file.path.clone());
+            let total = f.file.size.max(1);
+            let share = (f.sent.min(total) as f64 / total as f64).clamp(0.0, 1.0);
+            // A circle of radius 9: its length is 2πr.
+            let length = 2.0 * std::f64::consts::PI * 9.0;
+            let dash = format!("{:.1} {length:.1}", share * length);
+            let can_cancel = !f.cancelled && !f.done() && failed.is_none();
+            let ring = view! {
+                <svg class="out-ring" viewBox="0 0 24 24" width="24" height="24">
+                    <circle class="out-ring-track" cx="12" cy="12" r="9"/>
+                    <circle class="out-ring-fill" cx="12" cy="12" r="9" stroke-dasharray=dash transform="rotate(-90 12 12)"/>
+                    {can_cancel.then(|| view! { <path class="out-ring-x" d="M9 9l6 6M15 9l-6 6"/> })}
+                </svg>
+            };
+            view! {
+                <div class="file-card out-file" class:cancelled=f.cancelled>
+                    <span class="file-icon">{if f.file.image { "🖼" } else { "📄" }}</span>
+                    <span class="file-meta">
+                        <span class="file-name">{f.file.name.clone()}</span>
+                        <span class="file-size">{if f.cancelled { tr().upload_cancelled.to_owned() } else { human_size(f.file.size) }}</span>
+                    </span>
+                    {if can_cancel {
+                        view! {
+                            <button class="out-cancel" title=tr().cancel_upload on:click=move |_| ops::cancel_file(c, &id, &path)>{ring}</button>
+                        }.into_any()
+                    } else {
+                        view! { <span class="out-cancel">{ring}</span> }.into_any()
+                    }}
+                </div>
+            }
+        })
+        .collect_view();
+    let actions = failed.map(|why| {
+        let (retry, remove) = (id.clone(), id.clone());
+        view! {
+            <div class="out-failed">
+                <span class="out-why">{why}</span>
+                <button class="btn small" on:click=move |_| ops::retry_upload(c, &retry)>{tr().retry}</button>
+                <button class="btn small" on:click=move |_| ops::drop_upload(c, &remove)>{tr().remove}</button>
+            </div>
+        }
+    });
+    view! {
+        <div class="msg outgoing">
+            <div class="msg-row">
+                <div class="msg-gutter">{face}</div>
+                <div class="msg-content">
+                    <div class="msg-head">
+                        <span class="msg-author">{name.clone()}</span>
+                        {status}
+                    </div>
+                    {text}
+                    <div class="attachments">{files}</div>
+                    {actions}
+                </div>
+            </div>
+        </div>
+    }
+}

@@ -97,6 +97,17 @@ pub struct PendingFile {
     pub image: bool,
 }
 
+/// How far the upload of a file of a sending has gone (`mostik://upload`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadProgress {
+    /// The UI's id of the sending ([`cmd::SendFilesArgs::upload`]).
+    pub upload: String,
+    /// The file, as the UI attached it.
+    pub path: String,
+    pub sent: u64,
+    pub total: u64,
+}
+
 /// Files dropped onto the chat window and where, in logical pixels of the window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Dropped {
@@ -213,6 +224,15 @@ mod tests {
             json!({ "chat_id": "c1", "ts": 10, "thread_parent": null }),
         );
         pinned(Sent { ts: 10, seq_no: 3 }, json!({ "ts": 10, "seq_no": 3 }));
+        pinned(
+            UploadProgress {
+                upload: "up1".into(),
+                path: "/tmp/a.png".into(),
+                sent: 5,
+                total: 9,
+            },
+            json!({ "upload": "up1", "path": "/tmp/a.png", "sent": 5, "total": 9 }),
+        );
         pinned(
             Dropped {
                 files: vec![PendingFile {

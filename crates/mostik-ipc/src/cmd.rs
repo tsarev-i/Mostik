@@ -182,6 +182,17 @@ pub struct SendFilesArgs {
     pub thread: Option<Timestamp>,
     pub paths: Vec<String>,
     pub text: String,
+    /// The UI's id of this sending: its progress comes as [`crate::UploadProgress`] with it, and
+    /// [`CancelUpload`] names it.
+    pub upload: Option<String>,
+}
+
+/// One file of a sending going on: [`CancelUpload`] stops its upload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadFileArgs {
+    pub upload: String,
+    pub path: String,
 }
 
 // People and chats.
@@ -481,6 +492,8 @@ commands! {
     KeepFile = "keep_file", RawBody => PendingFile;
     ForgetFile = "forget_file", PathArgs => ();
     SendFiles = "send_files", SendFilesArgs => Vec<Message>;
+    /// Stops the upload of one file of a sending: the rest goes without it.
+    CancelUpload = "cancel_upload", UploadFileArgs => ();
 
     // People and chats.
     UserProfile = "user_profile", GuidArgs => mostik_core::UserProfile;
@@ -783,8 +796,16 @@ mod tests {
                 thread: Some(5),
                 paths: vec!["/tmp/a.png".into()],
                 text: "".into(),
+                upload: Some("up1".into()),
             },
-            json!({ "chatId": "c1", "thread": 5, "paths": ["/tmp/a.png"], "text": "" }),
+            json!({ "chatId": "c1", "thread": 5, "paths": ["/tmp/a.png"], "text": "", "upload": "up1" }),
+        );
+        pinned(
+            UploadFileArgs {
+                upload: "up1".into(),
+                path: "/tmp/a.png".into(),
+            },
+            json!({ "upload": "up1", "path": "/tmp/a.png" }),
         );
         pinned(GuidArgs { guid: guid() }, json!({ "guid": "u1" }));
         pinned(

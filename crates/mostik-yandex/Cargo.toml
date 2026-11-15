@@ -15,6 +15,8 @@ thiserror.workspace = true
 uuid.workspace = true
 rmpv = "1"
 bytes = "1"
+# The body of an upload, in pieces for its progress (`reqwest::Body::wrap`); already in the tree.
+http-body = "1"
 reqwest = { version = "0.13", features = ["multipart"] }
 cookie = "0.18"
 # Already in the tree through reqwest and url.

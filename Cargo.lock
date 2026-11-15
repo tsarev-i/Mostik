@@ -3107,6 +3107,7 @@ dependencies = [
  "bytes",
  "cookie",
  "futures-util",
+ "http-body",
  "hyper-util",
  "mostik-core",
  "percent-encoding",

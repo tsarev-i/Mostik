@@ -12,7 +12,7 @@ use crate::{ops, time};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_badge};
 use super::menus::open_menu_below_end;
-use super::message::MessageRow;
+use super::message::{MessageRow, Outbox};
 use super::state::{ChatTab, Ctx, CtxMenu, CtxTarget, DetailsTab, close_menus, ctx};
 
 #[component]
@@ -225,8 +225,29 @@ pub(super) fn MessageList() -> impl IntoView {
         }
         newest
     });
+    // A message with files the user has just sent shows at the end at once: it takes the list to
+    // the bottom too, and the list keeps its place while it changes.
+    let outgoing = Memo::new(move |_| {
+        let id = c.current.get();
+        c.outbox.with(|o| {
+            o.iter()
+                .filter(|m| m.chat == id && m.thread.is_none())
+                .map(|m| (m.id.clone(), m.failed.is_some()))
+                .collect::<Vec<_>>()
+        })
+    });
+    Effect::new(move |seen: Option<Vec<(String, bool)>>| {
+        let now = outgoing.get();
+        if let Some(seen) = seen
+            && now.iter().any(|(id, _)| !seen.iter().any(|(s, _)| s == id))
+        {
+            stick.set(true);
+        }
+        now
+    });
     Effect::new(move |_| {
         messages.track();
+        outgoing.track();
         // When the loading stops, an older page has come or the start of the chat shows above.
         c.loading_older.track();
         restoring.set_value(true);
@@ -353,6 +374,7 @@ pub(super) fn MessageList() -> impl IntoView {
                 }
             }}
             <Feed messages=messages/>
+            <Outbox/>
         </div>
     }
 }

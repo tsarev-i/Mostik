@@ -116,26 +116,172 @@ pub async fn send(
 
 /// Sends the files attached in `chat` (in the thread of `thread`) with a caption; not available in
 /// demo mode.
-pub async fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>) -> Result<(), String> {
+/// A message with files on its way, shown in the feed at once, as the official client does: each
+/// file with how far its upload has got, and a click on it cancels it. On an error it stays, "not
+/// sent", with a retry. The sent messages take its place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outgoing {
+    /// The id of the sending for the backend: its progress and cancels name it.
+    pub id: String,
+    pub chat: ChatId,
+    pub thread: Option<Timestamp>,
+    pub text: String,
+    pub files: Vec<OutFile>,
+    /// Why it was not sent.
+    pub failed: Option<String>,
+    /// When it was sent, for its place among the messages.
+    pub ts: Timestamp,
+}
+
+/// A file of an [`Outgoing`] message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutFile {
+    pub file: bridge::PendingFile,
+    /// Bytes uploaded so far.
+    pub sent: u64,
+    pub cancelled: bool,
+}
+
+impl OutFile {
+    /// Uploaded whole: too late to cancel.
+    pub fn done(&self) -> bool {
+        self.file.size > 0 && self.sent >= self.file.size
+    }
+}
+
+/// Sends the files attached to the field of `chat` (or of its thread of `thread`) with `text` as
+/// an [`Outgoing`] message: the field gives them up at once and the feed shows the message while
+/// the files go.
+pub fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>) -> Result<(), String> {
     if !c.live {
         return Err(tr().only_in_app_files.into());
     }
-    let paths: Vec<String> = attached(c, &chat, thread).into_iter().map(|f| f.path).collect();
-    let sent = bridge::send_files(&chat.0, thread, paths.clone(), &with_mention_ids(c, &text)).await?;
-    // Only what went: the user may have attached more while it was uploading.
-    let key = (chat, thread);
+    let files = attached(c, &chat, thread);
     c.pending_files.update(|all| {
-        if let Some(list) = all.get_mut(&key) {
-            list.retain(|f| !paths.contains(&f.path));
-            if list.is_empty() {
-                all.remove(&key);
+        all.remove(&(chat.clone(), thread));
+    });
+    let id = format!("up-{:x}", super::random_u64());
+    c.outbox.update(|o| {
+        o.push(Outgoing {
+            id: id.clone(),
+            chat,
+            thread,
+            text,
+            files: files
+                .into_iter()
+                .map(|file| OutFile {
+                    file,
+                    sent: 0,
+                    cancelled: false,
+                })
+                .collect(),
+            failed: None,
+            ts: super::now_mcs(),
+        })
+    });
+    run_upload(c, id);
+    Ok(())
+}
+
+/// Uploads and sends [`Outgoing`] message `id`: its files that are not cancelled, with its text.
+fn run_upload(c: Ctx, id: String) {
+    let Some(out) = c.outbox.with_untracked(|o| o.iter().find(|m| m.id == id).cloned()) else {
+        return;
+    };
+    let paths: Vec<String> = out
+        .files
+        .iter()
+        .filter(|f| !f.cancelled)
+        .map(|f| f.file.path.clone())
+        .collect();
+    let text = with_mention_ids(c, &out.text);
+    spawn_local(async move {
+        match bridge::send_files(&out.chat.0, out.thread, paths, &text, Some(&id)).await {
+            Ok(sent) => {
+                // A file cancelled before a retry was not asked for again: the pasted bytes the
+                // app kept for it go here.
+                let cancelled: Vec<String> = c.outbox.with_untracked(|o| {
+                    o.iter()
+                        .filter(|m| m.id == id)
+                        .flat_map(|m| m.files.iter().filter(|f| f.cancelled).map(|f| f.file.path.clone()))
+                        .collect()
+                });
+                c.outbox.update(|o| o.retain(|m| m.id != id));
+                for m in sent {
+                    upsert(c, m, None);
+                }
+                for path in cancelled {
+                    if let Err(e) = bridge::forget_file(&path).await {
+                        leptos::logging::warn!("forget_file: {e}");
+                    }
+                }
+            }
+            Err(e) => c.outbox.update(|o| {
+                if let Some(m) = o.iter_mut().find(|m| m.id == id) {
+                    m.failed = Some(e);
+                }
+            }),
+        }
+    });
+}
+
+/// "Retry" on a message that was not sent: what has not gone goes again, its files from the start.
+pub fn retry_upload(c: Ctx, id: &str) {
+    c.outbox.update(|o| {
+        if let Some(m) = o.iter_mut().find(|m| m.id == id) {
+            m.failed = None;
+            for f in &mut m.files {
+                f.sent = 0;
             }
         }
     });
-    for m in sent {
-        upsert(c, m, None);
+    run_upload(c, id.to_owned());
+}
+
+/// "Remove" on a message that was not sent: it goes, and so do the pasted files it kept.
+pub fn drop_upload(c: Ctx, id: &str) {
+    let gone = c.outbox.with_untracked(|o| o.iter().find(|m| m.id == id).cloned());
+    c.outbox.update(|o| o.retain(|m| m.id != id));
+    for f in gone.into_iter().flat_map(|m| m.files) {
+        spawn_local(async move {
+            if let Err(e) = bridge::forget_file(&f.file.path).await {
+                leptos::logging::warn!("forget_file: {e}");
+            }
+        });
     }
-    Ok(())
+}
+
+/// A click on the upload circle of a file: the message goes without it.
+pub fn cancel_file(c: Ctx, id: &str, path: &str) {
+    c.outbox.update(|o| {
+        if let Some(f) = o
+            .iter_mut()
+            .find(|m| m.id == id)
+            .and_then(|m| m.files.iter_mut().find(|f| f.file.path == path))
+        {
+            f.cancelled = true;
+        }
+    });
+    let (id, path) = (id.to_owned(), path.to_owned());
+    spawn_local(async move {
+        if let Err(e) = bridge::cancel_upload(&id, &path).await {
+            leptos::logging::warn!("cancel_upload: {e}");
+        }
+    });
+}
+
+/// How far a file of an [`Outgoing`] message has got.
+pub fn upload_progress(c: Ctx, p: bridge::UploadProgress) {
+    c.outbox.update(|o| {
+        if let Some(f) = o
+            .iter_mut()
+            .find(|m| m.id == p.upload)
+            .and_then(|m| m.files.iter_mut().find(|f| f.file.path == p.path))
+        {
+            f.sent = p.sent;
+            f.file.size = p.total;
+        }
+    });
 }
 
 /// Attaches `files` to the message being written in `chat`, or in its thread of `thread`; a file

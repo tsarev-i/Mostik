@@ -78,6 +78,8 @@ pub struct Ctx {
     /// thread's parent (`None` for the chat's own field): a file attached in one chat or thread
     /// never goes to another.
     pub pending_files: RwSignal<std::collections::HashMap<Place, Vec<bridge::PendingFile>>>,
+    /// Messages with files on their way, shown in the feed until they are sent.
+    pub outbox: RwSignal<Vec<crate::ops::Outgoing>>,
     pub new_message: RwSignal<bool>,
     /// The "Create a channel" dialog.
     pub creating_channel: RwSignal<Option<NewChannel>>,

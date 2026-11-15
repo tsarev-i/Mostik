@@ -133,6 +133,10 @@ pub fn subscribe(c: Ctx) {
         }
         let rang = std::rc::Rc::new(std::cell::Cell::new(false));
         let heard = rang.clone();
+        bridge::listen(bridge::UPLOAD_EVENT, move |p: bridge::UploadProgress| {
+            super::upload_progress(c, p)
+        })
+        .await;
         bridge::listen(bridge::RING_EVENT, move |ring: Option<bridge::Ring>| {
             heard.set(true);
             c.ring.set(ring)

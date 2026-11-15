@@ -441,3 +441,17 @@
 .tp-divider::after { content: ""; flex: 1; border-top: 1px solid var(--border-soft); }
 .thread-pane .msg { padding-left: 16px; padding-right: 16px; }
 .thread-pane .msg-actions { right: 12px; }
+
+/* A message with files on its way: each file with its upload circle, which cancels it. */
+.msg.outgoing .msg-text { opacity: 0.75; }
+.out-status { font-size: 12px; color: var(--text-muted); }
+.out-status.failed { color: var(--badge); font-weight: 700; }
+.out-file { cursor: default; }
+.out-file.cancelled .file-name { text-decoration: line-through; opacity: 0.6; }
+.out-cancel { flex: none; display: grid; place-items: center; margin-left: 8px; }
+.out-ring-track { fill: none; stroke: var(--border); stroke-width: 2.5; }
+.out-ring-fill { fill: none; stroke: var(--accent-blue); stroke-width: 2.5; stroke-linecap: round; transition: stroke-dasharray 0.15s linear; }
+.out-ring-x { stroke: var(--text-muted); stroke-width: 1.8; stroke-linecap: round; }
+button.out-cancel:hover .out-ring-x { stroke: var(--text-strong); }
+.out-failed { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.out-why { font-size: 13px; color: var(--badge); }

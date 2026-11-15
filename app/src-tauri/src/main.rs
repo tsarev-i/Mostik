@@ -324,6 +324,7 @@ fn main() {
             backend::files::keep_file,
             backend::files::forget_file,
             backend::files::send_files,
+            backend::files::cancel_upload,
             backend::presence::presence,
             backend::presence::set_status,
             update::update_status,

@@ -17,7 +17,7 @@ use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_ba
 use super::composer::Composer;
 use super::drafts::{self, DraftKey};
 use super::feed::{Feed, call_title, chat_note_text};
-use super::message::{MessageRow, message_preview};
+use super::message::{MessageRow, Outbox, message_preview};
 use super::sidebar::unread_count;
 use super::state::{CtxMenu, CtxTarget, ViewMode, ctx};
 use super::text::render_text;
@@ -67,6 +67,7 @@ pub(super) fn ThreadPane() -> impl IntoView {
                         // No "0 replies" once the last reply is deleted, as in Slack.
                         {move || (n() > 0).then(|| view! { <div class="tp-divider"><span>{tr().replies(n())}</span></div> })}
                         <Feed messages=replies in_thread=true/>
+                        <Outbox in_thread=true/>
                     })
                 }}
             </div>
