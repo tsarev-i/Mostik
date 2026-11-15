@@ -180,6 +180,9 @@
 .sb-you { color: rgba(var(--chrome-ink), 0.55); font-weight: 400; }
 .sb-add { color: rgba(var(--chrome-ink), 0.75); }
 
+/* The unread count of a chat that is not for the user in particular, as against a red one. */
+.badge.quiet { background: rgba(var(--chrome-ink), 0.22); color: var(--chrome-strong); }
+.sb-row.selected .badge.quiet, .dm-row.selected .badge.quiet { background: rgba(0, 0, 0, 0.35); color: #fff; }
 .badge {
   margin-left: auto;
   min-width: 18px;

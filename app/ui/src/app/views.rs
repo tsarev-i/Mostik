@@ -17,6 +17,7 @@ use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_ba
 use super::composer::Composer;
 use super::feed::{Feed, call_title, chat_note_text};
 use super::message::{MessageRow, message_preview};
+use super::sidebar::unread_count;
 use super::state::{CtxMenu, CtxTarget, ViewMode, ctx};
 use super::text::render_text;
 
@@ -135,6 +136,7 @@ pub(super) fn DmList() -> impl IntoView {
                             </span>
                             <span class="dm-preview">{preview}</span>
                         </span>
+                        {unread_count(&ch).map(|(n, quiet)| view! { <span class="badge" class:quiet=quiet>{n}</span> })}
                     </button>
                 }
             }).collect_view()}

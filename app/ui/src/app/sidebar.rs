@@ -796,12 +796,13 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                 matches!(ch.kind, ChatKind::Notes).then(|| view! { <span class="sb-you">{tr().you_short}</span> });
             let live = live.get();
             let face_status = face_status.get().as_ref().map(status_view);
-            let badge = (ch.mentions > 0).then(|| view! { <span class="badge">{ch.mentions}</span> });
+            let count = unread_count(&ch);
+            let badge = count.map(|(n, quiet)| view! { <span class="badge" class:quiet=quiet>{n}</span> });
             let live_call = live.then(|| {
                 view! { <span class="sb-call" title=tr().call_live_hint><Icon icon=I::Headphones size=13/></span> }
             });
             let has_draft = !selected.get() && has_draft.get();
-            let pencil = (has_draft && ch.mentions == 0)
+            let pencil = (has_draft && count.is_none())
                 .then(|| view! { <span class="sb-pencil"><Icon icon=I::Compose size=13/></span> });
             // "×" on hover hides the chat, as closing a conversation in Slack. Not a nested button:
             // the row is one already.
@@ -832,5 +833,52 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                 </button>
             }
         })
+    }
+}
+
+/// The number at the right of a sidebar chat and whether it is a quiet one. What is for the user
+/// counts in red, as the app icon counts it: mentions, and every unread message of a direct chat
+/// that notifies about everything. The other unread messages count in grey; a muted chat counts
+/// only its mentions.
+pub(super) fn unread_count(ch: &Chat) -> Option<(u32, bool)> {
+    let urgent = match ch.kind {
+        ChatKind::Direct { .. } if ch.notify_level() == NotifyLevel::All => ch.unread.max(ch.mentions),
+        _ => ch.mentions,
+    };
+    if urgent > 0 {
+        return Some((urgent, false));
+    }
+    (ch.unread > 0 && !ch.muted).then_some((ch.unread, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unread_counts() {
+        let chat = |kind, unread, mentions, level| {
+            let mut ch = Chat {
+                unread,
+                mentions,
+                ..Chat::new(ChatId("c".into()), kind)
+            };
+            ch.set_notify_level(level);
+            ch
+        };
+        let group = || ChatKind::Group { public: true };
+        let direct = || ChatKind::Direct {
+            peer: UserId("u".into()),
+        };
+        assert_eq!(unread_count(&chat(group(), 0, 0, NotifyLevel::All)), None);
+        assert_eq!(unread_count(&chat(group(), 5, 0, NotifyLevel::All)), Some((5, true)));
+        assert_eq!(unread_count(&chat(group(), 5, 2, NotifyLevel::All)), Some((2, false)));
+        assert_eq!(unread_count(&chat(group(), 5, 0, NotifyLevel::Mentions)), None);
+        assert_eq!(
+            unread_count(&chat(group(), 5, 1, NotifyLevel::Mentions)),
+            Some((1, false))
+        );
+        assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::All)), Some((3, false)));
+        assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::Nothing)), None);
     }
 }
