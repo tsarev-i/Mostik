@@ -1,26 +1,34 @@
 //! The unread mark on the app icons, as in Slack: a blue dot on the tray icon for unread messages,
 //! a red one for unread direct messages and mentions. On Windows the red mark also goes on the
 //! taskbar button, on macOS a badge with their number on the Dock icon.
+//!
+//! The tray icon itself is chosen in "Preferences → Appearance" on Linux and Windows: the white
+//! truss of the app icon on transparency (the default on Linux; lost on a light panel) or the app
+//! icon (the default on Windows). macOS always shows the white truss, as a template the menu bar
+//! colours for its own background.
 
 use mostik_core::UnreadBadge;
-use tauri::AppHandle;
 use tauri::image::Image;
+use tauri::{AppHandle, Manager};
+
+use crate::backend::{AppState, Prefs, TrayIcon};
 
 /// Slack's colours of the two marks.
 const BLUE: [u8; 3] = [0x1d, 0x9b, 0xd1];
 const RED: [u8; 3] = [0xe0, 0x1e, 0x5a];
 
+/// The menu bar of macOS colours the tray icon by its alpha alone.
+pub const TEMPLATE: bool = cfg!(target_os = "macos");
+
 /// Shows `badge` on the tray icon, and on the taskbar button or the Dock icon; `count` is the
 /// number of unread direct messages and mentions behind a red mark.
 pub fn show(app: &AppHandle, badge: UnreadBadge, count: u32) -> tauri::Result<()> {
-    if let (Some(tray), Some(icon)) = (app.tray_by_id("main"), app.default_window_icon()) {
-        let image = match badge {
-            UnreadBadge::None => icon.clone(),
-            UnreadBadge::Unread => with_dot(icon, BLUE),
-            UnreadBadge::Mention => with_dot(icon, RED),
-        };
-        tray.set_icon(Some(image))?;
+    if let Some(state) = app.try_state::<AppState>()
+        && let Ok(mut shown) = state.tray_badge.lock()
+    {
+        *shown = badge;
     }
+    draw_tray(app, badge)?;
     #[cfg(windows)]
     if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
         window.set_overlay_icon((badge == UnreadBadge::Mention).then(|| dot(16, RED)))?;
@@ -36,6 +44,43 @@ pub fn show(app: &AppHandle, badge: UnreadBadge, count: u32) -> tauri::Result<()
     #[cfg(not(target_os = "macos"))]
     let _ = count;
     Ok(())
+}
+
+/// Draws the tray icon again with the mark it has, after "Preferences" changed the icon.
+pub fn restyle(app: &AppHandle) -> tauri::Result<()> {
+    let badge = app
+        .try_state::<AppState>()
+        .and_then(|s| s.tray_badge.lock().ok().map(|b| *b))
+        .unwrap_or_default();
+    draw_tray(app, badge)
+}
+
+/// Puts the tray icon with the mark of `badge` in the tray.
+fn draw_tray(app: &AppHandle, badge: UnreadBadge) -> tauri::Result<()> {
+    let (Some(tray), Some(icon)) = (app.tray_by_id("main"), tray_icon(app)) else {
+        return Ok(());
+    };
+    let image = match badge {
+        UnreadBadge::None => icon,
+        UnreadBadge::Unread => with_dot(&icon, BLUE),
+        UnreadBadge::Mention => with_dot(&icon, RED),
+    };
+    tray.set_icon_with_as_template(Some(image), TEMPLATE)
+}
+
+/// The tray icon without a mark (see the module docs).
+pub fn tray_icon(app: &AppHandle) -> Option<Image<'static>> {
+    let choice = if TEMPLATE {
+        TrayIcon::White
+    } else {
+        app.try_state::<AppState>()
+            .and_then(|s| s.prefs.lock().ok().map(|p| p.tray_icon))
+            .unwrap_or_else(|| Prefs::default().tray_icon)
+    };
+    match choice {
+        TrayIcon::White => Some(tauri::include_image!("icons/tray.png")),
+        TrayIcon::App => app.default_window_icon().map(|icon| icon.clone().to_owned()),
+    }
 }
 
 /// `icon` with a dot of `color` in its bottom right corner, set apart from the icon by a

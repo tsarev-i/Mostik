@@ -92,8 +92,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 show_main(tray.app_handle());
             }
         });
-    if let Some(icon) = app.default_window_icon() {
-        tray = tray.icon(icon.clone());
+    if let Some(icon) = badge::tray_icon(app) {
+        tray = tray.icon(icon).icon_as_template(badge::TEMPLATE);
     }
     #[cfg(target_os = "linux")]
     {

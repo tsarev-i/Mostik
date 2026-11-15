@@ -147,7 +147,7 @@ pub struct Live {
     shared: Arc<StdMutex<Shared>>,
 }
 
-pub use mostik_ipc::cmd::NotifyMode;
+pub use mostik_ipc::cmd::{NotifyMode, TrayIcon};
 
 /// UI settings the backend needs (from "Preferences" in the UI).
 #[derive(Clone)]
@@ -157,6 +157,8 @@ pub struct Prefs {
     pub english: bool,
     /// Notification sound, one of [`mostik_core::NOTIFICATION_SOUNDS`].
     pub sound: String,
+    /// The tray icon on Linux and Windows (see [`crate::badge`]).
+    pub tray_icon: TrayIcon,
 }
 
 impl Default for Prefs {
@@ -169,6 +171,11 @@ impl Default for Prefs {
             preview: true,
             sound: "marimba".into(),
             english,
+            tray_icon: if cfg!(target_os = "linux") {
+                TrayIcon::White
+            } else {
+                TrayIcon::App
+            },
         }
     }
 }
@@ -222,6 +229,8 @@ pub fn allow_files(app: &AppHandle, paths: &[std::path::PathBuf]) -> Vec<Pending
 #[derive(Default)]
 pub struct AppState {
     pub prefs: StdMutex<Prefs>,
+    /// The unread mark on the tray icon, kept to draw it again in another colour.
+    pub tray_badge: StdMutex<mostik_core::UnreadBadge>,
     allowed_files: StdMutex<BTreeSet<String>>,
     /// Contents of the files pasted or dropped into the message field, by their [`KEPT`](files::KEPT) path.
     kept_files: StdMutex<BTreeMap<String, bytes::Bytes>>,

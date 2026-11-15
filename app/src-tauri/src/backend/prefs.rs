@@ -42,15 +42,22 @@ pub fn set_preferences(
         preview,
         lang,
         sound,
+        tray_icon,
     } = args;
     let english = lang == "en";
+    let mut restyle = false;
     if let Ok(mut p) = state.prefs.lock() {
+        restyle = p.tray_icon != tray_icon;
         *p = Prefs {
             notify,
             preview,
             english,
             sound,
+            tray_icon,
         };
+    }
+    if restyle {
+        let _ = crate::badge::restyle(&app);
     }
     if let Some(items) = app.try_state::<TrayItems>() {
         let _ = items.open.set_text(text(&app, "Открыть Мостик", "Open Mostik"));

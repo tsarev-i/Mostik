@@ -12,6 +12,12 @@ keep only what `tauri.conf.json` lists (`32x32.png`, `128x128.png`, `128x128@2x.
 `icon.ico`) and remove the rest: the `android` and `ios` directories, `64x64.png` and the Microsoft Store
 logos (`Square*Logo.png`, `StoreLogo.png`). The login screen logo `app/ui/assets/app-icon.png` is a 192 px copy:
 `magick docs/design/app-icon.png -resize 192x192 -strip app/ui/assets/app-icon.png`.
+The tray icon `app/src-tauri/icons/tray.png` is the white truss alone on transparency, 120 px wide on a 128 px square:
+`magick docs/design/app-icon.png -alpha off -colorspace Gray -level 6.3%,100% -alpha copy -fill white -colorize 100
+-trim +repage -resize 120x -gravity center -background none -extent 128x128 -strip PNG32:app/src-tauri/icons/tray.png`.
+"Preferences → Appearance → Tray icon" chooses between White (the default on Linux) and App icon (the default on
+Windows); their previews are `app/ui/assets/tray/*.png`, 56 px. The names do not repeat the colour modes or the themes:
+the tray icon follows neither. macOS has no choice: it shows the white icon as a template, which the menu bar colours.
 
 ## Layout
 

@@ -237,7 +237,7 @@ pub fn file_url(file_id: &str, size: Option<&str>) -> String {
 
 /// Passes to the backend what affects notifications and the tray.
 pub async fn set_preferences(s: &crate::settings::Settings) -> Result<(), String> {
-    use crate::settings::NotifyMode;
+    use crate::settings::{NotifyMode, TrayIcon};
     let notify = match s.notify {
         NotifyMode::All => cmd::NotifyMode::All,
         NotifyMode::DirectAndMentions => cmd::NotifyMode::Direct,
@@ -248,6 +248,10 @@ pub async fn set_preferences(s: &crate::settings::Settings) -> Result<(), String
         preview: s.notify_preview,
         lang: s.lang.code().into(),
         sound: s.sound.clone(),
+        tray_icon: match s.tray_icon {
+            TrayIcon::White => cmd::TrayIcon::White,
+            TrayIcon::App => cmd::TrayIcon::App,
+        },
     };
     call::<cmd::SetPreferences>(args).await
 }

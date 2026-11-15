@@ -173,10 +173,11 @@ pub fn FieldArea(
 /// The "Add link" hotkey that works here. On Linux Ctrl+Shift+U never reaches the page: GTK and
 /// IBus take it for typing a character by its Unicode code.
 fn link_keys() -> &'static str {
-    let linux = web_sys::window()
-        .and_then(|w| w.navigator().user_agent().ok())
-        .is_some_and(|ua| ua.contains("Linux"));
-    if linux { "Ctrl+Shift+K" } else { "Ctrl+Shift+U" }
+    if crate::settings::on_linux() {
+        "Ctrl+Shift+K"
+    } else {
+        "Ctrl+Shift+U"
+    }
 }
 
 /// Where the emoji picker of a field opens, and the field's selection it inserts into: the

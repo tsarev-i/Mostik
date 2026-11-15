@@ -332,6 +332,18 @@ pub struct PrefsArgs {
     pub lang: String,
     /// The notification sound.
     pub sound: String,
+    /// The tray icon on Linux and Windows; macOS always shows the white one as a template.
+    pub tray_icon: TrayIcon,
+}
+
+/// The tray icon from "Preferences".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrayIcon {
+    /// The white truss on transparency, for a dark panel.
+    White,
+    /// The app icon, the white truss on a near-black tile.
+    App,
 }
 
 /// What notifies, from "Preferences".
@@ -585,10 +597,11 @@ mod tests {
             preview: true,
             lang: "en".into(),
             sound: "bell".into(),
+            tray_icon: TrayIcon::App,
         };
         pinned(
             args,
-            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell" }),
+            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell", "trayIcon": "app" }),
         );
         let args = ThreadReadArgs {
             chat_id: ChatId("c1".into()),
