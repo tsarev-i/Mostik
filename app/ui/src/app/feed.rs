@@ -234,6 +234,25 @@ pub(super) fn MessageList() -> impl IntoView {
             stick.set(false);
         }
     });
+    // Older pages are asked again after a failure only while the user is in the chat: leaving it
+    // (for another chat, or for a view without the list) stops that. Opening a chat builds the list
+    // anew, so the chat it shows is kept here: by its cleanup `current` is already the next one.
+    let shown = std::sync::Arc::new(std::sync::Mutex::new(None::<ChatId>));
+    Effect::new({
+        let shown = shown.clone();
+        move |_| {
+            let id = c.current.get();
+            let prev = shown.lock().ok().and_then(|mut s| s.replace(id.clone()));
+            if let Some(prev) = prev.filter(|p| *p != id) {
+                ops::stop_older(c, &prev);
+            }
+        }
+    });
+    on_cleanup(move || {
+        if let Some(id) = shown.lock().ok().and_then(|mut s| s.take()) {
+            ops::stop_older(c, &id);
+        }
+    });
     // A short page may not fill the list, and then there is no scrolling to load older messages:
     // load them until the list scrolls or the history ends. Checked after every change of the list
     // and of the loading, once laid out, however the chat was opened.
