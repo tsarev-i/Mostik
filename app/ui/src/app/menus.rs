@@ -52,7 +52,12 @@ pub(super) fn ContextMenu(menu: CtxMenu) -> impl IntoView {
         subs_left.set(vw - (x + w) < SUBMENU_ROOM);
     });
     let items = match menu.target {
-        CtxTarget::Message { msg, mine, quote } => message_menu_items(c, *msg, mine, quote).into_any(),
+        CtxTarget::Message {
+            msg,
+            mine,
+            quote,
+            in_thread,
+        } => message_menu_items(c, *msg, mine, quote, in_thread).into_any(),
         CtxTarget::Chat(id) => chat_menu_items(c, id).into_any(),
         CtxTarget::ChatHeader(id) => header_menu_items(c, id).into_any(),
         CtxTarget::SidebarPrefs => sidebar_menu_items(c).into_any(),

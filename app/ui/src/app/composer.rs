@@ -439,6 +439,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 });
                 if let Some(m) = last {
                     ev.prevent_default();
+                    c.editing_in_thread.set(thread);
                     c.editing.set(Some(m));
                 }
             }

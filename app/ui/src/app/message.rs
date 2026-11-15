@@ -79,8 +79,13 @@ pub(super) fn MessageRow(
     let editing = {
         let key = key.clone();
         Memo::new(move |_| {
-            c.editing
-                .with(|e| e.as_ref().is_some_and(|m| (m.chat_id.clone(), m.ts) == key))
+            // A thread's parent opens the editor where its edit was opened: in the chat or the pane.
+            c.editing.with(|e| {
+                e.as_ref().is_some_and(|m| {
+                    (m.chat_id.clone(), m.ts) == key
+                        && (m.thread_parent.is_some() || c.editing_in_thread.get() == in_thread)
+                })
+            })
         })
     };
 
@@ -288,6 +293,7 @@ pub(super) fn MessageRow(
                 msg: Box::new(msg.get_untracked()),
                 mine,
                 quote,
+                in_thread,
             },
         }));
     };
@@ -344,7 +350,7 @@ pub(super) fn MessageRow(
                             (r.right(), r.bottom() + 4.0)
                         });
                     let quote = selected_in_message(ts);
-                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(msg.get_untracked()), mine, quote } }));
+                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(msg.get_untracked()), mine, quote, in_thread } }));
                 }><Icon icon=I::Kebab size=16/></button>
             </div>
             <Show when=move || picker_open.get()>
@@ -685,7 +691,13 @@ fn ReactionPicker(msg: Signal<Message>) -> impl IntoView {
 }
 
 /// Message menu items shared by the "More" button and the right click, like "More actions" in Slack.
-pub(super) fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -> impl IntoView {
+pub(super) fn message_menu_items(
+    c: Ctx,
+    msg: Message,
+    mine: bool,
+    quote: Option<String>,
+    in_pane: bool,
+) -> impl IntoView {
     let (m_edit, m_del, m_unread, m_link, m_fwd, m_pin) = (
         msg.clone(),
         msg.clone(),
@@ -749,6 +761,7 @@ pub(super) fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option
             <div class="menu-sep"></div>
             <button class="menu-icon-item" on:click=move |_| {
                 close_menus(c);
+                c.editing_in_thread.set(in_pane);
                 c.editing.set(Some(m_edit.clone()));
             }>{menu_item(I::Pencil, tr().edit)}</button>
             <button class="menu-icon-item danger" on:click=move |_| {

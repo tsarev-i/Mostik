@@ -43,6 +43,9 @@ pub struct Ctx {
     /// Chats an older history page is being loaded for.
     pub loading_older: RwSignal<std::collections::HashSet<ChatId>>,
     pub editing: RwSignal<Option<Message>>,
+    /// Whether the edit was opened in the thread pane: a thread's parent shows both in the chat
+    /// and on top of the pane, and only one of them opens the editor.
+    pub editing_in_thread: RwSignal<bool>,
     pub confirm_delete: RwSignal<Option<Message>>,
     /// Channel the user is about to leave from the sidebar menu: waits for confirmation.
     pub confirm_leave: RwSignal<Option<ChatId>>,
@@ -189,6 +192,8 @@ pub enum CtxTarget {
         mine: bool,
         /// Text selected in the message when the menu opened: "Quote selection" sends it.
         quote: Option<String>,
+        /// The menu is of the message's row in the thread pane.
+        in_thread: bool,
     },
     Chat(ChatId),
     /// The "⋮" menu in a channel header.

@@ -96,6 +96,7 @@ pub fn App() -> impl IntoView {
         exhausted: RwSignal::new(HashSet::new()),
         loading_older: RwSignal::new(Default::default()),
         editing: RwSignal::new(None),
+        editing_in_thread: RwSignal::new(false),
         confirm_delete: RwSignal::new(None),
         confirm_leave: RwSignal::new(None),
         picker: RwSignal::new(None),
@@ -203,6 +204,22 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| c.drafts.with(drafts::save));
     Effect::new(move |_| c.chat_order.with(order::save));
     Effect::new(move |_| c.hidden.with(hidden::save));
+    // An edit opened in the thread pane ends when the pane closes or shows another thread: its
+    // editor is gone, and an invisible edit would keep Esc from cancelling a reply. Its text stays
+    // in the drafts, as when another editor opens.
+    Effect::new(move |_| {
+        let (thread, chat) = (c.thread.get(), c.current.get());
+        if !c.editing_in_thread.get_untracked() {
+            return;
+        }
+        let shown = c.editing.with_untracked(|e| {
+            e.as_ref()
+                .is_none_or(|m| thread.is_some_and(|t| m.chat_id == chat && (m.ts == t || m.thread_parent == Some(t))))
+        });
+        if !shown {
+            c.editing.set(None);
+        }
+    });
     // Sections an earlier Mostik kept in this browser move into Telemost folders, once.
     let migrated = StoredValue::new(false);
     Effect::new(move |_| {
