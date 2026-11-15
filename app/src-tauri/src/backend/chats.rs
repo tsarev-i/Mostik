@@ -3,10 +3,10 @@
 
 use mostik_core::{Chat, ChatId, ChatKind, NotifyLevel, User, UserId};
 use mostik_ipc::cmd::{
-    self, Args, ChatArgs, CreateChannelArgs, FoldersArgs, GuidArgs, MembersArgs, MessageSearchArgs, NotifyLevelArgs,
-    Out, PeopleSearchArgs, StarArgs, UpdateChatArgs,
+    self, Args, ChatArgs, CreateChannelArgs, DirectorySearchArgs, FoldersArgs, GuidArgs, MembersArgs,
+    MessageSearchArgs, NotifyLevelArgs, Out, PeopleSearchArgs, StarArgs, UpdateChatArgs,
 };
-use mostik_ipc::{ChatDetails, FoundMessages};
+use mostik_ipc::{ChatDetails, DirectoryHits, FoundMessages};
 use mostik_yandex::clock;
 use mostik_yandex::convert;
 use serde_json::{Value, json};
@@ -178,6 +178,75 @@ pub async fn search_messages(
     }
     note_files(&state, &live.me, &messages);
     Ok(FoundMessages { messages, users })
+}
+
+/// "Find a conversation" beyond the user's list: the public channels and people of organization
+/// `org` whose name has the query (the global `search`), and the public channels Telemost
+/// recommends that have it in their name (`get_recommended_chats`): the search may leave out
+/// the channels the user is not in.
+#[tauri::command]
+pub async fn search_directory(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::SearchDirectory>,
+) -> Result<Out<cmd::SearchDirectory>, String> {
+    let DirectorySearchArgs { query, org } = args;
+    let live = live(&state).await?;
+    let org = org.or_else(|| live.shared.lock().ok().and_then(|sh| sh.orgs.first().copied()));
+    let Some(org) = org else {
+        return Ok(DirectoryHits {
+            chats: vec![],
+            people: vec![],
+        });
+    };
+    let (mut web, mut web2) = (live.web.clone_light(), live.web.clone_light());
+    let (found, recommended) = futures_util::future::join(
+        web.rpc(
+            "search",
+            json!({ "query": query, "limit": 20, "entities": ["chats", "users"], "organization_id": org }),
+        ),
+        web2.rpc("get_recommended_chats", json!({ "limit": 50 })),
+    )
+    .await;
+    let found = found.map_err(|e| web_error(&app, e))?;
+    rpc_ok(&found)?;
+    let needle = query.trim().to_lowercase();
+    let recommended = recommended.ok().filter(|v| rpc_ok(v).is_ok());
+    let named = |c: &&Value| {
+        c.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.to_lowercase().contains(&needle))
+    };
+    let mut chats: Vec<Chat> = Vec::new();
+    let candidates = convert::search_items(&found, "chats").chain(
+        recommended
+            .iter()
+            .flat_map(|v| v.pointer("/data/chats").and_then(Value::as_array).into_iter().flatten())
+            .filter(named),
+    );
+    for chat in candidates.filter_map(|c| rpc_chat(c, &live.me)) {
+        let in_org = chat.organizations.is_empty() || chat.organizations.contains(&org);
+        if chat.kind == (ChatKind::Group { public: true })
+            && in_org
+            && !service::is_service_chat(&chat)
+            && !chats.iter().any(|c| c.id == chat.id)
+        {
+            chats.push(chat);
+        }
+    }
+    let mut people: Vec<User> = Vec::new();
+    for p in convert::search_items(&found, "users").filter_map(convert::profile) {
+        if p.id != live.me && !p.display_name.is_empty() && !people.iter().any(|u| u.id == p.id) {
+            people.push(User {
+                title: p.position,
+                avatar: p.avatar,
+                ..User::named(p.id, p.display_name)
+            });
+        }
+    }
+    // The search gives no photos: the directory does.
+    fill_profiles(&live.web, &mut people).await;
+    Ok(DirectoryHits { chats, people })
 }
 
 /// New group (a channel in Slack terms). You are a member and the admin.

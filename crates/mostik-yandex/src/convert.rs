@@ -1013,28 +1013,42 @@ pub const PROFILES_PER_REQUEST: usize = 32;
 
 /// Profiles from the HTTP RPC `get_users_data` response (`{guids: [...]}`).
 pub fn profiles(v: &Value) -> Vec<UserProfile> {
-    let text = |u: &Value, path: &[&str]| s(u, path).filter(|x| !x.is_empty()).map(str::to_owned);
     v.pointer("/data/users")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|u| {
-            Some(UserProfile {
-                id: UserId(s(u, &["guid"])?.to_owned()),
-                display_name: text(u, &["display_name"]).unwrap_or_default(),
-                email: text(u, &["email"]),
-                position: text(u, &["employee_info", "position"]),
-                department: text(u, &["employee_info", "department", "name"]),
-                organization: u
-                    .pointer("/employees_info/0/organization_name")
-                    .and_then(Value::as_str)
-                    .filter(|x| !x.is_empty())
-                    .map(str::to_owned),
-                nickname: text(u, &["nickname"]),
-                avatar: text(u, &["avatar_id"]),
-            })
-        })
+        .filter_map(profile)
         .collect()
+}
+
+/// A person's record of the directory, as `get_users_data` and the global `search` give it.
+pub fn profile(u: &Value) -> Option<UserProfile> {
+    let text = |path: &[&str]| s(u, path).filter(|x| !x.is_empty()).map(str::to_owned);
+    Some(UserProfile {
+        id: UserId(s(u, &["guid"])?.to_owned()),
+        display_name: text(&["display_name"]).unwrap_or_default(),
+        email: text(&["email"]),
+        position: text(&["employee_info", "position"]),
+        department: text(&["employee_info", "department", "name"]),
+        organization: u
+            .pointer("/employees_info/0/organization_name")
+            .and_then(Value::as_str)
+            .filter(|x| !x.is_empty())
+            .map(str::to_owned),
+        nickname: text(&["nickname"]),
+        avatar: text(&["avatar_id"]),
+    })
+}
+
+/// The records of `entity` (`chats`, `users`) a global `search` found: `data.<entity>.items[].data`,
+/// a chat as `get_chats_info` gives it, a person as `get_users_data` does. The search covers an
+/// organization only with `organization_id` (checked on 2026-11-15: without it, nothing).
+pub fn search_items<'a>(v: &'a Value, entity: &str) -> impl Iterator<Item = &'a Value> + use<'a> {
+    v.pointer(&format!("/data/{entity}/items"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("data"))
 }
 
 /// Own GUID from the chat list of a `history` response, for when `whoami` has failed: the chat
@@ -2341,5 +2355,29 @@ mod tests {
             oldest_record(&json!({"Chats": [{"ChatId": "0/0/a", "Messages": []}]})),
             None
         );
+    }
+
+    #[test]
+    fn global_search_items() {
+        let v = json!({"data": {
+            "chats": {"items": [
+                {"data": {"chat_id": "0/0/a", "name": "dev", "public": true, "members_count": 3}, "entity": "chat"},
+                {"entity": "chat"}
+            ], "total": 2},
+            "users": {"items": [
+                {"data": {"guid": "u1", "display_name": "Ann", "employee_info": {"position": "QA"}}, "type": "users_global"}
+            ], "total": 1}
+        }, "status": "ok"});
+        let chats: Vec<&str> = search_items(&v, "chats")
+            .filter_map(|c| c.get("chat_id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(chats, ["0/0/a"]);
+        let people: Vec<UserProfile> = search_items(&v, "users").filter_map(profile).collect();
+        assert_eq!(people.len(), 1);
+        assert_eq!(
+            (people[0].display_name.as_str(), people[0].position.as_deref()),
+            ("Ann", Some("QA"))
+        );
+        assert_eq!(search_items(&v, "groups").count(), 0);
     }
 }

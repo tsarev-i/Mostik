@@ -11,7 +11,7 @@ use mostik_core::*;
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
 use crate::settings::{SidebarFilter, SidebarSort};
-use crate::{folders, hidden, ops, order};
+use crate::{bridge, folders, hidden, ops, order};
 
 use super::avatar::{Avatar, Mark, chat_face, chat_person, display_title, kind_icon, status_view};
 use super::feed::typers;
@@ -23,6 +23,7 @@ use super::views::{ActivityList, DmList};
 #[component]
 pub(super) fn Sidebar() -> impl IntoView {
     let c = ctx();
+    let elsewhere = find_elsewhere(c);
     view! {
         <aside class="sidebar" style=move || format!("width:{:.0}px", c.sidebar_w.get())>
             <div class="sb-header">
@@ -99,9 +100,10 @@ pub(super) fn Sidebar() -> impl IntoView {
                     key=|sec| (sec.id.clone(), sec.title.clone(), sec.chats.clone())
                     children=move |sec: Section| view! { <SidebarSection section=sec/> }
                 />
-                <Show when=move || searching(c) && !any_found(c)>
+                <Show when=move || searching(c) && !any_found(c) && elsewhere.with(|(ch, p)| ch.is_empty() && p.is_empty())>
                     <div class="sb-find-empty">{tr().no_conversations_found}</div>
                 </Show>
+                <FoundElsewhere found=elsewhere/>
             </div>
             <CallBar/>
         </aside>
@@ -116,7 +118,7 @@ fn SidebarFind() -> impl IntoView {
     let field = NodeRef::<html::Input>::new();
     let first_row = || {
         document()
-            .query_selector(".sb-scroll .sb-row[data-chat]")
+            .query_selector(".sb-scroll .sb-row[data-chat], .sb-scroll .found-elsewhere .sb-row")
             .ok()
             .flatten()
             .and_then(|el| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(el).ok())
@@ -167,6 +169,158 @@ fn SidebarFind() -> impl IntoView {
                 </Show>
             </label>
         </div>
+    }
+}
+
+/// The shortest "Find a conversation" text the directory is searched for.
+const DIRECTORY_QUERY_MIN: usize = 2;
+
+/// How many channels and how many people "Find a conversation" shows from the directory.
+const DIRECTORY_HITS: usize = 8;
+
+/// What "Find a conversation" finds in the organization beyond the sidebar, as Slack's quick
+/// switcher does: public channels the user is not in and people without a direct chat yet. The
+/// directory is asked a moment after the typing stops; what the list has meanwhile is left out.
+fn find_elsewhere(c: Ctx) -> Memo<(Vec<Chat>, Vec<User>)> {
+    // What was found, for which text and organization.
+    let found: RwSignal<Option<(String, Option<u64>, mostik_ipc::DirectoryHits)>> = RwSignal::new(None);
+    let seq = StoredValue::new(0u32);
+    Effect::new(move |_| {
+        let query = c.sb_query.with(|q| q.trim().to_owned());
+        let org = c.org_now.with(|o| o.as_ref().map(|o| o.id));
+        let n = seq.get_value() + 1;
+        seq.set_value(n);
+        if !c.live || query.chars().count() < DIRECTORY_QUERY_MIN {
+            return;
+        }
+        set_timeout(
+            move || {
+                if seq.try_get_value() != Some(n) {
+                    return;
+                }
+                leptos::task::spawn_local(async move {
+                    let hits = bridge::search_directory(&query, org).await;
+                    if seq.try_get_value() != Some(n) {
+                        return;
+                    }
+                    match hits {
+                        Ok(hits) => {
+                            found.try_set(Some((query, org, hits)));
+                        }
+                        Err(e) => leptos::logging::warn!("directory search: {e}"),
+                    }
+                });
+            },
+            Duration::from_millis(300),
+        );
+    });
+    Memo::new(move |_| {
+        let query = c.sb_query.with(|q| q.trim().to_owned());
+        let org = c.org_now.with(|o| o.as_ref().map(|o| o.id));
+        found.with(|f| {
+            let Some((_, _, hits)) = f.as_ref().filter(|(q, o, _)| *q == query && *o == org) else {
+                return (vec![], vec![]);
+            };
+            c.snap.with(|s| {
+                let chats = hits
+                    .chats
+                    .iter()
+                    .filter(|ch| s.chat(&ch.id).is_none())
+                    .take(DIRECTORY_HITS)
+                    .cloned()
+                    .collect();
+                let people = hits
+                    .people
+                    .iter()
+                    .filter(|u| u.id != s.me && !u.is_robot)
+                    .filter(|u| {
+                        !s.chats
+                            .iter()
+                            .any(|ch| matches!(&ch.kind, ChatKind::Direct { peer } if peer == &u.id))
+                    })
+                    .take(DIRECTORY_HITS)
+                    .cloned()
+                    .collect();
+                (chats, people)
+            })
+        })
+    })
+}
+
+/// The sections of [`find_elsewhere`]: "Channels you're not in", a click joins one, and
+/// "People", a click opens a direct chat.
+#[component]
+fn FoundElsewhere(found: Memo<(Vec<Chat>, Vec<User>)>) -> impl IntoView {
+    let c = ctx();
+    let joining: RwSignal<Option<ChatId>> = RwSignal::new(None);
+    let join = move |id: ChatId| {
+        if joining.get_untracked().is_some() {
+            return;
+        }
+        joining.set(Some(id.clone()));
+        leptos::task::spawn_local(async move {
+            match bridge::join_chat(&id.0).await {
+                Ok(chat) => {
+                    let id = chat.id.clone();
+                    c.snap.update(|s| ops::add_channel(s, chat));
+                    c.sb_query.set(String::new());
+                    ops::open_chat(c, id);
+                }
+                Err(e) => ops::failed(c, tr().err_join, e),
+            }
+            joining.try_set(None);
+        });
+    };
+    let head = |icon: I, title: &'static str| {
+        view! {
+            <div class="sb-section-head">
+                <div class="sb-section-title with-icon">
+                    <span class="sb-section-slot"><span class="sb-section-icon"><Icon icon=icon size=15/></span></span>
+                    <span class="sb-section-name">{title}</span>
+                </div>
+            </div>
+        }
+    };
+    view! {
+        <Show when=move || searching(c) && found.with(|(ch, _)| !ch.is_empty())>
+            <div class="sb-section found-elsewhere">
+                {head(I::HashSquare, tr().channels_not_joined)}
+                {move || found.get().0.into_iter().map(|ch| {
+                    let id = ch.id.clone();
+                    let busy = {
+                        let id = id.clone();
+                        move || joining.with(|j| j.as_ref() == Some(&id))
+                    };
+                    view! {
+                        <button class="sb-row" disabled=busy.clone() title=tr().members_count(ch.member_count)
+                            on:click=move |_| join(id.clone())>
+                            <span class="sb-icon">{kind_icon(&Mark::of(&ch), 15)}</span>
+                            <span class="sb-name">{split_chat_icon(&ch.name).1.to_owned()}</span>
+                            <span class="sb-join">{tr().join_btn}</span>
+                        </button>
+                    }
+                }).collect_view()}
+            </div>
+        </Show>
+        <Show when=move || searching(c) && found.with(|(_, p)| !p.is_empty())>
+            <div class="sb-section found-elsewhere">
+                {head(I::Users, tr().search_people)}
+                {move || found.get().1.into_iter().map(|u| {
+                    let id = u.id.clone();
+                    let title = u.title.clone().unwrap_or_default();
+                    let name = u.display_name.clone();
+                    view! {
+                        <button class="sb-row" title=title on:click=move |_| {
+                            c.sb_query.set(String::new());
+                            ops::message_user(c, id.clone());
+                        }>
+                            <span class="sb-icon face"><Avatar user=u size=20/></span>
+                            <span class="sb-name">{name}</span>
+                        </button>
+                    }
+                }).collect_view()}
+            </div>
+        </Show>
     }
 }
 

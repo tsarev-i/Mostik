@@ -63,6 +63,9 @@
 .sb-find-clear { flex: none; width: 18px; height: 18px; margin-right: 4px; display: grid; place-items: center; border-radius: 50%; background: rgba(var(--chrome-ink), 0.7); color: var(--sidebar-bottom); }
 .sb-find-clear svg { stroke-width: 3; }
 .sb-find-clear:hover { background: var(--chrome-strong); }
+/* "Join" at the right of a channel found beyond the sidebar. */
+.sb-join { margin-left: auto; font-size: 12px; font-weight: 600; color: rgba(var(--chrome-ink), 0.6); }
+.sb-row:hover .sb-join { color: var(--chrome-strong); }
 .sb-find-empty { padding: 8px 24px; color: rgba(var(--chrome-ink), 0.6); font-size: 14px; }
 
 .sb-quick { padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid rgba(var(--chrome-ink), 0.08); }

@@ -201,6 +201,15 @@ pub struct PeopleSearchArgs {
     pub chat_id: Option<ChatId>,
 }
 
+/// Channels and people of organization `org` (the first one of the user's without it) whose
+/// name has `query`, for "Find a conversation".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectorySearchArgs {
+    pub query: String,
+    pub org: Option<u64>,
+}
+
 /// Server-side message search in the listed chats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -478,6 +487,7 @@ commands! {
     OpenDm = "open_dm", GuidArgs => crate::DirectChat;
     SearchPeople = "search_people", PeopleSearchArgs => Vec<mostik_core::UserProfile>;
     SearchMessages = "search_messages", MessageSearchArgs => FoundMessages;
+    SearchDirectory = "search_directory", DirectorySearchArgs => crate::DirectoryHits;
     CreateChannel = "create_channel", CreateChannelArgs => Chat;
     ChatDetails = "chat_details", ChatArgs => crate::ChatDetails;
     ChatMembers = "chat_members", ChatArgs => Vec<ChatMember>;
@@ -783,6 +793,13 @@ mod tests {
                 chat_id: None,
             },
             json!({ "query": "ann", "chatId": null }),
+        );
+        pinned(
+            DirectorySearchArgs {
+                query: "dev".into(),
+                org: Some(7),
+            },
+            json!({ "query": "dev", "org": 7 }),
         );
         pinned(
             CreateChannelArgs {

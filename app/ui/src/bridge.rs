@@ -287,6 +287,15 @@ pub async fn open_dm(guid: &str) -> Result<mostik_ipc::DirectChat, String> {
     .await
 }
 
+/// Public channels and people of organization `org` whose name has `query`, beyond the user's list.
+pub async fn search_directory(query: &str, org: Option<u64>) -> Result<mostik_ipc::DirectoryHits, String> {
+    let args = cmd::DirectorySearchArgs {
+        query: query.into(),
+        org,
+    };
+    call::<cmd::SearchDirectory>(args).await
+}
+
 pub async fn search_people(query: &str, chat_id: Option<&str>) -> Result<Vec<mostik_core::UserProfile>, String> {
     let args = cmd::PeopleSearchArgs {
         query: query.into(),

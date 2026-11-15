@@ -61,6 +61,16 @@ pub struct DirectChat {
     pub peer: User,
 }
 
+/// What "Find a conversation" finds in the organization beyond the user's own chats: public
+/// channels and people. The UI leaves out the ones it has already.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectoryHits {
+    /// Public groups, those the user is in among them.
+    pub chats: Vec<Chat>,
+    /// People with their job titles and photos, the user left out.
+    pub people: Vec<User>,
+}
+
 /// A chat's name, description, the user's role in it and its member count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatDetails {
@@ -278,8 +288,18 @@ mod tests {
         let chat = mostik_core::Chat::new(chat("u0_u1"), mostik_core::ChatKind::Direct { peer: ann().id });
         let chat_json = serde_json::to_value(&chat).unwrap();
         pinned(
-            DirectChat { chat, peer: ann() },
-            json!({ "chat": chat_json, "peer": ann_json }),
+            DirectChat {
+                chat: chat.clone(),
+                peer: ann(),
+            },
+            json!({ "chat": chat_json.clone(), "peer": ann_json.clone() }),
+        );
+        pinned(
+            DirectoryHits {
+                chats: vec![chat],
+                people: vec![ann()],
+            },
+            json!({ "chats": [chat_json], "people": [ann_json] }),
         );
     }
 

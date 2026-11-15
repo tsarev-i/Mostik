@@ -286,6 +286,7 @@ fn main() {
             backend::messages::typing,
             backend::files::open_url,
             backend::chats::search_messages,
+            backend::chats::search_directory,
             backend::chats::set_notify_level,
             backend::chats::set_starred,
             backend::chats::save_chat_folders,
