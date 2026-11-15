@@ -19,7 +19,7 @@ pub fn start_call(c: Ctx, chat: ChatId) {
     if let Some(current) = c.call.get_untracked() {
         // One call at a time, as in Slack: bring the current one back instead.
         focus_call(c);
-        if current.chat_id.as_deref() != Some(chat.0.as_str()) {
+        if current.chat_id.as_ref() != Some(&chat) {
             report(c, tr().call_busy.into());
         }
         return;
@@ -92,7 +92,7 @@ pub fn call_user(c: Ctx, user: UserId) {
     }
     spawn_local(async move {
         match bridge::open_dm(&user.0).await {
-            Ok(chat) => start_call(c, chat.id),
+            Ok(dm) => start_call(c, super::people::add_direct_chat(c, dm)),
             Err(e) => failed(c, tr().err_open_dm, e),
         }
     });

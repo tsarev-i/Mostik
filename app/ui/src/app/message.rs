@@ -79,8 +79,13 @@ pub(super) fn MessageRow(
     let editing = {
         let key = key.clone();
         Memo::new(move |_| {
-            c.editing
-                .with(|e| e.as_ref().is_some_and(|m| (m.chat_id.clone(), m.ts) == key))
+            // A thread's parent opens the editor where its edit was opened: in the chat or the pane.
+            c.editing.with(|e| {
+                e.as_ref().is_some_and(|m| {
+                    (m.chat_id.clone(), m.ts) == key
+                        && (m.thread_parent.is_some() || c.editing_in_thread.get() == in_thread)
+                })
+            })
         })
     };
 
@@ -288,6 +293,7 @@ pub(super) fn MessageRow(
                 msg: Box::new(msg.get_untracked()),
                 mine,
                 quote,
+                in_thread,
             },
         }));
     };
@@ -344,7 +350,7 @@ pub(super) fn MessageRow(
                             (r.right(), r.bottom() + 4.0)
                         });
                     let quote = selected_in_message(ts);
-                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(msg.get_untracked()), mine, quote } }));
+                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(msg.get_untracked()), mine, quote, in_thread } }));
                 }><Icon icon=I::Kebab size=16/></button>
             </div>
             <Show when=move || picker_open.get()>
@@ -553,6 +559,7 @@ fn ReplyBlock(f: Forwarded, chat: ChatId, thread_parent: Option<Timestamp>) -> i
 #[component]
 pub(super) fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
     let c = ctx();
+    let key = super::drafts::DraftKey::field(target.msg.chat_id.clone(), target.msg.thread_parent);
     let m = &target.msg;
     let (name, line) = c.snap.with_untracked(|s| {
         (
@@ -572,11 +579,22 @@ pub(super) fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
                 <span class="reply-author">{label}</span>
                 <span class="reply-line">{line}</span>
             </div>
-            <button class="icon-btn" title=tr().cancel_reply on:click=move |_| c.replying.set(None)>
+            <button class="icon-btn" title=tr().cancel_reply on:click=move |_| super::drafts::set_reply(c, &key, None)>
                 <Icon icon=I::X size=14/>
             </button>
         </div>
     }
+}
+
+/// Saves attachment `id` named `name` to "Downloads" and shows it in its folder, as a click on its
+/// card does; the toast says where it went.
+pub(super) fn save_attachment(c: Ctx, id: String, name: String) {
+    spawn_local(async move {
+        match bridge::save_file(&id, &name).await {
+            Ok(path) => c.notice.set(Some(format!("{}: {path}", tr().saved_to))),
+            Err(e) => ops::failed(c, tr().err_download, e),
+        }
+    });
 }
 
 pub(super) fn human_size(bytes: u64) -> String {
@@ -639,15 +657,7 @@ fn Attachments(list: Vec<Attachment>) -> impl IntoView {
                     }.into_any();
                 }
                 let (id, name) = (a.file_id.clone(), a.name.clone());
-                let download = move |_| {
-                    let (id, name) = (id.clone(), name.clone());
-                    spawn_local(async move {
-                        match bridge::save_file(&id, &name).await {
-                            Ok(path) => c.notice.set(Some(format!("{}: {path}", tr().saved_to))),
-                            Err(e) => ops::failed(c, tr().err_download, e),
-                        }
-                    });
-                };
+                let download = move |_| save_attachment(c, id.clone(), name.clone());
                 view! {
                     <button class="file-card" title=tr().download on:click=download>
                         <span class="file-icon"><Icon icon=I::Files size=22/></span>
@@ -681,7 +691,13 @@ fn ReactionPicker(msg: Signal<Message>) -> impl IntoView {
 }
 
 /// Message menu items shared by the "More" button and the right click, like "More actions" in Slack.
-pub(super) fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option<String>) -> impl IntoView {
+pub(super) fn message_menu_items(
+    c: Ctx,
+    msg: Message,
+    mine: bool,
+    quote: Option<String>,
+    in_pane: bool,
+) -> impl IntoView {
     let (m_edit, m_del, m_unread, m_link, m_fwd, m_pin) = (
         msg.clone(),
         msg.clone(),
@@ -745,6 +761,7 @@ pub(super) fn message_menu_items(c: Ctx, msg: Message, mine: bool, quote: Option
             <div class="menu-sep"></div>
             <button class="menu-icon-item" on:click=move |_| {
                 close_menus(c);
+                c.editing_in_thread.set(in_pane);
                 c.editing.set(Some(m_edit.clone()));
             }>{menu_item(I::Pencil, tr().edit)}</button>
             <button class="menu-icon-item danger" on:click=move |_| {
@@ -823,5 +840,127 @@ mod tests {
         assert_eq!(preview(message("", vec![], fwd)).as_deref(), Some("↪ 📄 report.pdf"));
         assert_eq!(preview(message("", vec![], vec![forwarded("", vec![])])), None);
         assert_eq!(preview(message("", vec![], vec![])), None);
+    }
+}
+
+/// The messages with files on their way in the open chat, or in its open thread for the thread
+/// pane, at the end of the feed: the sender, the text and each file with how far its upload has
+/// got, as the official client shows them. A click on the circle of a file cancels it; a message
+/// that failed says so, with "Retry" and "Remove".
+#[component]
+pub(super) fn Outbox(#[prop(optional)] in_thread: bool) -> impl IntoView {
+    let c = ctx();
+    let here = Memo::new(move |_| {
+        let chat = c.current.get();
+        let thread = if in_thread { c.thread.get() } else { None };
+        if in_thread && thread.is_none() {
+            return vec![];
+        }
+        c.outbox.with(|o| {
+            o.iter()
+                .filter(|m| m.chat == chat && m.thread == thread)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    });
+    move || {
+        here.get()
+            .into_iter()
+            .map(|m| view! { <OutgoingRow out=m/> })
+            .collect_view()
+    }
+}
+
+/// Why a sending failed, in the interface's language where the backend's words are known.
+fn failure_reason(why: &str) -> String {
+    match why
+        .strip_suffix(mostik_ipc::cmd::UPLOAD_STALLED)
+        .and_then(|w| w.strip_suffix(": "))
+    {
+        Some(name) => format!("{name}: {}", tr().upload_stalled),
+        None => why.to_owned(),
+    }
+}
+
+/// One [`ops::Outgoing`] message.
+#[component]
+fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
+    let c = ctx();
+    let me = c.snap.with_untracked(|s| s.user(&s.me).cloned());
+    let name = me.as_ref().map(|u| u.display_name.clone()).unwrap_or_default();
+    let face = me.map(|u| view! { <Avatar user=u size=36/> });
+    let failed = out.failed.clone();
+    let status = match &failed {
+        Some(_) => view! { <span class="out-status failed">{tr().not_sent}</span> }.into_any(),
+        None => view! { <span class="out-status">{tr().sending}</span> }.into_any(),
+    };
+    let text = (!out.text.trim().is_empty()).then(|| {
+        let who = c.snap.with_untracked(|s| s.mention_names());
+        let me = c.snap.with_untracked(|s| s.me.clone());
+        let body = who.with(|who| render_text(&out.text, who, Me { id: &me.0, name: &name }, false));
+        view! { <div class="msg-text">{body}</div> }
+    });
+    let id = out.id.clone();
+    let files = out
+        .files
+        .iter()
+        .map(|f| {
+            let (id, path) = (id.clone(), f.file.path.clone());
+            let total = f.file.size.max(1);
+            let share = (f.sent.min(total) as f64 / total as f64).clamp(0.0, 1.0);
+            // A circle of radius 9: its length is 2πr.
+            let length = 2.0 * std::f64::consts::PI * 9.0;
+            let dash = format!("{:.1} {length:.1}", share * length);
+            let can_cancel = !f.cancelled && !f.done() && failed.is_none();
+            let ring = view! {
+                <svg class="out-ring" viewBox="0 0 24 24" width="24" height="24">
+                    <circle class="out-ring-track" cx="12" cy="12" r="9"/>
+                    <circle class="out-ring-fill" cx="12" cy="12" r="9" stroke-dasharray=dash transform="rotate(-90 12 12)"/>
+                    {can_cancel.then(|| view! { <path class="out-ring-x" d="M9 9l6 6M15 9l-6 6"/> })}
+                </svg>
+            };
+            view! {
+                <div class="file-card out-file" class:cancelled=f.cancelled>
+                    <span class="file-icon">{if f.file.image { "🖼" } else { "📄" }}</span>
+                    <span class="file-meta">
+                        <span class="file-name">{f.file.name.clone()}</span>
+                        <span class="file-size">{if f.cancelled { tr().upload_cancelled.to_owned() } else { human_size(f.file.size) }}</span>
+                    </span>
+                    {if can_cancel {
+                        view! {
+                            <button class="out-cancel" title=tr().cancel_upload on:click=move |_| ops::cancel_file(c, &id, &path)>{ring}</button>
+                        }.into_any()
+                    } else {
+                        view! { <span class="out-cancel">{ring}</span> }.into_any()
+                    }}
+                </div>
+            }
+        })
+        .collect_view();
+    let actions = failed.map(|why| {
+        let (retry, remove) = (id.clone(), id.clone());
+        view! {
+            <div class="out-failed">
+                <span class="out-why">{failure_reason(&why)}</span>
+                <button class="btn small" on:click=move |_| ops::retry_upload(c, &retry)>{tr().retry}</button>
+                <button class="btn small" on:click=move |_| ops::drop_upload(c, &remove)>{tr().remove}</button>
+            </div>
+        }
+    });
+    view! {
+        <div class="msg outgoing">
+            <div class="msg-row">
+                <div class="msg-gutter">{face}</div>
+                <div class="msg-content">
+                    <div class="msg-head">
+                        <span class="msg-author">{name.clone()}</span>
+                        {status}
+                    </div>
+                    {text}
+                    <div class="attachments">{files}</div>
+                    {actions}
+                </div>
+            </div>
+        </div>
     }
 }

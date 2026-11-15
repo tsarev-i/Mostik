@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use mostik_core::*;
 
-use crate::app::Ctx;
+use crate::app::{ChatTab, Ctx};
 use crate::bridge;
 use crate::i18n::tr;
 
@@ -21,7 +21,7 @@ pub fn open_chat(c: Ctx, id: ChatId) {
     let in_front = c.current.get_untracked() == id
         && (!c.live || history_loaded(&id))
         && !c.view.get_untracked().is_home_page()
-        && !c.pins_tab.get_untracked()
+        && c.chat_tab.get_untracked() == ChatTab::Messages
         && !c.hidden.with_untracked(|h| h.contains_key(&id));
     if in_front {
         return;
@@ -172,7 +172,7 @@ fn add_older_page(c: Ctx, id: &ChatId, before: Timestamp, page: bridge::HistoryP
 /// if the chat history needs to be loaded from the server.
 fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
     c.hold_unread.set(None);
-    c.pins_tab.set(false);
+    c.chat_tab.set(ChatTab::Messages);
     let prev = c.current.get_untracked();
     if record && !prev.0.is_empty() && prev != id {
         c.nav_back.update(|b| {
@@ -286,6 +286,11 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
         if c.view.get_untracked().is_home_page() {
             c.view.set(crate::app::ViewMode::Home);
         }
+        // The message is shown in the list: the "Files" tab gives way to it. ("Pinned" loads its
+        // message this way and stays.)
+        if c.chat_tab.get_untracked() == ChatTab::Files {
+            c.chat_tab.set(ChatTab::Messages);
+        }
         false
     } else {
         select_chat(c, chat.clone(), true)
@@ -355,30 +360,116 @@ pub fn mark_read(c: Ctx, id: ChatId) {
     });
 }
 
+thread_local! {
+    /// Older pages being loaded, per chat: the token of the load and the failures in a row. A load
+    /// that fails is asked again after a pause, the chat still loading meanwhile (its spinner
+    /// stays), until a page comes or the user leaves the chat ([`stop_older`]). A timer or an
+    /// answer of a load that has ended finds another token or none and changes nothing.
+    static OLDER: std::cell::RefCell<std::collections::HashMap<ChatId, (u64, u32)>> = Default::default();
+    static OLDER_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Loads older messages of the current chat. Returns `false` if there is nothing more to load.
+/// While a load is going on, retries included, this does nothing: scrolling up does not cut a
+/// pause short; the pauses start from a second again once the user has left the chat and come back.
 pub fn load_older(c: Ctx) -> bool {
     let id = c.current.get_untracked();
     if !c.live || c.loading_older.with_untracked(|l| l.contains(&id)) || c.exhausted.with_untracked(|e| e.contains(&id))
     {
         return false;
     }
-    let loaded = cursor(&id);
-    let Some(before) = c.snap.with_untracked(|s| older_page_before(s, &id, loaded)) else {
+    if c.snap
+        .with_untracked(|s| older_page_before(s, &id, cursor(&id)))
+        .is_none()
+    {
         return false;
-    };
+    }
     c.loading_older.update(|l| {
         l.insert(id.clone());
     });
+    let token = OLDER_TOKEN.get() + 1;
+    OLDER_TOKEN.set(token);
+    OLDER.with_borrow_mut(|o| o.insert(id.clone(), (token, 0)));
+    ask_older(c, id, token);
+    true
+}
+
+/// Whether load `token` of chat `id` is still going on.
+fn older_going(id: &ChatId, token: u64) -> bool {
+    OLDER.with_borrow(|o| o.get(id).is_some_and(|&(t, _)| t == token))
+}
+
+/// Asks for the older page of chat `id` for load `token`, again after a pause if it fails.
+fn ask_older(c: Ctx, id: ChatId, token: u64) {
+    // The history may have ended meanwhile another way (a jump to an old message, the latest page
+    // after a reconnection): nothing to ask then.
+    let before = c.snap.with_untracked(|s| older_page_before(s, &id, cursor(&id)));
+    let Some(before) = before.filter(|_| !c.exhausted.with_untracked(|e| e.contains(&id))) else {
+        return end_older(c, &id, token);
+    };
     spawn_local(async move {
         match bridge::history(&id.0, Some(before), None).await {
-            Ok(page) => add_older_page(c, &id, before, page),
-            Err(e) => failed(c, tr().err_older, e),
+            // The page goes on from the list only if the list still starts where it was asked
+            // from: meanwhile the latest page may have replaced the list, or a jump to a message
+            // or another load may have taken it further back. Else it is dropped (it would leave a
+            // gap, or move the start back), and asked again from where the list starts now.
+            Ok(_) if c.snap.with_untracked(|s| older_page_before(s, &id, cursor(&id))) != Some(before) => {
+                if older_going(&id, token) {
+                    ask_older(c, id, token);
+                }
+            }
+            // A page is kept even if the user has left the chat meanwhile.
+            Ok(page) => {
+                add_older_page(c, &id, before, page);
+                end_older(c, &id, token);
+            }
+            // No toast: the spinner stays while the page is asked again, whatever the reason
+            // (the server, the connection).
+            Err(e) => {
+                leptos::logging::warn!("older page: {e}");
+                let fails = OLDER.with_borrow_mut(|o| match o.get_mut(&id) {
+                    Some((t, n)) if *t == token => {
+                        *n += 1;
+                        Some(*n)
+                    }
+                    _ => None,
+                });
+                let Some(fails) = fails else { return };
+                set_timeout(
+                    move || {
+                        if older_going(&id, token) {
+                            ask_older(c, id, token);
+                        }
+                    },
+                    older_retry_pause(fails),
+                );
+            }
         }
-        c.loading_older.update(|l| {
-            l.remove(&id);
-        });
     });
-    true
+}
+
+/// Ends load `token` of chat `id`, if it is still going on.
+fn end_older(c: Ctx, id: &ChatId, token: u64) {
+    if older_going(id, token) {
+        stop_older(c, id);
+    }
+}
+
+/// Ends loading older messages of chat `id`, retries included: a page has come, the user has left
+/// the chat, or the chat is gone. Its spinner goes; coming back, the list asks again when scrolled
+/// up, or by itself if it is short.
+pub fn stop_older(c: Ctx, id: &ChatId) {
+    if OLDER.with_borrow_mut(|o| o.remove(id).is_some()) {
+        c.loading_older.try_update(|l| {
+            l.remove(id);
+        });
+    }
+}
+
+/// How long to wait before asking again for an older page after `fails` failures in a row:
+/// 1, 2, 4, 8, 16 seconds, then 30. Without a pause a short list would ask every frame.
+fn older_retry_pause(fails: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1u64 << fails.saturating_sub(1).min(5)).min(30))
 }
 
 /// Leaves the channel, removes it from the sidebar and opens the first remaining chat.
@@ -401,6 +492,8 @@ pub(super) fn drop_chat(c: Ctx, id: &ChatId) {
     }
     FRESH.with_borrow_mut(|f| f.remove(id));
     set_cursor(id, None);
+    stop_older(c, id);
+    crate::app::drafts::forget_chat(c, id);
     c.snap.update(|s| {
         s.chats.retain(|ch| &ch.id != id);
         s.messages.retain(|m| &m.chat_id != id);
@@ -415,5 +508,17 @@ pub(super) fn drop_chat(c: Ctx, id: &ChatId) {
         if let Some(n) = next {
             open_chat(c, n);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_retry_pause_grows_to_half_a_minute() {
+        let secs: Vec<u64> = (1..=8).map(|n| older_retry_pause(n).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(older_retry_pause(u32::MAX).as_secs(), 30);
     }
 }

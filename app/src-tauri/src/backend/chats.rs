@@ -1,18 +1,26 @@
 //! Chats and people: profiles, direct chats, search, channels and their members, the synced chat
 //! settings (notifications, folders, stars), browsing and joining public channels.
 
-use mostik_core::{Chat, ChatFolder, ChatId, ChatKind, Message, NotifyLevel, User, UserId};
+use mostik_core::{Chat, ChatId, ChatKind, NotifyLevel, User, UserId};
+use mostik_ipc::cmd::{
+    self, Args, ChatArgs, CreateChannelArgs, DirectorySearchArgs, FoldersArgs, GuidArgs, MembersArgs,
+    MessageSearchArgs, NotifyLevelArgs, Out, PeopleSearchArgs, StarArgs, UpdateChatArgs,
+};
+use mostik_ipc::{ChatDetails, DirectoryHits, FoundMessages};
 use mostik_yandex::clock;
 use mostik_yandex::convert;
-use serde::Serialize;
 use serde_json::{Value, json};
 use tauri::AppHandle;
 
-use super::{AppState, Live, live, rpc, rpc_ok, service, web_error};
+use super::{AppState, Live, fill_profiles, live, note_files, rpc, rpc_ok, service, web_error};
 
 /// A person's profile for the "Profile" panel.
 #[tauri::command]
-pub async fn user_profile(state: tauri::State<'_, AppState>, guid: String) -> Result<mostik_core::UserProfile, String> {
+pub async fn user_profile(
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::UserProfile>,
+) -> Result<Out<cmd::UserProfile>, String> {
+    let GuidArgs { guid: UserId(guid) } = args;
     let live = live(&state).await?;
     let mut web = live.web.clone_light();
     let v = web
@@ -25,9 +33,11 @@ pub async fn user_profile(state: tauri::State<'_, AppState>, guid: String) -> Re
         .ok_or_else(|| "profile not found".to_owned())
 }
 
-/// Direct chat with a person: existing or new (`create_private_chat` is idempotent).
+/// Direct chat with a person: existing or new (`create_private_chat` is idempotent), with the
+/// person's name and photo from the directory: a new chat and its peer are not in the UI's list yet.
 #[tauri::command]
-pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<Chat, String> {
+pub async fn open_dm(state: tauri::State<'_, AppState>, args: Args<cmd::OpenDm>) -> Result<Out<cmd::OpenDm>, String> {
+    let GuidArgs { guid: UserId(guid) } = args;
     let live = live(&state).await?;
     let mut web = live.web.clone_light();
     let v = web
@@ -42,8 +52,34 @@ pub async fn open_dm(state: tauri::State<'_, AppState>, guid: String) -> Result<
         member_count: 2,
         ..Chat::new(ChatId(id.to_owned()), convert::chat_kind(id, Some(&live.me), false))
     };
-    note_chat(&live, &chat);
-    Ok(chat)
+    let peer = match &chat.kind {
+        ChatKind::Direct { peer } => peer.clone(),
+        _ => live.me.clone(),
+    };
+    let mut users = [User::named(peer, "")];
+    fill_profiles(&live.web, &mut users).await;
+    let [mut peer] = users;
+    if let Ok(mut sh) = live.shared.lock() {
+        if !peer.has_name()
+            && let Some(name) = sh.names.get(&peer.id.0)
+        {
+            peer.display_name = name.clone();
+        }
+        // A chat without a name is not recorded: the `StateSync` about it or its first message
+        // fetches it again, and the name with it, for the list and the notifications.
+        if peer.has_name() {
+            sh.learn_names([&peer]);
+            let title = match chat.kind {
+                ChatKind::Direct { .. } => peer.display_name.clone(),
+                _ => mostik_core::group_label(&chat.name),
+            };
+            sh.note_chat(&chat, title);
+        }
+    }
+    if !peer.has_name() {
+        peer.display_name = mostik_core::UNKNOWN_USER.into();
+    }
+    Ok(mostik_ipc::DirectChat { chat, peer })
 }
 
 /// Group details from `get_chats_info` (`{chat_ids: [...]}`).
@@ -63,31 +99,27 @@ async fn chat_version(live: &Live, chat_id: &str) -> Result<u64, String> {
         .ok_or_else(|| "could not get the chat version".to_owned())
 }
 
-#[derive(Serialize)]
-pub struct ChatDetails {
-    name: String,
-    description: String,
-    role: String,
-    member_count: u64,
-}
-
-impl ChatDetails {
-    /// From a `get_chats_info` item.
-    fn from_info(info: &Value) -> Self {
-        let text = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
-        Self {
-            name: text("name"),
-            description: text("description"),
-            role: text("role"),
-            member_count: info.get("members_count").and_then(convert::uint).unwrap_or(0),
-        }
+/// [`ChatDetails`] from a `get_chats_info` item.
+fn chat_details_from(info: &Value) -> ChatDetails {
+    let text = |k: &str| info.get(k).and_then(Value::as_str).unwrap_or_default().to_owned();
+    ChatDetails {
+        name: text("name"),
+        description: text("description"),
+        role: text("role"),
+        member_count: info.get("members_count").and_then(convert::uint).unwrap_or(0),
     }
 }
 
 #[tauri::command]
-pub async fn chat_details(state: tauri::State<'_, AppState>, chat_id: String) -> Result<ChatDetails, String> {
+pub async fn chat_details(
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::ChatDetails>,
+) -> Result<Out<cmd::ChatDetails>, String> {
+    let ChatArgs {
+        chat_id: ChatId(chat_id),
+    } = args;
     let live = live(&state).await?;
-    Ok(ChatDetails::from_info(&chat_info_raw(&live, &chat_id).await?))
+    Ok(chat_details_from(&chat_info_raw(&live, &chat_id).await?))
 }
 
 /// People search for invitations. Without `chat_id` the search is relative to the notes chat.
@@ -95,11 +127,11 @@ pub async fn chat_details(state: tauri::State<'_, AppState>, chat_id: String) ->
 pub async fn search_people(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    query: String,
-    chat_id: Option<String>,
-) -> Result<Vec<mostik_core::UserProfile>, String> {
+    args: Args<cmd::SearchPeople>,
+) -> Result<Out<cmd::SearchPeople>, String> {
+    let PeopleSearchArgs { query, chat_id } = args;
     let live = live(&state).await?;
-    let chat = chat_id.unwrap_or_else(|| convert::notes_chat_id(&live.me).0);
+    let chat = chat_id.map_or_else(|| convert::notes_chat_id(&live.me).0, |c| c.0);
     let mut web = live.web.clone_light();
     let v = web
         .rpc(
@@ -112,21 +144,14 @@ pub async fn search_people(
     Ok(convert::profiles(&v))
 }
 
-/// Server-side message search result.
-#[derive(Serialize)]
-pub struct FoundMessages {
-    messages: Vec<Message>,
-    users: Vec<User>,
-}
-
 /// Message search (HTTP RPC `search`). The server searches only within one chat (`chat_id`),
 /// so the given chats are queried in parallel, at most 20.
 #[tauri::command]
 pub async fn search_messages(
     state: tauri::State<'_, AppState>,
-    query: String,
-    chat_ids: Vec<String>,
-) -> Result<FoundMessages, String> {
+    args: Args<cmd::SearchMessages>,
+) -> Result<Out<cmd::SearchMessages>, String> {
+    let MessageSearchArgs { query, chat_ids } = args;
     let live = live(&state).await?;
     let jobs = chat_ids.into_iter().take(20).map(|chat| {
         let mut web = live.web.clone_light();
@@ -151,21 +176,94 @@ pub async fn search_messages(
             }
         }
     }
+    note_files(&state, &live.me, &messages);
     Ok(FoundMessages { messages, users })
+}
+
+/// "Find a conversation" beyond the user's list: the public channels and people of organization
+/// `org` whose name has the query (the global `search`), and the public channels Telemost
+/// recommends that have it in their name (`get_recommended_chats`): the search may leave out
+/// the channels the user is not in.
+#[tauri::command]
+pub async fn search_directory(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::SearchDirectory>,
+) -> Result<Out<cmd::SearchDirectory>, String> {
+    let DirectorySearchArgs { query, org } = args;
+    let live = live(&state).await?;
+    let org = org.or_else(|| live.shared.lock().ok().and_then(|sh| sh.orgs.first().copied()));
+    let Some(org) = org else {
+        return Ok(DirectoryHits {
+            chats: vec![],
+            people: vec![],
+        });
+    };
+    let (mut web, mut web2) = (live.web.clone_light(), live.web.clone_light());
+    let (found, recommended) = futures_util::future::join(
+        web.rpc(
+            "search",
+            json!({ "query": query, "limit": 20, "entities": ["chats", "users"], "organization_id": org }),
+        ),
+        web2.rpc("get_recommended_chats", json!({ "limit": 50 })),
+    )
+    .await;
+    let found = found.map_err(|e| web_error(&app, e))?;
+    rpc_ok(&found)?;
+    let needle = query.trim().to_lowercase();
+    let recommended = recommended.ok().filter(|v| rpc_ok(v).is_ok());
+    let named = |c: &&Value| {
+        c.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.to_lowercase().contains(&needle))
+    };
+    let mut chats: Vec<Chat> = Vec::new();
+    let candidates = convert::search_items(&found, "chats").chain(
+        recommended
+            .iter()
+            .flat_map(|v| v.pointer("/data/chats").and_then(Value::as_array).into_iter().flatten())
+            .filter(named),
+    );
+    for chat in candidates.filter_map(|c| rpc_chat(c, &live.me)) {
+        let in_org = chat.organizations.is_empty() || chat.organizations.contains(&org);
+        if chat.kind == (ChatKind::Group { public: true })
+            && in_org
+            && !service::is_service_chat(&chat)
+            && !chats.iter().any(|c| c.id == chat.id)
+        {
+            chats.push(chat);
+        }
+    }
+    let mut people: Vec<User> = Vec::new();
+    for p in convert::search_items(&found, "users").filter_map(convert::profile) {
+        if p.id != live.me && !p.display_name.is_empty() && !people.iter().any(|u| u.id == p.id) {
+            people.push(User {
+                title: p.position,
+                avatar: p.avatar,
+                ..User::named(p.id, p.display_name)
+            });
+        }
+    }
+    // The search gives no photos: the directory does.
+    fill_profiles(&live.web, &mut people).await;
+    Ok(DirectoryHits { chats, people })
 }
 
 /// New group (a channel in Slack terms). You are a member and the admin.
 #[tauri::command]
 pub async fn create_channel(
     state: tauri::State<'_, AppState>,
-    name: String,
-    description: String,
-    members: Vec<String>,
-    public: bool,
-) -> Result<Chat, String> {
+    args: Args<cmd::CreateChannel>,
+) -> Result<Out<cmd::CreateChannel>, String> {
+    let CreateChannelArgs {
+        name,
+        description,
+        members,
+        public,
+    } = args;
     let live = live(&state).await?;
     let mut all = vec![live.me.0.clone()];
-    all.extend(members.into_iter().filter(|m| m != &live.me.0));
+    all.extend(members.into_iter().map(|m| m.0).filter(|m| m != &live.me.0));
     let v = rpc(
         &live,
         "create_chat",
@@ -226,8 +324,11 @@ pub async fn create_channel(
 #[tauri::command]
 pub async fn chat_members(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-) -> Result<Vec<mostik_core::ChatMember>, String> {
+    args: Args<cmd::ChatMembers>,
+) -> Result<Out<cmd::ChatMembers>, String> {
+    let ChatArgs {
+        chat_id: ChatId(chat_id),
+    } = args;
     let live = live(&state).await?;
     let v = rpc(&live, "get_chat_members", json!({ "chat_id": chat_id, "limit": 200 })).await?;
     Ok(convert::members(&v))
@@ -237,10 +338,13 @@ pub async fn chat_members(
 #[tauri::command]
 pub async fn change_members(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    guids: Vec<String>,
-    add: bool,
-) -> Result<(), String> {
+    args: Args<cmd::ChangeMembers>,
+) -> Result<Out<cmd::ChangeMembers>, String> {
+    let MembersArgs {
+        chat_id: ChatId(chat_id),
+        guids,
+        add,
+    } = args;
     let live = live(&state).await?;
     let version = chat_version(&live, &chat_id).await?;
     let users = if add {
@@ -260,10 +364,13 @@ pub async fn change_members(
 #[tauri::command]
 pub async fn update_chat(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    name: String,
-    description: String,
-) -> Result<ChatDetails, String> {
+    args: Args<cmd::UpdateChat>,
+) -> Result<Out<cmd::UpdateChat>, String> {
+    let UpdateChatArgs {
+        chat_id: ChatId(chat_id),
+        name,
+        description,
+    } = args;
     let live = live(&state).await?;
     // Pass the visibility as is: without the `public` field the server may make a public channel private.
     let current = chat_info_raw(&live, &chat_id).await?;
@@ -279,11 +386,17 @@ pub async fn update_chat(
     )
     .await?;
     // Return what the server actually saved: that is what the UI shows.
-    Ok(ChatDetails::from_info(&chat_info_raw(&live, &chat_id).await?))
+    Ok(chat_details_from(&chat_info_raw(&live, &chat_id).await?))
 }
 
 #[tauri::command]
-pub async fn leave_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Result<(), String> {
+pub async fn leave_chat(
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::LeaveChat>,
+) -> Result<Out<cmd::LeaveChat>, String> {
+    let ChatArgs {
+        chat_id: ChatId(chat_id),
+    } = args;
     let live = live(&state).await?;
     let version = chat_version(&live, &chat_id).await?;
     rpc(&live, "leave", json!({ "chat_id": chat_id, "version": version })).await?;
@@ -338,9 +451,12 @@ async fn update_bucket(live: &Live, name: &str, change: impl Fn(&mut Value)) -> 
 #[tauri::command]
 pub async fn set_notify_level(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    level: NotifyLevel,
-) -> Result<(), String> {
+    args: Args<cmd::SetNotifyLevel>,
+) -> Result<Out<cmd::SetNotifyLevel>, String> {
+    let NotifyLevelArgs {
+        chat_id: ChatId(chat_id),
+        level,
+    } = args;
     let live = live(&state).await?;
     put_notify_level(&live, &chat_id, level).await?;
     if let Ok(mut sh) = live.shared.lock() {
@@ -369,9 +485,9 @@ pub(super) async fn put_notify_level(live: &Live, chat_id: &str, level: NotifyLe
 #[tauri::command]
 pub async fn save_chat_folders(
     state: tauri::State<'_, AppState>,
-    org: String,
-    folders: Vec<ChatFolder>,
-) -> Result<Vec<ChatFolder>, String> {
+    args: Args<cmd::SaveChatFolders>,
+) -> Result<Out<cmd::SaveChatFolders>, String> {
+    let FoldersArgs { org, folders } = args;
     let live = live(&state).await?;
     let value = update_bucket(&live, "folders", move |v| convert::put_chat_folders(v, &org, &folders)).await?;
     Ok(convert::chat_folders(&value))
@@ -381,9 +497,12 @@ pub async fn save_chat_folders(
 #[tauri::command]
 pub async fn set_starred(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    starred: bool,
-) -> Result<Vec<String>, String> {
+    args: Args<cmd::SetStarred>,
+) -> Result<Out<cmd::SetStarred>, String> {
+    let StarArgs {
+        chat_id: ChatId(chat_id),
+        starred,
+    } = args;
     let live = live(&state).await?;
     let value = update_bucket(&live, "pinned_chats", move |v| {
         let mut list: Vec<Value> = v
@@ -403,7 +522,7 @@ pub async fn set_starred(
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .map(str::to_owned)
+        .map(|id| ChatId(id.to_owned()))
         .collect())
 }
 
@@ -435,7 +554,7 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<Chat> {
 
 /// "Browse channels": public groups recommended by Telemost.
 #[tauri::command]
-pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<Chat>, String> {
+pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Out<cmd::RecommendedChats>, String> {
     let live = live(&state).await?;
     let v = rpc(&live, "get_recommended_chats", json!({ "limit": 50 })).await?;
     Ok(v.pointer("/data/chats")
@@ -449,7 +568,13 @@ pub async fn recommended_chats(state: tauri::State<'_, AppState>) -> Result<Vec<
 
 /// Joins a public group (`activate_chat`, as in the web client).
 #[tauri::command]
-pub async fn join_chat(state: tauri::State<'_, AppState>, chat_id: String) -> Result<Chat, String> {
+pub async fn join_chat(
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::JoinChat>,
+) -> Result<Out<cmd::JoinChat>, String> {
+    let ChatArgs {
+        chat_id: ChatId(chat_id),
+    } = args;
     let live = live(&state).await?;
     let v = rpc(&live, "activate_chat", json!({ "chat_id": chat_id })).await?;
     let chat = v

@@ -9,19 +9,19 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use mostik_core::{Chat, ChatKind, Message, NotifyLevel, Snapshot, Timestamp, User, UserId};
+use mostik_core::{Chat, ChatId, ChatKind, Message, NotifyLevel, Timestamp, User, UserId};
+pub use mostik_ipc::{Boot, Dropped, OpenTarget, PendingFile};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::shape;
 use mostik_yandex::web::{WebClient, WebError};
 use mostik_yandex::wire::PushRequest;
 use mostik_yandex::xiva_client::XivaClient;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 
 use connection::Session;
-use files::FileCache;
+use files::{FileCache, note_files};
 
 pub mod calls;
 pub mod chats;
@@ -46,36 +46,19 @@ pub const EVENT: &str = "mostik://event";
 /// Open a message: the user clicked its notification.
 pub const OPEN_EVENT: &str = "mostik://open";
 
-/// The message a clicked notification was about.
-#[derive(Clone, Serialize)]
-pub struct OpenTarget {
-    pub chat_id: String,
-    pub ts: Timestamp,
-    pub thread_parent: Option<Timestamp>,
-}
-
-impl OpenTarget {
-    /// From the `extra` data [`notify`] gives a notification.
-    pub fn from_extra(extra: &std::collections::HashMap<String, Value>) -> Option<Self> {
-        Some(OpenTarget {
-            chat_id: extra.get("chat")?.as_str()?.to_owned(),
-            ts: extra.get("ts")?.as_u64()?,
-            thread_parent: extra.get("thread").and_then(Value::as_u64),
-        })
-    }
+/// The message a clicked notification was about, from the `extra` data [`notify`] gives the
+/// notification.
+pub fn open_target(extra: &std::collections::HashMap<String, Value>) -> Option<OpenTarget> {
+    Some(OpenTarget {
+        chat_id: ChatId(extra.get("chat")?.as_str()?.to_owned()),
+        ts: extra.get("ts")?.as_u64()?,
+        thread_parent: extra.get("thread").and_then(Value::as_u64),
+    })
 }
 /// Fresh snapshot after a reconnect.
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 /// The session is no longer valid: the UI shows the login screen with this reason.
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
-
-/// Result of `bootstrap` and `login`: either the login screen or a ready snapshot.
-#[derive(Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Boot {
-    NeedLogin { reason: Option<String> },
-    Ready { snapshot: Box<Snapshot> },
-}
 
 /// State updated from live events.
 #[derive(Default)]
@@ -125,9 +108,17 @@ impl Shared {
     }
 
     /// A chat the user is in from now on: `title` for its notifications, and its name for
-    /// `@channel` mentions if it is public.
+    /// `@channel` mentions if it is public. A stand-in title (none, or an unknown person's) does
+    /// not replace a real one: two fetches of a new chat may end in any order.
     fn note_chat(&mut self, chat: &Chat, title: String) {
-        self.titles.insert(chat.id.0.clone(), title);
+        let stand_in = title.is_empty() || title == mostik_core::UNKNOWN_USER;
+        let known = self
+            .titles
+            .get(&chat.id.0)
+            .is_some_and(|t| !t.is_empty() && t != mostik_core::UNKNOWN_USER);
+        if !(stand_in && known) {
+            self.titles.insert(chat.id.0.clone(), title);
+        }
         let public = chat.kind == ChatKind::Group { public: true };
         if public && !chat.name.is_empty() && !self.channels.contains(&chat.name) {
             self.channels.push(chat.name.clone());
@@ -156,16 +147,7 @@ pub struct Live {
     shared: Arc<StdMutex<Shared>>,
 }
 
-/// What notifies, from "Preferences": the UI sends `all`, `direct` or `nothing`.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NotifyMode {
-    #[default]
-    All,
-    /// Direct chats and mentions.
-    Direct,
-    Nothing,
-}
+pub use mostik_ipc::cmd::{NotifyMode, TrayIcon};
 
 /// UI settings the backend needs (from "Preferences" in the UI).
 #[derive(Clone)]
@@ -175,6 +157,8 @@ pub struct Prefs {
     pub english: bool,
     /// Notification sound, one of [`mostik_core::NOTIFICATION_SOUNDS`].
     pub sound: String,
+    /// The tray icon on Linux and Windows (see [`crate::badge`]).
+    pub tray_icon: TrayIcon,
 }
 
 impl Default for Prefs {
@@ -187,6 +171,11 @@ impl Default for Prefs {
             preview: true,
             sound: "marimba".into(),
             english,
+            tray_icon: if cfg!(target_os = "linux") {
+                TrayIcon::White
+            } else {
+                TrayIcon::App
+            },
         }
     }
 }
@@ -204,15 +193,6 @@ pub fn text(app: &AppHandle, ru: &'static str, en: &'static str) -> &'static str
 pub struct TrayItems {
     pub open: tauri::menu::MenuItem<tauri::Wry>,
     pub quit: tauri::menu::MenuItem<tauri::Wry>,
-}
-
-/// A file the user picked in the dialog or dropped onto the window: only such files may be sent.
-#[derive(Clone, Serialize)]
-pub struct PendingFile {
-    pub path: String,
-    pub name: String,
-    pub size: u64,
-    pub image: bool,
 }
 
 fn pending_file(path: &std::path::Path) -> Option<PendingFile> {
@@ -235,14 +215,6 @@ pub const FILES_EVENT: &str = "mostik://files";
 /// the drag leaves or ends.
 pub const DRAG_EVENT: &str = "mostik://drag";
 
-/// Files dropped onto the chat window and where, in logical pixels of the window.
-#[derive(Serialize)]
-pub struct Dropped {
-    pub files: Vec<PendingFile>,
-    pub x: f64,
-    pub y: f64,
-}
-
 /// Allows sending the files (dialog, drag and drop) and returns their description for the UI.
 pub fn allow_files(app: &AppHandle, paths: &[std::path::PathBuf]) -> Vec<PendingFile> {
     let files: Vec<PendingFile> = paths.iter().filter_map(|p| pending_file(p)).collect();
@@ -257,9 +229,18 @@ pub fn allow_files(app: &AppHandle, paths: &[std::path::PathBuf]) -> Vec<Pending
 #[derive(Default)]
 pub struct AppState {
     pub prefs: StdMutex<Prefs>,
+    /// The unread mark on the tray icon, kept to draw it again in another colour.
+    pub tray_badge: StdMutex<mostik_core::UnreadBadge>,
     allowed_files: StdMutex<BTreeSet<String>>,
     /// Contents of the files pasted or dropped into the message field, by their [`KEPT`](files::KEPT) path.
     kept_files: StdMutex<BTreeMap<String, bytes::Bytes>>,
+    /// The attachments the UI may save (see [`files::KnownFiles`]): kept across reconnections, as
+    /// the UI keeps the messages it has loaded.
+    known_files: StdMutex<files::KnownFiles>,
+    /// How many attachments are being saved now.
+    saving: AtomicUsize,
+    /// The uploads of the sendings going on.
+    uploads: StdMutex<files::Uploads>,
     live: Mutex<Option<Arc<Live>>>,
     session: Session,
     reconnecting: AtomicBool,
@@ -379,5 +360,31 @@ fn rpc_ok(v: &Value) -> Result<(), String> {
         let code = v.pointer("/data/code").and_then(Value::as_str).unwrap_or("?");
         let text = v.pointer("/data/text").and_then(Value::as_str).unwrap_or("");
         Err(format!("Telemost: {code} {text}").trim().to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two fetches of a new direct chat may end in any order: a later one that did not learn the
+    /// name leaves the name the other one recorded.
+    #[test]
+    fn a_stand_in_title_does_not_replace_a_name() {
+        let chat = Chat::new(
+            ChatId("u0_u1".into()),
+            ChatKind::Direct {
+                peer: UserId("u1".into()),
+            },
+        );
+        let mut sh = Shared::default();
+        sh.note_chat(&chat, String::new());
+        assert_eq!(sh.titles["u0_u1"], "");
+        sh.note_chat(&chat, "Ann".into());
+        sh.note_chat(&chat, mostik_core::UNKNOWN_USER.into());
+        sh.note_chat(&chat, String::new());
+        assert_eq!(sh.titles["u0_u1"], "Ann");
+        sh.note_chat(&chat, "Anna".into());
+        assert_eq!(sh.titles["u0_u1"], "Anna");
     }
 }

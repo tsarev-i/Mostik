@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use serde::Serialize;
+use mostik_ipc::cmd::{self, Args, AutoUpdateArgs, Out};
 use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -24,19 +24,7 @@ const CHECK_EVERY: Duration = Duration::from_secs(4 * 60 * 60);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What the UI shows in the top bar and in Preferences → Updates.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum UpdateStatus {
-    /// No update known.
-    #[default]
-    None,
-    /// This build cannot update itself: it runs from `cargo` or was not installed from a bundle.
-    Unsupported,
-    /// A newer release is out: show the "Update" button.
-    Available { version: String },
-    /// Downloading and installing; `percent` is unknown without a Content-Length.
-    Installing { version: String, percent: Option<u8> },
-}
+pub use mostik_ipc::UpdateStatus;
 
 /// The update found by the last check, the status shown in the UI and the background check switch.
 ///
@@ -158,13 +146,14 @@ async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
 
 /// Current status, for a UI that starts after the check has already finished.
 #[tauri::command]
-pub fn update_status(app: AppHandle) -> UpdateStatus {
+pub fn update_status(app: AppHandle) -> Out<cmd::UpdateStatus> {
     status(&app)
 }
 
 /// Turns the background check on or off (Preferences → Updates). Turning it on checks at once.
 #[tauri::command]
-pub fn set_auto_update(app: AppHandle, enabled: bool) {
+pub fn set_auto_update(app: AppHandle, args: Args<cmd::SetAutoUpdate>) -> Out<cmd::SetAutoUpdate> {
+    let AutoUpdateArgs { enabled } = args;
     let was = app.state::<UpdateState>().auto.swap(enabled, Ordering::Relaxed);
     if enabled && !was && supported() {
         tauri::async_runtime::spawn(async move {
@@ -177,7 +166,7 @@ pub fn set_auto_update(app: AppHandle, enabled: bool) {
 
 /// Checks for a new version now ("Check for updates" in Preferences).
 #[tauri::command]
-pub async fn check_update(app: AppHandle) -> Result<UpdateStatus, String> {
+pub async fn check_update(app: AppHandle) -> Result<Out<cmd::CheckUpdate>, String> {
     check(&app).await.map_err(|e| {
         format!(
             "{}: {e}",
@@ -189,7 +178,7 @@ pub async fn check_update(app: AppHandle) -> Result<UpdateStatus, String> {
 /// Downloads and installs the update found by the last check, then restarts Mostik.
 /// On Windows the NSIS setup takes over: the app exits and the setup starts it again.
 #[tauri::command]
-pub async fn install_update(app: AppHandle) -> Result<(), String> {
+pub async fn install_update(app: AppHandle) -> Result<Out<cmd::InstallUpdate>, String> {
     let state = app.state::<UpdateState>();
     let (update, version) = {
         let mut found = state.update.lock().unwrap_or_else(|e| e.into_inner());

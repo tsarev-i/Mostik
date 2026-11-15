@@ -300,10 +300,15 @@ impl WebClient {
         self.fetch(&file_url(file_id, size), limit, STALL_TIMEOUT).await
     }
 
-    /// Writes a file of the Messenger storage into `out` as it arrives, whatever its size.
-    /// Returns the number of bytes written.
-    pub async fn download(&self, file_id: &str, out: &mut (impl AsyncWrite + Unpin)) -> Result<u64, WebError> {
-        let mut download = self.open(&file_url(file_id, None), u64::MAX, STALL_TIMEOUT).await?;
+    /// Writes a file of the Messenger storage into `out` as it arrives. A file larger than `limit`
+    /// bytes is refused, or stopped once that much has come. Returns the number of bytes written.
+    pub async fn download(
+        &self,
+        file_id: &str,
+        out: &mut (impl AsyncWrite + Unpin),
+        limit: u64,
+    ) -> Result<u64, WebError> {
+        let mut download = self.open(&file_url(file_id, None), limit, STALL_TIMEOUT).await?;
         while let Some(chunk) = download.next().await? {
             out.write_all(&chunk).await?;
         }
@@ -370,6 +375,21 @@ impl WebClient {
         content_type: &str,
         bytes: bytes::Bytes,
     ) -> Result<String, WebError> {
+        self.upload_file_with_progress(chat_id, message_id, filename, content_type, bytes, Arc::new(|_| {}))
+            .await
+    }
+
+    /// [`WebClient::upload_file`] that tells `progress` how many bytes of the file have gone, as
+    /// they go; a repeat after a stale CSRF token starts from 0 again.
+    pub async fn upload_file_with_progress(
+        &mut self,
+        chat_id: &str,
+        message_id: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: bytes::Bytes,
+        progress: Arc<dyn Fn(u64) + Send + Sync>,
+    ) -> Result<String, WebError> {
         // Like `encodeURI` in the web client: the chat ID goes in with its slashes as is,
         // only the file name is encoded (and a `/` in it is escaped so it cannot break the path).
         let url = format!(
@@ -387,11 +407,16 @@ impl WebClient {
             if let Ok(v) = HeaderValue::from_str(content_type) {
                 headers.insert(reqwest::header::CONTENT_TYPE, v);
             }
+            let body = UploadBody {
+                bytes: bytes.clone(),
+                sent: 0,
+                progress: progress.clone(),
+            };
             let resp = self
                 .http
                 .post(&url)
                 .headers(headers)
-                .body(bytes.clone())
+                .body(reqwest::Body::wrap(body))
                 .timeout(transfer_timeout(bytes.len() as u64))
                 .send()
                 .await?;
@@ -574,6 +599,45 @@ impl Download {
     }
 }
 
+/// How many bytes of an upload go at a time: its progress moves by this much.
+const UPLOAD_CHUNK: usize = 64 * 1024;
+
+/// The body of an upload: the file in pieces, each one telling `progress` how many bytes have
+/// gone. The connection takes a piece only when it can send it, so the count follows the network.
+struct UploadBody {
+    bytes: bytes::Bytes,
+    sent: usize,
+    progress: Arc<dyn Fn(u64) + Send + Sync>,
+}
+
+impl http_body::Body for UploadBody {
+    type Data = bytes::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        if this.sent >= this.bytes.len() {
+            return std::task::Poll::Ready(None);
+        }
+        let end = (this.sent + UPLOAD_CHUNK).min(this.bytes.len());
+        let piece = this.bytes.slice(this.sent..end);
+        this.sent = end;
+        (this.progress)(end as u64);
+        std::task::Poll::Ready(Some(Ok(http_body::Frame::data(piece))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.sent >= self.bytes.len()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact((self.bytes.len() - self.sent) as u64)
+    }
+}
+
 /// Whether a response says the CSRF token was not accepted.
 fn csrf_rejected(status: StatusCode, body: Option<&Value>) -> bool {
     status == StatusCode::FORBIDDEN
@@ -601,6 +665,29 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_upload_goes_in_pieces_with_its_progress() {
+        use http_body::Body;
+        let len = UPLOAD_CHUNK * 2 + 10;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let mut body = UploadBody {
+            bytes: bytes::Bytes::from(vec![7u8; len]),
+            sent: 0,
+            progress: Arc::new(move |n| log.lock().unwrap().push(n)),
+        };
+        assert_eq!(body.size_hint().exact(), Some(len as u64));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut got = 0;
+        while let std::task::Poll::Ready(Some(Ok(frame))) = std::pin::Pin::new(&mut body).poll_frame(&mut cx) {
+            got += frame.into_data().map_or(0, |d| d.len());
+        }
+        assert_eq!(got, len);
+        assert!(body.is_end_stream());
+        let chunk = UPLOAD_CHUNK as u64;
+        assert_eq!(*seen.lock().unwrap(), [chunk, 2 * chunk, len as u64]);
+    }
 
     #[test]
     fn detects_rejected_csrf() {

@@ -2,23 +2,19 @@
 //! editor of a message), as in Slack: the formatting toolbar and its hotkeys, the "Add link"
 //! dialog, a link pasted over selected text, and files pasted or dropped into a message.
 
-use std::ops::Range;
-
 use leptos::ev;
 use leptos::html;
 use leptos::portal::Portal;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use mostik_core::Timestamp;
-use mostik_core::markup::{link_address, link_at, link_markup, pasted_link, typed_address};
 use wasm_bindgen::JsCast;
 
-use crate::app::{
-    Ctx, insert_into, place_caret, scoped_window_listener, selection, utf16_len, utf16_to_byte, wrap_selection,
-};
+use crate::app::{Ctx, place_caret, scoped_window_listener, selection, wrap_selection};
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
 use crate::modal::Modal;
+use crate::text_edit::{LinkTarget, insert_into, paste_link};
 use crate::{bridge, editor};
 
 /// A message field as its toolbar, hotkeys and dialogs see it.
@@ -122,93 +118,66 @@ impl Field {
     }
 }
 
-/// What the link dialog edits: the link the selection is in, or the selected text to make a link of.
-#[derive(Clone, Debug, PartialEq)]
-struct LinkTarget {
-    /// The text of the field when the dialog opened, and the selection in it.
-    text: String,
-    selection: (u32, u32),
-    /// Bytes of `text` the link takes the place of.
-    range: Range<usize>,
-    caption: String,
-    address: String,
-    /// An existing link, which the dialog can also remove.
-    existing: bool,
-}
-
-impl LinkTarget {
-    fn new(text: &str, start: Option<u32>, end: Option<u32>) -> Self {
-        let from = utf16_to_byte(text, start);
-        let to = utf16_to_byte(text, end).max(from);
-        let selection = (utf16_len(&text[..from]), utf16_len(&text[..to]));
-        let (range, caption, address, existing) = match link_at(text, from, to) {
-            Some(link) => (
-                link.range,
-                text[link.caption].to_owned(),
-                typed_address(&link.address),
-                true,
-            ),
-            // A caption is one line.
-            None => (from..to, text[from..to].replace('\n', " "), String::new(), false),
-        };
-        Self {
-            text: text.to_owned(),
-            selection,
-            range,
-            caption,
-            address,
-            existing,
-        }
+/// The `contenteditable` of a message field, one for the composer of a chat or thread and for the
+/// in-place editor of a message: it shows its text formatted with the markers hidden (see
+/// [`editor`]) and makes the changes next to the markers itself. A key goes to the input method
+/// first, then to the formatting hotkeys, then to `on_key` (suggestions, Enter, Esc). A paste goes
+/// to `on_paste` first (files), then makes a link of selected text, else the browser pastes.
+#[component]
+pub fn FieldArea(
+    field: Field,
+    /// The text after the user typed, deleted or pasted.
+    #[prop(into)]
+    on_input: Callback<String>,
+    #[prop(into)] on_key: Callback<ev::KeyboardEvent>,
+    /// Takes a paste before the field does; returns whether it took it.
+    #[prop(optional, into)]
+    on_paste: Option<Callback<ev::ClipboardEvent, bool>>,
+    #[prop(optional, into)] on_blur: Option<Callback<()>>,
+    #[prop(optional, into)] placeholder: MaybeProp<String>,
+) -> impl IntoView {
+    let c = expect_context::<Ctx>();
+    let area = field.area;
+    view! {
+        <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
+            aria-placeholder=move || placeholder.get()
+            on:input=move |_| {
+                if let Some(el) = area.get_untracked() {
+                    on_input.run(editor::tidy(&el, &crate::custom::lookup(c)));
+                }
+            }
+            on:beforeinput=move |e: ev::InputEvent| {
+                if let Some(el) = area.get_untracked() {
+                    editor::before_input(&el, &e, &crate::custom::lookup(c));
+                }
+            }
+            on:keydown=move |e: ev::KeyboardEvent| {
+                if !e.is_composing() && !field.hotkey(&e) {
+                    on_key.run(e);
+                }
+            }
+            on:paste=move |e: ev::ClipboardEvent| {
+                if !on_paste.is_some_and(|take| take.run(e.clone())) {
+                    field.paste_link(&e);
+                }
+            }
+            on:blur=move |_| {
+                if let Some(blur) = on_blur {
+                    blur.run(());
+                }
+            }
+        ></div>
     }
-
-    /// The text with the link saved, and the caret after it; `None` when the address is not a
-    /// web or mail address or the caption cannot be one. Without a caption the address stays bare.
-    fn save(&self, caption: &str, address: &str) -> Option<(String, u32)> {
-        let address = link_address(address)?;
-        if caption.trim().is_empty() {
-            return Some(self.replace(&address));
-        }
-        Some(self.replace(&link_markup(caption, &address)?))
-    }
-
-    /// The text with the link taken off: its caption stays as plain text.
-    fn remove(&self) -> (String, u32) {
-        self.replace(&self.caption)
-    }
-
-    fn replace(&self, with: &str) -> (String, u32) {
-        let head = format!("{}{with}", &self.text[..self.range.start]);
-        let caret = utf16_len(&head);
-        (format!("{head}{}", &self.text[self.range.end..]), caret)
-    }
-}
-
-/// `text` after pasting `pasted` over the `start..end` selection, when it is a web or mail
-/// address and something is selected: the link the selection is in gets the address, other
-/// selected text becomes a link to it. Returns the new text and the caret after the link.
-fn paste_link(text: &str, start: Option<u32>, end: Option<u32>, pasted: &str) -> Option<(String, u32)> {
-    let address = pasted_link(pasted)?;
-    let from = utf16_to_byte(text, start);
-    let to = utf16_to_byte(text, end);
-    if from >= to {
-        return None;
-    }
-    let (range, caption) = match link_at(text, from, to) {
-        Some(link) => (link.range, &text[link.caption]),
-        None => (from..to, &text[from..to]),
-    };
-    let head = format!("{}{}", &text[..range.start], link_markup(caption, &address)?);
-    let caret = utf16_len(&head);
-    Some((format!("{head}{}", &text[range.end..]), caret))
 }
 
 /// The "Add link" hotkey that works here. On Linux Ctrl+Shift+U never reaches the page: GTK and
 /// IBus take it for typing a character by its Unicode code.
 fn link_keys() -> &'static str {
-    let linux = web_sys::window()
-        .and_then(|w| w.navigator().user_agent().ok())
-        .is_some_and(|ua| ua.contains("Linux"));
-    if linux { "Ctrl+Shift+K" } else { "Ctrl+Shift+U" }
+    if crate::settings::on_linux() {
+        "Ctrl+Shift+K"
+    } else {
+        "Ctrl+Shift+U"
+    }
 }
 
 /// Where the emoji picker of a field opens, and the field's selection it inserts into: the
@@ -509,61 +478,6 @@ fn file_name(name: &str, kind: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn link_dialog_makes_and_edits_links() {
-        // "docs" selected (UTF-16 offsets: "👍" is two units).
-        let new = LinkTarget::new("👍 see docs now", Some(7), Some(11));
-        assert_eq!((new.caption.as_str(), new.existing), ("docs", false));
-        assert_eq!(
-            new.save("docs", "e.org/a(1)"),
-            Some(("👍 see [docs](https://e.org/a%281%29) now".to_owned(), 37))
-        );
-        assert_eq!(new.save("docs", ""), None);
-        assert_eq!(new.save("a [b", "e.org"), None);
-        assert_eq!(
-            new.save(" ", "e.org"),
-            Some(("👍 see https://e.org now".to_owned(), 20))
-        );
-
-        // The caret inside a link: the dialog edits that link.
-        let text = "see [docs](https://e.org/a%28b%29) now";
-        let old = LinkTarget::new(text, Some(6), Some(6));
-        assert_eq!(
-            (old.caption.as_str(), old.address.as_str(), old.existing),
-            ("docs", "https://e.org/a(b)", true)
-        );
-        assert_eq!(
-            old.save("the docs", "https://e.org/x"),
-            Some(("see [the docs](https://e.org/x) now".to_owned(), 31))
-        );
-        assert_eq!(old.remove(), ("see docs now".to_owned(), 8));
-
-        // Nothing selected: the link goes in at the caret.
-        let empty = LinkTarget::new("ab", Some(1), Some(1));
-        assert_eq!(empty.caption, "");
-        assert_eq!(
-            empty.save("x", "https://e.org"),
-            Some(("a[x](https://e.org)b".to_owned(), 19))
-        );
-    }
-
-    #[test]
-    fn pasting_an_address_over_a_selection_links_it() {
-        assert_eq!(
-            paste_link("see docs now", Some(4), Some(8), "https://e.org/(x)\n"),
-            Some(("see [docs](https://e.org/%28x%29) now".to_owned(), 33))
-        );
-        // Inside a link: its address changes.
-        assert_eq!(
-            paste_link("[docs](https://e.org) now", Some(1), Some(3), "mailto:olga@example.com"),
-            Some(("[docs](mailto:olga@example.com) now".to_owned(), 31))
-        );
-        // Nothing selected, not an address, or a selection that cannot be a caption: an ordinary paste.
-        assert_eq!(paste_link("see docs", Some(4), Some(4), "https://e.org"), None);
-        assert_eq!(paste_link("see docs", Some(4), Some(8), "plain words"), None);
-        assert_eq!(paste_link("a\nb", Some(0), Some(3), "https://e.org"), None);
-    }
 
     #[test]
     fn pasted_files_get_a_name() {

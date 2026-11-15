@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3047,6 +3047,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "mostik-core",
+ "mostik-ipc",
  "mostik-yandex",
  "rodio",
  "serde",
@@ -3065,21 +3066,32 @@ dependencies = [
 
 [[package]]
 name = "mostik-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emojis",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mostik-ipc"
+version = "0.5.0"
+dependencies = [
+ "mostik-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "mostik-ui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "console_error_panic_hook",
  "emojis",
  "js-sys",
  "leptos",
  "mostik-core",
+ "mostik-ipc",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -3090,11 +3102,12 @@ dependencies = [
 
 [[package]]
 name = "mostik-yandex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "cookie",
  "futures-util",
+ "http-body",
  "hyper-util",
  "mostik-core",
  "percent-encoding",

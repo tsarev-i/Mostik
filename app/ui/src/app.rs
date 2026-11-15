@@ -4,8 +4,10 @@
 mod avatar;
 mod composer;
 mod dialogs;
+pub(crate) mod drafts;
 mod feed;
 mod field;
+mod files;
 mod menus;
 mod message;
 mod org;
@@ -32,10 +34,10 @@ use crate::{bridge, folders, hidden, ops, order, storage};
 
 // Paths the rest of the UI uses as `crate::app::…`.
 pub(crate) use avatar::{Avatar, display_title};
-pub(crate) use field::{insert_into, place_caret, selection, utf16_len, utf16_to_byte, wrap_selection};
+pub(crate) use field::{place_caret, selection, wrap_selection};
 pub(crate) use org::current_org;
 pub use org::org_key;
-pub use state::{Ctx, Phase, ViewMode, enter_sends};
+pub use state::{ChatTab, Ctx, Phase, ViewMode, enter_sends};
 
 use avatar::HoverTip;
 use composer::Composer;
@@ -44,6 +46,7 @@ use dialogs::{
     ForwardDialog, LeaveDialog, NewMessageDialog,
 };
 use feed::{ChannelHeader, MessageList, PinsView};
+use files::FilesView;
 use menus::ContextMenu;
 use org::ORG_KEY;
 use preferences::{AddEmojiDialog, PrefTab, PreferencesDialog};
@@ -51,8 +54,8 @@ use profile::{ProfilePane, StatusDialog};
 use rail::Rail;
 use sidebar::{Sidebar, chat_drag_to, chat_drop};
 use state::{
-    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, ctx, empty_snapshot, load_drafts, save_drafts,
-    set_locale, store_width, stored_width,
+    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, ctx, empty_snapshot, set_locale, store_width,
+    stored_width,
 };
 use topbar::TopBar;
 use views::{DraftsView, ThreadPane, ThreadsView};
@@ -93,7 +96,7 @@ pub fn App() -> impl IntoView {
         exhausted: RwSignal::new(HashSet::new()),
         loading_older: RwSignal::new(Default::default()),
         editing: RwSignal::new(None),
-        edit_draft: StoredValue::new(None),
+        editing_in_thread: RwSignal::new(false),
         confirm_delete: RwSignal::new(None),
         confirm_leave: RwSignal::new(None),
         picker: RwSignal::new(None),
@@ -110,17 +113,17 @@ pub fn App() -> impl IntoView {
         highlight: RwSignal::new(None),
         hold_unread: RwSignal::new(None),
         forwarding: RwSignal::new(None),
-        replying: RwSignal::new(None),
-        pins_tab: RwSignal::new(false),
+        chat_tab: RwSignal::new(ChatTab::Messages),
         browsing: RwSignal::new(false),
         settings,
         status_dialog: RwSignal::new(false),
         pending_files: RwSignal::new(std::collections::HashMap::new()),
+        outbox: RwSignal::new(vec![]),
         new_message: RwSignal::new(false),
         creating_channel: RwSignal::new(None),
         details: RwSignal::new(None),
         view: RwSignal::new(ViewMode::Home),
-        drafts: RwSignal::new(load_drafts()),
+        drafts: RwSignal::new(drafts::load()),
         profile: RwSignal::new(None),
         profiles: RwSignal::new(std::collections::HashMap::new()),
         pref_tab: RwSignal::new(PrefTab::Notifications),
@@ -158,15 +161,6 @@ pub fn App() -> impl IntoView {
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
-    // A draft lives only while its message is being edited.
-    Effect::new(move |_| {
-        let key = c.editing.with(|e| e.as_ref().map(|m| (m.chat_id.clone(), m.ts)));
-        c.edit_draft.update_value(|d| {
-            if d.as_ref().map(|d| &d.key) != key.as_ref() {
-                *d = None;
-            }
-        });
-    });
     // Preferences: save, apply the language, time format and theme, and pass them to the backend.
     Effect::new(move |_| {
         let st = c.settings.get();
@@ -207,9 +201,25 @@ pub fn App() -> impl IntoView {
         Duration::from_secs(9 * 60),
     );
     set_interval(move || ops::expire_presence(c), Duration::from_secs(60));
-    Effect::new(move |_| c.drafts.with(save_drafts));
+    Effect::new(move |_| c.drafts.with(drafts::save));
     Effect::new(move |_| c.chat_order.with(order::save));
     Effect::new(move |_| c.hidden.with(hidden::save));
+    // An edit opened in the thread pane ends when the pane closes or shows another thread: its
+    // editor is gone, and an invisible edit would keep Esc from cancelling a reply. Its text stays
+    // in the drafts, as when another editor opens.
+    Effect::new(move |_| {
+        let (thread, chat) = (c.thread.get(), c.current.get());
+        if !c.editing_in_thread.get_untracked() {
+            return;
+        }
+        let shown = c.editing.with_untracked(|e| {
+            e.as_ref()
+                .is_none_or(|m| thread.is_some_and(|t| m.chat_id == chat && (m.ts == t || m.thread_parent == Some(t))))
+        });
+        if !shown {
+            c.editing.set(None);
+        }
+    });
     // Sections an earlier Mostik kept in this browser move into Telemost folders, once.
     let migrated = StoredValue::new(false);
     Effect::new(move |_| {
@@ -434,8 +444,7 @@ pub fn App() -> impl IntoView {
             c.prefs.set(false);
         } else if c.about.get_untracked() {
             c.about.set(false);
-        } else if c.replying.with_untracked(Option::is_some) && c.editing.with_untracked(Option::is_none) {
-            c.replying.set(None);
+        } else if c.editing.with_untracked(Option::is_none) && drafts::cancel_reply(c) {
         } else {
             return;
         }
@@ -619,10 +628,10 @@ fn Workspace() -> impl IntoView {
                         } else {
                             view! {
                                 <ChannelHeader/>
-                                {move || if c.pins_tab.get() {
-                                    view! { <PinsView/> }.into_any()
-                                } else {
-                                    view! { <MessageList/><Composer/> }.into_any()
+                                {move || match c.chat_tab.get() {
+                                    ChatTab::Pins => view! { <PinsView/> }.into_any(),
+                                    ChatTab::Files => view! { <FilesView/> }.into_any(),
+                                    ChatTab::Messages => view! { <MessageList/><Composer/> }.into_any(),
                                 }}
                             }.into_any()
                         }}

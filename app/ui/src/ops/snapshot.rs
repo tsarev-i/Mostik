@@ -193,6 +193,8 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
         return;
     }
     let mut parent = thread_parent;
+    // Its thread's reply field, its editor and replies to it have nothing to go to now.
+    crate::app::drafts::forget_message(c, chat, ts);
     c.snap.update(|s| {
         let removed = s
             .messages

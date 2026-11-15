@@ -1,10 +1,11 @@
-//! The text of a message field: selection offsets, markup around the selection, insertion, and
-//! the `@` and `:` suggestions.
+//! The text of a message field in the DOM: its selection, markup around the selection, insertion,
+//! and the `@` and `:` suggestions. What these do to the text is in [`crate::text_edit`].
 
 use mostik_core::markup::MENTION_ALL;
 use mostik_core::*;
 
 use super::state::ctx;
+use crate::text_edit::{insert_into, utf16_to_byte, wrap_text};
 
 /// Selection of the message field as UTF-16 offsets of its text (see [`crate::editor`]).
 pub(crate) fn selection(area: &web_sys::HtmlElement) -> (Option<u32>, Option<u32>) {
@@ -14,78 +15,6 @@ pub(crate) fn selection(area: &web_sys::HtmlElement) -> (Option<u32>, Option<u32
 /// Sets the text of the message field and puts the caret at UTF-16 offset `caret`.
 pub(crate) fn place_caret(area: &web_sys::HtmlElement, value: &str, caret: u32) {
     crate::editor::set_text(area, value, caret, &crate::custom::lookup(ctx()));
-}
-
-/// Byte index in `s` of a UTF-16 offset; a missing or out-of-range offset means the end of the text.
-/// An offset inside a surrogate pair moves to the end of that character.
-pub(crate) fn utf16_to_byte(s: &str, offset: Option<u32>) -> usize {
-    let Some(offset) = offset else { return s.len() };
-    let mut units = 0;
-    for (i, ch) in s.char_indices() {
-        if units >= offset as usize {
-            return i;
-        }
-        units += ch.len_utf16();
-    }
-    s.len()
-}
-
-pub(crate) fn utf16_len(s: &str) -> u32 {
-    s.encode_utf16().count() as u32
-}
-
-/// `value` with the `start..end` selection wrapped in `before`/`after`, or unwrapped when it already
-/// is (the markers right around it or at its edges), as Slack's formatting buttons toggle.
-/// Returns the new value and the selection over the same text.
-fn wrap_text(value: &str, start: Option<u32>, end: Option<u32>, before: &str, after: &str) -> (String, u32, u32) {
-    let start = utf16_to_byte(value, start);
-    let end = utf16_to_byte(value, end).max(start);
-    let selected = &value[start..end];
-    let (head, tail) = (&value[..start], &value[end..]);
-    // The caret at the end of formatted text: the button ends the formatting, the caret moves past the marker.
-    if start == end && !after.is_empty() && tail.starts_with(after) && !head.ends_with(before) {
-        let caret = utf16_len(head) + utf16_len(after);
-        return (value.to_owned(), caret, caret);
-    }
-    let (head, selected, tail, wrap) = if head.ends_with(before) && tail.starts_with(after) {
-        (
-            &head[..head.len() - before.len()],
-            selected,
-            &tail[after.len()..],
-            false,
-        )
-    } else if selected.len() >= before.len() + after.len() && selected.starts_with(before) && selected.ends_with(after)
-    {
-        (head, &selected[before.len()..selected.len() - after.len()], tail, false)
-    } else {
-        (head, selected, tail, true)
-    };
-    let (open, close) = if wrap { (before, after) } else { ("", "") };
-    let from = utf16_len(head) + utf16_len(open);
-    let to = from + utf16_len(selected);
-    (format!("{head}{open}{selected}{close}{tail}"), from, to)
-}
-
-/// `value` with `text` in place of the `start..end` selection; `drop_before` characters before the
-/// selection are removed too. Returns the new value and the caret after the inserted text.
-pub(crate) fn insert_into(
-    value: &str,
-    start: Option<u32>,
-    end: Option<u32>,
-    text: &str,
-    drop_before: usize,
-) -> (String, u32) {
-    let end = utf16_to_byte(value, end);
-    let selected = utf16_to_byte(value, start).min(end);
-    let start = value[..selected]
-        .char_indices()
-        .rev()
-        .take(drop_before)
-        .last()
-        .map_or(selected, |(i, _)| i);
-    let head = format!("{}{text}", &value[..start]);
-    let caret = utf16_len(&head);
-    (format!("{head}{}", &value[end..]), caret)
 }
 
 /// `:code` that ends at UTF-16 offset `caret` (two characters or more), for emoji suggestions.
@@ -215,52 +144,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formatting_toggles() {
-        // Selected text between the markers, the markers selected too, and an empty pair.
-        assert_eq!(
-            wrap_text("a **b** c", Some(4), Some(5), "**", "**"),
-            ("a b c".to_owned(), 2, 3)
-        );
-        assert_eq!(
-            wrap_text("a **b** c", Some(2), Some(7), "**", "**"),
-            ("a b c".to_owned(), 2, 3)
-        );
-        assert_eq!(
-            wrap_text("a **** c", Some(4), Some(4), "**", "**"),
-            ("a  c".to_owned(), 2, 2)
-        );
-        assert_eq!(
-            wrap_text("a b c", Some(2), Some(3), "~~", "~~"),
-            ("a ~~b~~ c".to_owned(), 4, 5)
-        );
-        // At the end of bold text: the caret leaves it.
-        assert_eq!(
-            wrap_text("a **b** c", Some(5), Some(5), "**", "**"),
-            ("a **b** c".to_owned(), 7, 7)
-        );
-    }
-
-    #[test]
-    fn selection_offsets_are_utf16() {
-        // "👍" is two UTF-16 units: "world" spans 9..14.
-        let value = "👍 hello world";
-        assert_eq!(
-            wrap_text(value, Some(9), Some(14), "**", "**"),
-            ("👍 hello **world**".to_owned(), 11, 16)
-        );
-        assert_eq!(
-            wrap_text(value, None, None, "`", "`"),
-            ("👍 hello world``".to_owned(), 15, 15)
-        );
-        assert_eq!(
-            insert_into(value, Some(2), Some(2), "😀", 0),
-            ("👍😀 hello world".to_owned(), 4)
-        );
-        // `:ok` typed after an emoji: the code and the colon are replaced.
-        assert_eq!(
-            insert_into("👍 :ok", Some(6), Some(6), "👌", 3),
-            ("👍 👌".to_owned(), 5)
-        );
+    fn emoji_code_runs_to_the_cursor() {
         assert_eq!(emoji_code_before("👍 :ok", 6).as_deref(), Some("ok"));
         assert_eq!(emoji_code_before("a:ok", 4), None);
     }
@@ -315,6 +199,5 @@ mod tests {
         assert_eq!(mention_rank("Ivan Petrov", "pe"), Some(1));
         assert_eq!(mention_rank("Ivan Petrov", "iv"), Some(0));
         assert_eq!(mention_rank("Ivan Petrov", "x"), None);
-        assert_eq!(utf16_to_byte("👍x", Some(1)), "👍".len());
     }
 }

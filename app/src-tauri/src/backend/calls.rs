@@ -1,6 +1,8 @@
 //! Calls from a chat, like Slack huddles: starting or joining one, and the call window from the
 //! sidebar.
 
+use mostik_core::ChatId;
+use mostik_ipc::cmd::{self, Args, Out, StartCallArgs};
 use mostik_yandex::convert;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
@@ -13,7 +15,12 @@ use crate::call;
 /// window title and the sidebar show: `#dev` or the person's name. `url` is the link of a call
 /// already going on in the chat: joining it needs no `create_meeting`.
 #[tauri::command]
-pub async fn start_call(app: AppHandle, chat_id: String, label: String, url: Option<String>) -> Result<(), String> {
+pub async fn start_call(app: AppHandle, args: Args<cmd::StartCall>) -> Result<Out<cmd::StartCall>, String> {
+    let StartCallArgs {
+        chat_id: ChatId(chat_id),
+        label,
+        url,
+    } = args;
     open_call(&app, chat_id, label, url).await
 }
 
@@ -29,7 +36,7 @@ pub(crate) async fn open_call(
     }
     let state = app.state::<AppState>();
     let info = call::CallInfo {
-        chat_id: Some(chat_id.clone()),
+        chat_id: Some(ChatId(chat_id.clone())),
         label,
     };
     // Runs only when no call is open: `create_meeting` announces the call in the chat. An open
@@ -57,18 +64,18 @@ pub(crate) async fn open_call(
 /// The call window comes to the front (where the desktop lets an app raise its windows:
 /// Windows and X11 do, Wayland compositors usually do not).
 #[tauri::command]
-pub async fn focus_call(app: AppHandle) {
+pub async fn focus_call(app: AppHandle) -> Out<cmd::FocusCall> {
     call::focus(&app).await;
 }
 
 /// "Leave" in the sidebar call bar: the call window closes.
 #[tauri::command]
-pub fn leave_call(app: AppHandle) {
+pub fn leave_call(app: AppHandle) -> Out<cmd::LeaveCall> {
     call::close(&app);
 }
 
 /// The current call, for a UI that has just loaded.
 #[tauri::command]
-pub fn current_call(app: AppHandle) -> Option<call::CallInfo> {
+pub fn current_call(app: AppHandle) -> Out<cmd::CurrentCall> {
     call::info(&app)
 }

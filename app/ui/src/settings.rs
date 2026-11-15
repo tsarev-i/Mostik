@@ -82,6 +82,54 @@ pub struct Settings {
     pub hide_muted: bool,
     /// Check GitHub releases for a new version in the background and show "Update" in the top bar.
     pub auto_update: bool,
+    /// The tray icon on Linux and Windows.
+    pub tray_icon: TrayIcon,
+}
+
+/// The tray icon from "Preferences → Appearance" on Linux and Windows; macOS always shows the white one,
+/// coloured by the menu bar (see `badge.rs` in the backend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrayIcon {
+    /// The white truss on transparency: reads on a dark panel, is lost on a light one.
+    White,
+    /// The app icon.
+    App,
+}
+
+impl TrayIcon {
+    /// The choices in the order "Preferences" list them.
+    pub const ALL: [Self; 2] = [Self::White, Self::App];
+
+    /// Its picture in the UI assets.
+    pub fn preview(self) -> &'static str {
+        match self {
+            Self::White => "tray/white.png",
+            Self::App => "tray/app.png",
+        }
+    }
+}
+
+impl Default for TrayIcon {
+    /// White on Linux, where panels are mostly dark; the app icon on Windows.
+    fn default() -> Self {
+        if on_linux() { Self::White } else { Self::App }
+    }
+}
+
+/// The app runs on Linux.
+pub fn on_linux() -> bool {
+    user_agent_has("Linux")
+}
+
+/// The app runs on macOS.
+pub fn on_mac() -> bool {
+    user_agent_has("Macintosh")
+}
+
+fn user_agent_has(os: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.navigator().user_agent().ok())
+        .is_some_and(|ua| ua.contains(os))
 }
 
 impl Default for Settings {
@@ -103,6 +151,7 @@ impl Default for Settings {
             sidebar_sort: SidebarSort::Recency,
             hide_muted: false,
             auto_update: true,
+            tray_icon: TrayIcon::default(),
         }
     }
 }

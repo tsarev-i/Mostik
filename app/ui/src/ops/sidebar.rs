@@ -85,7 +85,7 @@ pub fn toggle_star(c: Ctx, id: ChatId) {
     spawn_local(async move {
         let list: Vec<ChatId> = if c.live {
             match bridge::set_starred(&id.0, starred).await {
-                Ok(list) => list.into_iter().map(ChatId).collect(),
+                Ok(list) => list,
                 Err(e) => return failed(c, tr().err_settings, e),
             }
         } else {

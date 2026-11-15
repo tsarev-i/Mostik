@@ -12,8 +12,8 @@ use crate::{ops, time};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_badge};
 use super::menus::open_menu_below_end;
-use super::message::MessageRow;
-use super::state::{Ctx, CtxMenu, CtxTarget, DetailsTab, close_menus, ctx};
+use super::message::{MessageRow, Outbox};
+use super::state::{ChatTab, Ctx, CtxMenu, CtxTarget, DetailsTab, close_menus, ctx};
 
 #[component]
 pub(super) fn ChannelHeader() -> impl IntoView {
@@ -74,7 +74,7 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                         // A call going on in the chat turns the button into "Join", as in Slack,
                         // unless the user is already in it.
                         let current = c.current.get();
-                        let joined = c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_deref() == Some(current.0.as_str())));
+                        let joined = c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_ref() == Some(&current)));
                         let live = !joined && c.active_calls.with(|a| a.contains_key(&current));
                         let title = match (live, in_call(c, &current)) {
                             (true, Some(n)) => format!("{} · {}", tr().call_live_hint, tr().in_call(n)),
@@ -114,12 +114,15 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                 </div>
             </div>
             <nav class="ch-tabs">
-                <button class="tab" class:active=move || !c.pins_tab.get() on:click=move |_| c.pins_tab.set(false)>
+                <button class="tab" class:active=move || c.chat_tab.get() == ChatTab::Messages on:click=move |_| c.chat_tab.set(ChatTab::Messages)>
                     <Icon icon=I::Chat size=14/><span>{tr().tab_messages}</span>
+                </button>
+                <button class="tab" class:active=move || c.chat_tab.get() == ChatTab::Files on:click=move |_| c.chat_tab.set(ChatTab::Files)>
+                    <Icon icon=I::Files size=14/><span>{tr().tab_files}</span>
                 </button>
                 // Like the "Pins" tab in Slack: only if the chat has a pinned message.
                 {move || info.get().and_then(|(ch, _, _)| ch.pinned).map(|_| view! {
-                    <button class="tab" class:active=move || c.pins_tab.get() on:click=move |_| c.pins_tab.set(true)>
+                    <button class="tab" class:active=move || c.chat_tab.get() == ChatTab::Pins on:click=move |_| c.chat_tab.set(ChatTab::Pins)>
                         <Icon icon=I::Pin size=14/><span>{tr().tab_pins}</span>
                     </button>
                 })}
@@ -222,8 +225,29 @@ pub(super) fn MessageList() -> impl IntoView {
         }
         newest
     });
+    // A message with files the user has just sent shows at the end at once: it takes the list to
+    // the bottom too, and the list keeps its place while it changes.
+    let outgoing = Memo::new(move |_| {
+        let id = c.current.get();
+        c.outbox.with(|o| {
+            o.iter()
+                .filter(|m| m.chat == id && m.thread.is_none())
+                .map(|m| (m.id.clone(), m.failed.is_some()))
+                .collect::<Vec<_>>()
+        })
+    });
+    Effect::new(move |seen: Option<Vec<(String, bool)>>| {
+        let now = outgoing.get();
+        if let Some(seen) = seen
+            && now.iter().any(|(id, _)| !seen.iter().any(|(s, _)| s == id))
+        {
+            stick.set(true);
+        }
+        now
+    });
     Effect::new(move |_| {
         messages.track();
+        outgoing.track();
         // When the loading stops, an older page has come or the start of the chat shows above.
         c.loading_older.track();
         restoring.set_value(true);
@@ -232,6 +256,25 @@ pub(super) fn MessageList() -> impl IntoView {
     Effect::new(move |_| {
         if c.highlight.with(Option::is_some) {
             stick.set(false);
+        }
+    });
+    // Older pages are asked again after a failure only while the user is in the chat: leaving it
+    // (for another chat, or for a view without the list) stops that. Opening a chat builds the list
+    // anew, so the chat it shows is kept here: by its cleanup `current` is already the next one.
+    let shown = std::sync::Arc::new(std::sync::Mutex::new(None::<ChatId>));
+    Effect::new({
+        let shown = shown.clone();
+        move |_| {
+            let id = c.current.get();
+            let prev = shown.lock().ok().and_then(|mut s| s.replace(id.clone()));
+            if let Some(prev) = prev.filter(|p| *p != id) {
+                ops::stop_older(c, &prev);
+            }
+        }
+    });
+    on_cleanup(move || {
+        if let Some(id) = shown.lock().ok().and_then(|mut s| s.take()) {
+            ops::stop_older(c, &id);
         }
     });
     // A short page may not fill the list, and then there is no scrolling to load older messages:
@@ -331,6 +374,7 @@ pub(super) fn MessageList() -> impl IntoView {
                 }
             }}
             <Feed messages=messages/>
+            <Outbox/>
         </div>
     }
 }
@@ -383,7 +427,7 @@ pub(super) fn PinsView() -> impl IntoView {
     Effect::new(move |_| {
         if let Some((id, ts, None)) = data.get() {
             ops::jump_to_message(c, id, ts, None);
-            c.pins_tab.set(true);
+            c.chat_tab.set(ChatTab::Pins);
         }
     });
     view! {
@@ -393,7 +437,7 @@ pub(super) fn PinsView() -> impl IntoView {
                 Some((id, ts, Some(m))) => view! {
                     <div class="pin-card">
                         <MessageRow msg=m grouped=false/>
-                        <button class="link" on:click=move |_| { c.pins_tab.set(false); ops::jump_to_message(c, id.clone(), ts, None); }>{tr().view_in_chat}</button>
+                        <button class="link" on:click=move |_| { c.chat_tab.set(ChatTab::Messages); ops::jump_to_message(c, id.clone(), ts, None); }>{tr().view_in_chat}</button>
                     </div>
                 }.into_any(),
                 Some((_, _, None)) => view! { <div class="loading-older"><div class="spinner small"></div></div> }.into_any(),

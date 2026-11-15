@@ -9,10 +9,11 @@ use leptos::task::spawn_local;
 use mostik_core::*;
 
 use crate::i18n::Lang;
+#[cfg(feature = "demo")]
+use crate::ops;
 use crate::settings::Settings;
-use crate::{bridge, folders, hidden, ops, order, storage, time};
+use crate::{bridge, folders, hidden, order, storage, time};
 
-use super::composer::EditDraft;
 use super::preferences::PrefTab;
 
 /// Where a message is written: a chat, and the parent of the thread for a thread reply.
@@ -42,10 +43,9 @@ pub struct Ctx {
     /// Chats an older history page is being loaded for.
     pub loading_older: RwSignal<std::collections::HashSet<ChatId>>,
     pub editing: RwSignal<Option<Message>>,
-    /// The text being edited, outside the editor: a message line built again (the message list
-    /// shown again after the pinned message, the text changed on another device) picks the
-    /// draft up again.
-    pub edit_draft: StoredValue<Option<EditDraft>>,
+    /// Whether the edit was opened in the thread pane: a thread's parent shows both in the chat
+    /// and on top of the pane, and only one of them opens the editor.
+    pub editing_in_thread: RwSignal<bool>,
     pub confirm_delete: RwSignal<Option<Message>>,
     /// Channel the user is about to leave from the sidebar menu: waits for confirmation.
     pub confirm_leave: RwSignal<Option<ChatId>>,
@@ -71,10 +71,8 @@ pub struct Ctx {
     pub hold_unread: RwSignal<Option<ChatId>>,
     /// Message being forwarded (the "Forward message" dialog).
     pub forwarding: RwSignal<Option<Message>>,
-    /// Message the composer of its chat or thread replies to: the bar above the field.
-    pub replying: RwSignal<Option<ops::ReplyTarget>>,
-    /// The "Pinned" tab in the chat header is open.
-    pub pins_tab: RwSignal<bool>,
+    /// The tab of the chat header that is open.
+    pub chat_tab: RwSignal<ChatTab>,
     /// The "Browse channels" dialog.
     pub browsing: RwSignal<bool>,
     pub settings: RwSignal<Settings>,
@@ -83,14 +81,16 @@ pub struct Ctx {
     /// thread's parent (`None` for the chat's own field): a file attached in one chat or thread
     /// never goes to another.
     pub pending_files: RwSignal<std::collections::HashMap<Place, Vec<bridge::PendingFile>>>,
+    /// Messages with files on their way, shown in the feed until they are sent.
+    pub outbox: RwSignal<Vec<crate::ops::Outgoing>>,
     pub new_message: RwSignal<bool>,
     /// The "Create a channel" dialog.
     pub creating_channel: RwSignal<Option<NewChannel>>,
     pub details: RwSignal<Option<DetailsTab>>,
     /// What is selected in the rail and sidebar: home, direct messages or "Drafts & sent".
     pub view: RwSignal<ViewMode>,
-    /// Per-chat drafts, as in Slack; kept between runs.
-    pub drafts: RwSignal<std::collections::HashMap<ChatId, String>>,
+    /// What every message field has not sent yet: text, caret and reply (see [`super::drafts`]).
+    pub drafts: RwSignal<super::drafts::Drafts>,
     /// Profile open in the right panel and the loaded profiles.
     pub profile: RwSignal<Option<UserId>>,
     pub profiles: RwSignal<std::collections::HashMap<UserId, UserProfile>>,
@@ -192,6 +192,8 @@ pub enum CtxTarget {
         mine: bool,
         /// Text selected in the message when the menu opened: "Quote selection" sends it.
         quote: Option<String>,
+        /// The menu is of the message's row in the thread pane.
+        in_thread: bool,
     },
     Chat(ChatId),
     /// The "⋮" menu in a channel header.
@@ -345,6 +347,15 @@ pub enum DetailsTab {
     Members,
 }
 
+/// The tabs of the chat header, as in Slack: the messages, the pinned message, the files.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatTab {
+    #[default]
+    Messages,
+    Pins,
+    Files,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Home,
@@ -361,18 +372,6 @@ impl ViewMode {
     pub fn is_home_page(self) -> bool {
         matches!(self, ViewMode::Drafts | ViewMode::Threads)
     }
-}
-
-const DRAFTS_KEY: &str = "mostik.drafts";
-
-pub(super) fn load_drafts() -> std::collections::HashMap<ChatId, String> {
-    storage::load::<Vec<(ChatId, String)>>(DRAFTS_KEY)
-        .map(|v| v.into_iter().collect())
-        .unwrap_or_default()
-}
-
-pub(super) fn save_drafts(d: &std::collections::HashMap<ChatId, String>) {
-    storage::save(DRAFTS_KEY, &d.iter().collect::<Vec<_>>());
 }
 
 #[derive(Clone, PartialEq)]

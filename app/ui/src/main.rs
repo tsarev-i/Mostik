@@ -16,6 +16,7 @@ mod order;
 mod ring;
 mod settings;
 mod storage;
+mod text_edit;
 mod time;
 
 fn main() {

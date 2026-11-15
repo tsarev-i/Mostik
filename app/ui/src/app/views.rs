@@ -15,8 +15,10 @@ use crate::{bridge, ops, time};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_badge};
 use super::composer::Composer;
+use super::drafts::{self, DraftKey};
 use super::feed::{Feed, call_title, chat_note_text};
-use super::message::{MessageRow, message_preview};
+use super::message::{MessageRow, Outbox, message_preview};
+use super::sidebar::unread_count;
 use super::state::{CtxMenu, CtxTarget, ViewMode, ctx};
 use super::text::render_text;
 
@@ -65,6 +67,7 @@ pub(super) fn ThreadPane() -> impl IntoView {
                         // No "0 replies" once the last reply is deleted, as in Slack.
                         {move || (n() > 0).then(|| view! { <div class="tp-divider"><span>{tr().replies(n())}</span></div> })}
                         <Feed messages=replies in_thread=true/>
+                        <Outbox in_thread=true/>
                     })
                 }}
             </div>
@@ -135,6 +138,7 @@ pub(super) fn DmList() -> impl IntoView {
                             </span>
                             <span class="dm-preview">{preview}</span>
                         </span>
+                        {unread_count(&ch).map(|(n, quiet)| view! { <span class="badge" class:quiet=quiet>{n}</span> })}
                     </button>
                 }
             }).collect_view()}
@@ -394,16 +398,33 @@ pub(super) fn DraftsView() -> impl IntoView {
         c.view.set(ViewMode::Home);
         ops::open_chat(c, id);
     };
+    // A thread's draft opens its chat with the thread, as in Slack: the history is loaded back
+    // to the thread's message if need be.
+    let go_to = move |key: &DraftKey| match key {
+        DraftKey::Thread(chat, parent) => {
+            c.view.set(ViewMode::Home);
+            ops::jump_to_message(c, chat.clone(), *parent, Some(*parent));
+        }
+        _ => go(key.chat().clone()),
+    };
     let drafts = Memo::new(move |_| {
-        let d = c.drafts.get();
-        c.snap.with(|s| {
-            d.into_iter()
-                .filter(|(_, t)| !t.trim().is_empty())
-                .filter_map(|(id, t)| {
-                    s.chat(&id)
-                        .map(|ch| (id.clone(), display_title(s, ch), chat_face(s, ch), Mark::of(ch), t))
-                })
-                .collect::<Vec<_>>()
+        c.drafts.with(|d| {
+            c.snap.with(|s| {
+                let mut list: Vec<_> = d
+                    .iter()
+                    .filter(|(k, v)| !matches!(k, DraftKey::Edit(..)) && v.has_text())
+                    .filter_map(|(k, v)| {
+                        let ch = s.chat(k.chat())?;
+                        let title = match k {
+                            DraftKey::Thread(..) => format!("{} · {}", tr().thread, display_title(s, ch)),
+                            _ => display_title(s, ch),
+                        };
+                        Some((k.clone(), title, chat_face(s, ch), Mark::of(ch), v.text.clone()))
+                    })
+                    .collect();
+                list.sort_by(|a, b| a.1.cmp(&b.1));
+                list
+            })
         })
     });
     let sent = Memo::new(move |_| {
@@ -444,10 +465,10 @@ pub(super) fn DraftsView() -> impl IntoView {
                     if list.is_empty() {
                         return view! { <div class="empty-state"><h3>{tr().no_drafts}</h3><p>{tr().no_drafts_hint}</p></div> }.into_any();
                     }
-                    list.into_iter().map(|(id, title, face, kind, text)| {
-                        let (open, del) = (id.clone(), id.clone());
+                    list.into_iter().map(|(key, title, face, kind, text)| {
+                        let (open, del) = (key.clone(), key.clone());
                         view! {
-                            <div class="draft-row" on:click=move |_| go(open.clone())>
+                            <div class="draft-row" on:click=move |_| go_to(&open)>
                                 <span>{match face {
                                     Some(u) => view! { <Avatar user=u size=36/> }.into_any(),
                                     None => view! { <span class="draft-kind">{kind_icon(&kind, 18)}</span> }.into_any(),
@@ -458,7 +479,7 @@ pub(super) fn DraftsView() -> impl IntoView {
                                 </span>
                                 <button class="icon-btn" title=tr().delete_draft on:click=move |e| {
                                     e.stop_propagation();
-                                    c.drafts.update(|d| { d.remove(&del); });
+                                    drafts::drop_draft(c, &del);
                                 }><Icon icon=I::X size=16/></button>
                             </div>
                         }

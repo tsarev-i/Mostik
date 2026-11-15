@@ -18,9 +18,15 @@ pub fn org_key(s: &Snapshot, chosen: Option<u64>) -> String {
         .map_or_else(|| "0".to_owned(), |o| o.id.to_string())
 }
 
-/// Current organization: the selected one, or the first if none is selected.
+/// Current organization: the selected one, or the first if none is selected. Event handlers and
+/// views built once read it too: it is tracked only where something tracks it, without the
+/// "outside a reactive tracking context" warning at every keystroke.
 pub(crate) fn current_org(c: Ctx) -> Option<Organization> {
-    c.org_now.get()
+    if leptos::reactive::graph::Observer::get().is_some() {
+        c.org_now.get()
+    } else {
+        c.org_now.get_untracked()
+    }
 }
 
 pub(super) fn org_name(c: Ctx) -> String {

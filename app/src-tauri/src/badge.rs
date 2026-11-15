@@ -1,26 +1,34 @@
 //! The unread mark on the app icons, as in Slack: a blue dot on the tray icon for unread messages,
 //! a red one for unread direct messages and mentions. On Windows the red mark also goes on the
 //! taskbar button, on macOS a badge with their number on the Dock icon.
+//!
+//! The tray icon itself is chosen in "Preferences → Appearance" on Linux and Windows: the white
+//! truss of the app icon on transparency (the default on Linux; lost on a light panel) or the app
+//! icon (the default on Windows). macOS always shows the white truss, as a template the menu bar
+//! colours for its own background.
 
 use mostik_core::UnreadBadge;
-use tauri::AppHandle;
 use tauri::image::Image;
+use tauri::{AppHandle, Manager};
+
+use crate::backend::{AppState, Prefs, TrayIcon};
 
 /// Slack's colours of the two marks.
 const BLUE: [u8; 3] = [0x1d, 0x9b, 0xd1];
 const RED: [u8; 3] = [0xe0, 0x1e, 0x5a];
 
+/// The menu bar of macOS colours the tray icon by its alpha alone.
+pub const TEMPLATE: bool = cfg!(target_os = "macos");
+
 /// Shows `badge` on the tray icon, and on the taskbar button or the Dock icon; `count` is the
 /// number of unread direct messages and mentions behind a red mark.
 pub fn show(app: &AppHandle, badge: UnreadBadge, count: u32) -> tauri::Result<()> {
-    if let (Some(tray), Some(icon)) = (app.tray_by_id("main"), app.default_window_icon()) {
-        let image = match badge {
-            UnreadBadge::None => icon.clone(),
-            UnreadBadge::Unread => with_dot(icon, BLUE),
-            UnreadBadge::Mention => with_dot(icon, RED),
-        };
-        tray.set_icon(Some(image))?;
+    if let Some(state) = app.try_state::<AppState>()
+        && let Ok(mut shown) = state.tray_badge.lock()
+    {
+        *shown = badge;
     }
+    draw_tray(app, badge)?;
     #[cfg(windows)]
     if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
         window.set_overlay_icon((badge == UnreadBadge::Mention).then(|| dot(16, RED)))?;
@@ -38,13 +46,50 @@ pub fn show(app: &AppHandle, badge: UnreadBadge, count: u32) -> tauri::Result<()
     Ok(())
 }
 
+/// Draws the tray icon again with the mark it has, after "Preferences" changed the icon.
+pub fn restyle(app: &AppHandle) -> tauri::Result<()> {
+    let badge = app
+        .try_state::<AppState>()
+        .and_then(|s| s.tray_badge.lock().ok().map(|b| *b))
+        .unwrap_or_default();
+    draw_tray(app, badge)
+}
+
+/// Puts the tray icon with the mark of `badge` in the tray.
+fn draw_tray(app: &AppHandle, badge: UnreadBadge) -> tauri::Result<()> {
+    let (Some(tray), Some(icon)) = (app.tray_by_id("main"), tray_icon(app)) else {
+        return Ok(());
+    };
+    let image = match badge {
+        UnreadBadge::None => icon,
+        UnreadBadge::Unread => with_dot(&icon, BLUE),
+        UnreadBadge::Mention => with_dot(&icon, RED),
+    };
+    tray.set_icon_with_as_template(Some(image), TEMPLATE)
+}
+
+/// The tray icon without a mark (see the module docs).
+pub fn tray_icon(app: &AppHandle) -> Option<Image<'static>> {
+    let choice = if TEMPLATE {
+        TrayIcon::White
+    } else {
+        app.try_state::<AppState>()
+            .and_then(|s| s.prefs.lock().ok().map(|p| p.tray_icon))
+            .unwrap_or_else(|| Prefs::default().tray_icon)
+    };
+    match choice {
+        TrayIcon::White => Some(tauri::include_image!("icons/tray.png")),
+        TrayIcon::App => app.default_window_icon().map(|icon| icon.clone().to_owned()),
+    }
+}
+
 /// `icon` with a dot of `color` in its bottom right corner, set apart from the icon by a
 /// transparent ring so that it reads on any panel.
 fn with_dot(icon: &Image<'_>, color: [u8; 3]) -> Image<'static> {
     let (w, h) = (icon.width(), icon.height());
     let mut rgba = icon.rgba().to_vec();
     let size = w.min(h) as f32;
-    let (radius, ring) = (size * 0.22, size * 0.07);
+    let (radius, ring) = (size * 0.18, size * 0.06);
     let centre = (w as f32 - radius - ring / 2.0, h as f32 - radius - ring / 2.0);
     paint(&mut rgba, w, centre, radius, ring, color);
     Image::new_owned(rgba, w, h)
@@ -100,7 +145,7 @@ mod tests {
         // The dot: its colour, opaque.
         assert_eq!(pixel(&marked, 50, 50), [0xe0, 0x1e, 0x5a, 255]);
         // The ring around it: the icon is cut out.
-        assert_eq!(pixel(&marked, 47, 31)[3], 0);
+        assert_eq!(pixel(&marked, 50, 37)[3], 0);
         // The rest of the icon stays as it was.
         assert_eq!(pixel(&marked, 5, 5), [10, 20, 30, 255]);
         assert_eq!(pixel(&marked, 60, 5), [10, 20, 30, 255]);

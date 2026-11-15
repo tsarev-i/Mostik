@@ -8,7 +8,9 @@ use mostik_core::*;
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
 use crate::modal::Modal;
-use crate::settings::{ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES};
+use crate::settings::{
+    ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES, TrayIcon, on_mac,
+};
 use crate::{bridge, ops};
 
 use super::org::current_org;
@@ -163,6 +165,20 @@ fn PrefAppearance() -> impl IntoView {
         {theme_buttons(c, 0..OWN_THEMES)}
         <div class="theme-group">{tr().themes_classic}</div>
         {theme_buttons(c, OWN_THEMES..THEMES.len())}
+        // The tray icon does not follow the mode or the theme: the panel's colour is the
+        // system's. macOS has no choice: the menu bar colours the white icon for itself.
+        {(!on_mac()).then(|| view! {
+            <h3 class="pref-h">{tr().p_tray}</h3>
+            <div class="themes">
+                {TrayIcon::ALL.into_iter().enumerate().map(|(i, icon)| view! {
+                    <button class=move || if c.settings.with(|s| s.tray_icon == icon) { "theme selected" } else { "theme" }
+                        on:click=move |_| c.settings.update(|s| s.tray_icon = icon)>
+                        <img class="tray-preview" class:white={icon == TrayIcon::White} src=icon.preview() alt=""/>
+                        <span>{tr().tray_icon_names[i]}</span>
+                    </button>
+                }).collect_view()}
+            </div>
+        })}
     }
 }
 

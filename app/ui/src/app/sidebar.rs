@@ -11,7 +11,7 @@ use mostik_core::*;
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
 use crate::settings::{SidebarFilter, SidebarSort};
-use crate::{folders, hidden, ops, order};
+use crate::{bridge, folders, hidden, ops, order};
 
 use super::avatar::{Avatar, Mark, chat_face, chat_person, display_title, kind_icon, status_view};
 use super::feed::typers;
@@ -23,6 +23,7 @@ use super::views::{ActivityList, DmList};
 #[component]
 pub(super) fn Sidebar() -> impl IntoView {
     let c = ctx();
+    let elsewhere = find_elsewhere(c);
     view! {
         <aside class="sidebar" style=move || format!("width:{:.0}px", c.sidebar_w.get())>
             <div class="sb-header">
@@ -89,7 +90,7 @@ pub(super) fn Sidebar() -> impl IntoView {
                         <span class="sb-icon"><Icon icon=I::Send size=15/></span>
                         <span class="sb-name">{tr().drafts_and_sent}</span>
                         {move || {
-                            let n = c.drafts.with(|d| d.values().filter(|v| !v.trim().is_empty()).count());
+                            let n = c.drafts.with(super::drafts::listed);
                             (n > 0).then(|| view! { <span class="sb-draft-count"><Icon icon=I::Compose size=13/>{n}</span> })
                         }}
                     </button>
@@ -99,9 +100,10 @@ pub(super) fn Sidebar() -> impl IntoView {
                     key=|sec| (sec.id.clone(), sec.title.clone(), sec.chats.clone())
                     children=move |sec: Section| view! { <SidebarSection section=sec/> }
                 />
-                <Show when=move || searching(c) && !any_found(c)>
+                <Show when=move || searching(c) && !any_found(c) && elsewhere.with(|(ch, p)| ch.is_empty() && p.is_empty())>
                     <div class="sb-find-empty">{tr().no_conversations_found}</div>
                 </Show>
+                <FoundElsewhere found=elsewhere/>
             </div>
             <CallBar/>
         </aside>
@@ -116,7 +118,7 @@ fn SidebarFind() -> impl IntoView {
     let field = NodeRef::<html::Input>::new();
     let first_row = || {
         document()
-            .query_selector(".sb-scroll .sb-row[data-chat]")
+            .query_selector(".sb-scroll .sb-row[data-chat], .sb-scroll .found-elsewhere .sb-row")
             .ok()
             .flatten()
             .and_then(|el| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(el).ok())
@@ -170,6 +172,158 @@ fn SidebarFind() -> impl IntoView {
     }
 }
 
+/// The shortest "Find a conversation" text the directory is searched for.
+const DIRECTORY_QUERY_MIN: usize = 2;
+
+/// How many channels and how many people "Find a conversation" shows from the directory.
+const DIRECTORY_HITS: usize = 8;
+
+/// What "Find a conversation" finds in the organization beyond the sidebar, as Slack's quick
+/// switcher does: public channels the user is not in and people without a direct chat yet. The
+/// directory is asked a moment after the typing stops; what the list has meanwhile is left out.
+fn find_elsewhere(c: Ctx) -> Memo<(Vec<Chat>, Vec<User>)> {
+    // What was found, for which text and organization.
+    let found: RwSignal<Option<(String, Option<u64>, mostik_ipc::DirectoryHits)>> = RwSignal::new(None);
+    let seq = StoredValue::new(0u32);
+    Effect::new(move |_| {
+        let query = c.sb_query.with(|q| q.trim().to_owned());
+        let org = c.org_now.with(|o| o.as_ref().map(|o| o.id));
+        let n = seq.get_value() + 1;
+        seq.set_value(n);
+        if !c.live || query.chars().count() < DIRECTORY_QUERY_MIN {
+            return;
+        }
+        set_timeout(
+            move || {
+                if seq.try_get_value() != Some(n) {
+                    return;
+                }
+                leptos::task::spawn_local(async move {
+                    let hits = bridge::search_directory(&query, org).await;
+                    if seq.try_get_value() != Some(n) {
+                        return;
+                    }
+                    match hits {
+                        Ok(hits) => {
+                            found.try_set(Some((query, org, hits)));
+                        }
+                        Err(e) => leptos::logging::warn!("directory search: {e}"),
+                    }
+                });
+            },
+            Duration::from_millis(300),
+        );
+    });
+    Memo::new(move |_| {
+        let query = c.sb_query.with(|q| q.trim().to_owned());
+        let org = c.org_now.with(|o| o.as_ref().map(|o| o.id));
+        found.with(|f| {
+            let Some((_, _, hits)) = f.as_ref().filter(|(q, o, _)| *q == query && *o == org) else {
+                return (vec![], vec![]);
+            };
+            c.snap.with(|s| {
+                let chats = hits
+                    .chats
+                    .iter()
+                    .filter(|ch| s.chat(&ch.id).is_none())
+                    .take(DIRECTORY_HITS)
+                    .cloned()
+                    .collect();
+                let people = hits
+                    .people
+                    .iter()
+                    .filter(|u| u.id != s.me && !u.is_robot)
+                    .filter(|u| {
+                        !s.chats
+                            .iter()
+                            .any(|ch| matches!(&ch.kind, ChatKind::Direct { peer } if peer == &u.id))
+                    })
+                    .take(DIRECTORY_HITS)
+                    .cloned()
+                    .collect();
+                (chats, people)
+            })
+        })
+    })
+}
+
+/// The sections of [`find_elsewhere`]: "Channels you're not in", a click joins one, and
+/// "People", a click opens a direct chat.
+#[component]
+fn FoundElsewhere(found: Memo<(Vec<Chat>, Vec<User>)>) -> impl IntoView {
+    let c = ctx();
+    let joining: RwSignal<Option<ChatId>> = RwSignal::new(None);
+    let join = move |id: ChatId| {
+        if joining.get_untracked().is_some() {
+            return;
+        }
+        joining.set(Some(id.clone()));
+        leptos::task::spawn_local(async move {
+            match bridge::join_chat(&id.0).await {
+                Ok(chat) => {
+                    let id = chat.id.clone();
+                    c.snap.update(|s| ops::add_channel(s, chat));
+                    c.sb_query.set(String::new());
+                    ops::open_chat(c, id);
+                }
+                Err(e) => ops::failed(c, tr().err_join, e),
+            }
+            joining.try_set(None);
+        });
+    };
+    let head = |icon: I, title: &'static str| {
+        view! {
+            <div class="sb-section-head">
+                <div class="sb-section-title with-icon">
+                    <span class="sb-section-slot"><span class="sb-section-icon"><Icon icon=icon size=15/></span></span>
+                    <span class="sb-section-name">{title}</span>
+                </div>
+            </div>
+        }
+    };
+    view! {
+        <Show when=move || searching(c) && found.with(|(ch, _)| !ch.is_empty())>
+            <div class="sb-section found-elsewhere">
+                {head(I::HashSquare, tr().channels_not_joined)}
+                {move || found.get().0.into_iter().map(|ch| {
+                    let id = ch.id.clone();
+                    let busy = {
+                        let id = id.clone();
+                        move || joining.with(|j| j.as_ref() == Some(&id))
+                    };
+                    view! {
+                        <button class="sb-row" disabled=busy.clone() title=tr().members_count(ch.member_count)
+                            on:click=move |_| join(id.clone())>
+                            <span class="sb-icon">{kind_icon(&Mark::of(&ch), 15)}</span>
+                            <span class="sb-name">{split_chat_icon(&ch.name).1.to_owned()}</span>
+                            <span class="sb-join">{tr().join_btn}</span>
+                        </button>
+                    }
+                }).collect_view()}
+            </div>
+        </Show>
+        <Show when=move || searching(c) && found.with(|(_, p)| !p.is_empty())>
+            <div class="sb-section found-elsewhere">
+                {head(I::Users, tr().search_people)}
+                {move || found.get().1.into_iter().map(|u| {
+                    let id = u.id.clone();
+                    let title = u.title.clone().unwrap_or_default();
+                    let name = u.display_name.clone();
+                    view! {
+                        <button class="sb-row" title=title on:click=move |_| {
+                            c.sb_query.set(String::new());
+                            ops::message_user(c, id.clone());
+                        }>
+                            <span class="sb-icon face"><Avatar user=u size=20/></span>
+                            <span class="sb-name">{name}</span>
+                        </button>
+                    }
+                }).collect_view()}
+            </div>
+        </Show>
+    }
+}
+
 /// "Find a conversation" has text.
 fn searching(c: Ctx) -> bool {
     c.sb_query.with(|q| !q.trim().is_empty())
@@ -187,7 +341,7 @@ fn found(s: &Snapshot, ch: &Chat, query: &str) -> bool {
         || notes.is_some_and(|n| n.contains(&query))
 }
 
-/// Whether "Find a conversation" finds anything in the sidebar sections.
+/// Whether "Find a conversation" finds anything in the sidebar sections, hidden chats included.
 fn any_found(c: Ctx) -> bool {
     c.sb_query.with(|q| {
         c.sections.with(|list| {
@@ -195,7 +349,7 @@ fn any_found(c: Ctx) -> bool {
                 list.iter()
                     .flat_map(|sec| sec.chats.iter())
                     .filter_map(|id| s.chat(id))
-                    .any(|ch| in_current_org(c, ch) && !c.hidden.with(|h| hidden::hides(h, ch)) && found(s, ch, q))
+                    .any(|ch| in_current_org(c, ch) && found(s, ch, q))
             })
         })
     })
@@ -219,7 +373,7 @@ fn CallBar() -> impl IntoView {
     let c = ctx();
     move || {
         c.call.get().map(|call| {
-            let chat = call.chat_id.clone().map(ChatId);
+            let chat = call.chat_id.clone();
             let open_chat = move |_| {
                 if let Some(id) = chat.clone() {
                     ops::open_chat(c, id);
@@ -287,11 +441,12 @@ fn SidebarSection(section: Section) -> impl IntoView {
                                 filter,
                                 hide_muted,
                                 now,
-                                c.drafts.with(|d| d.get(&ch.id).is_some_and(|t| !t.trim().is_empty())),
+                                c.drafts.with(|d| super::drafts::chat_has_text(d, &ch.id)),
                             )
                     })
                     .filter(|ch| in_current_org(c, ch))
-                    .filter(|ch| !c.hidden.with(|h| hidden::hides(h, ch)))
+                    // "Find a conversation" finds hidden chats too: opening one brings it back.
+                    .filter(|ch| !query.is_empty() || !c.hidden.with(|h| hidden::hides(h, ch)))
                     .map(|ch| ch.id.clone())
                     .collect::<Vec<_>>()
             })
@@ -690,7 +845,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
     };
     let has_draft = {
         let id = id.clone();
-        Memo::new(move |_| c.drafts.with(|d| d.get(&id).is_some_and(|t| !t.trim().is_empty())))
+        Memo::new(move |_| c.drafts.with(|d| super::drafts::chat_has_text(d, &id)))
     };
     let selected = {
         let id = id.clone();
@@ -796,12 +951,13 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                 matches!(ch.kind, ChatKind::Notes).then(|| view! { <span class="sb-you">{tr().you_short}</span> });
             let live = live.get();
             let face_status = face_status.get().as_ref().map(status_view);
-            let badge = (ch.mentions > 0).then(|| view! { <span class="badge">{ch.mentions}</span> });
+            let count = unread_count(&ch);
+            let badge = count.map(|(n, quiet)| view! { <span class="badge" class:quiet=quiet>{n}</span> });
             let live_call = live.then(|| {
                 view! { <span class="sb-call" title=tr().call_live_hint><Icon icon=I::Headphones size=13/></span> }
             });
             let has_draft = !selected.get() && has_draft.get();
-            let pencil = (has_draft && ch.mentions == 0)
+            let pencil = (has_draft && count.is_none())
                 .then(|| view! { <span class="sb-pencil"><Icon icon=I::Compose size=13/></span> });
             // "×" on hover hides the chat, as closing a conversation in Slack. Not a nested button:
             // the row is one already.
@@ -832,5 +988,52 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                 </button>
             }
         })
+    }
+}
+
+/// The number at the right of a sidebar chat and whether it is a quiet one. What is for the user
+/// counts in red, as the app icon counts it: mentions, and every unread message of a direct chat
+/// that notifies about everything. The other unread messages count in grey; a muted chat counts
+/// only its mentions.
+pub(super) fn unread_count(ch: &Chat) -> Option<(u32, bool)> {
+    let urgent = match ch.kind {
+        ChatKind::Direct { .. } if ch.notify_level() == NotifyLevel::All => ch.unread.max(ch.mentions),
+        _ => ch.mentions,
+    };
+    if urgent > 0 {
+        return Some((urgent, false));
+    }
+    (ch.unread > 0 && !ch.muted).then_some((ch.unread, true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unread_counts() {
+        let chat = |kind, unread, mentions, level| {
+            let mut ch = Chat {
+                unread,
+                mentions,
+                ..Chat::new(ChatId("c".into()), kind)
+            };
+            ch.set_notify_level(level);
+            ch
+        };
+        let group = || ChatKind::Group { public: true };
+        let direct = || ChatKind::Direct {
+            peer: UserId("u".into()),
+        };
+        assert_eq!(unread_count(&chat(group(), 0, 0, NotifyLevel::All)), None);
+        assert_eq!(unread_count(&chat(group(), 5, 0, NotifyLevel::All)), Some((5, true)));
+        assert_eq!(unread_count(&chat(group(), 5, 2, NotifyLevel::All)), Some((2, false)));
+        assert_eq!(unread_count(&chat(group(), 5, 0, NotifyLevel::Mentions)), None);
+        assert_eq!(
+            unread_count(&chat(group(), 5, 1, NotifyLevel::Mentions)),
+            Some((1, false))
+        );
+        assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::All)), Some((3, false)));
+        assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::Nothing)), None);
     }
 }

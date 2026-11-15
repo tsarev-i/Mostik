@@ -17,7 +17,7 @@ use super::chats::chat_info_raw;
 use super::connection::{probing, reconnect_loop};
 use super::notify::{may_ring, notify};
 use super::threads::reply_notifies_now;
-use super::{AppState, EVENT, Live, Shared, fill_profiles, live, service};
+use super::{AppState, EVENT, Live, Shared, fill_profiles, live, note_files, service};
 
 /// Socket events written to `probe-events.jsonl` per run.
 const MAX_DIAG_EVENTS: usize = 300;
@@ -70,6 +70,9 @@ pub(super) fn handle_incoming(
             };
             if service::swallows(app, shared, &ev) {
                 return;
+            }
+            if let (LiveEvent::Upsert { message, .. }, Some(me)) = (&ev, &me) {
+                note_files(&app.state::<AppState>(), me, [message.as_ref()]);
             }
             if !sync_shared(app, shared, &ev) {
                 return;
@@ -242,7 +245,7 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
             }
             // Known from now on even if the fetch failed: its messages are not held again.
             None => {
-                sh.titles.insert(chat_id.clone(), String::new());
+                sh.titles.entry(chat_id.clone()).or_default();
             }
         }
         // Emitted under the lock: events that arrive meanwhile wait and come after these.

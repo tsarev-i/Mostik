@@ -11,22 +11,15 @@ use mostik_core::*;
 
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::text_edit::utf16_len;
 use crate::{bridge, ops};
 
 use super::avatar::Avatar;
+use super::drafts::{self, DraftKey};
 use super::feed::typing_line;
-use super::field::{
-    Suggestion, emoji_query, insert_text, mention_query, mention_suggestions, place_caret, selection, utf16_len,
-};
+use super::field::{Suggestion, emoji_query, insert_text, mention_query, mention_suggestions, place_caret, selection};
 use super::message::{ReplyBar, human_size};
 use super::state::{ctx, enter_sends};
-
-/// Text typed in the editor of a message and where the caret was.
-pub struct EditDraft {
-    pub(super) key: (ChatId, Timestamp),
-    text: String,
-    caret: Option<u32>,
-}
 
 /// In-place message editing, as in Slack: a text field, "Cancel" and "Save".
 /// Enter saves (or Ctrl+Enter, depending on the preference), Esc cancels.
@@ -41,27 +34,28 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
     c.picked
         .update(|p| p.extend(named.into_iter().map(|(name, id)| (name, UserId(id)))));
     let original = shown.trim().to_owned();
-    // The line may have been built again while the user was typing: go on with their draft.
-    let key = (msg.chat_id.clone(), msg.ts);
-    let draft = c
-        .edit_draft
-        .with_value(|d| d.as_ref().filter(|d| d.key == key).map(|d| (d.text.clone(), d.caret)));
-    let (initial, caret) = draft.unwrap_or((shown, None));
+    // The line may have been built again while the user was typing, or the user may have edited
+    // another message meanwhile: go on with the draft of this message's editor.
+    let key = DraftKey::Edit(msg.chat_id.clone(), msg.ts);
+    let (initial, caret) = match c.drafts.with_untracked(|d| d.get(&key).cloned()) {
+        // Emptied on purpose is a draft too.
+        Some(draft) => (draft.text, draft.caret),
+        None => (shown, None),
+    };
     let caret = caret.unwrap_or(utf16_len(&initial));
     let text = RwSignal::new(initial);
     let busy = RwSignal::new(false);
     let area = NodeRef::<html::Div>::new();
-    Effect::new(move |first: Option<()>| {
-        let text = text.get();
-        if first.is_none() {
-            return;
+    Effect::new({
+        let key = key.clone();
+        move |first: Option<()>| {
+            let text = text.get();
+            if first.is_none() {
+                return;
+            }
+            let caret = area.get_untracked().and_then(|el| selection(&el).1);
+            drafts::set_text(c, &key, &text, caret);
         }
-        let caret = area.get_untracked().and_then(|el| selection(&el).1);
-        c.edit_draft.set_value(Some(EditDraft {
-            key: key.clone(),
-            text,
-            caret,
-        }));
     });
     let initial = text.get_untracked();
     Effect::new(move |_| {
@@ -81,13 +75,21 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
     // Closing the editor gives the focus back to the field it was opened from, as in Slack: ↑
     // works again and typing goes on.
     let in_thread = msg.thread_parent.is_some();
-    let close = move || {
-        c.editing.set(None);
-        focus_composer(in_thread);
+    // Cancelled or saved, the edit is over and its draft goes; opening another editor keeps it.
+    // Owned, not a stored value: a save may end after this editor is gone.
+    let close = {
+        let key = key.clone();
+        move || {
+            drafts::drop_draft(c, &key);
+            c.editing.set(None);
+            focus_composer(in_thread);
+        }
     };
-    let cancel = close;
+    let cancel = close.clone();
+    let cancel_key = close.clone();
     let save = {
         let msg = msg.clone();
+        let edit_key = key.clone();
         move || {
             let t = text.get_untracked().trim().to_owned();
             if busy.get_untracked() {
@@ -95,6 +97,7 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
             }
             if t.is_empty() {
                 // As in Slack: empty text offers to delete the message.
+                drafts::drop_draft(c, &DraftKey::Edit(msg.chat_id.clone(), msg.ts));
                 c.editing.set(None);
                 return c.confirm_delete.set(Some(msg.clone()));
             }
@@ -104,17 +107,18 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
             busy.set(true);
             let m = msg.clone();
             let key = (msg.chat_id.clone(), msg.ts);
+            let (close, edit_key) = (close.clone(), edit_key.clone());
             spawn_local(async move {
                 match ops::edit(c, m, t).await {
                     // Only if it is still this message's editor: while the edit went, the user may
-                    // have opened another one.
+                    // have opened another one. Its draft is saved either way.
                     Ok(())
                         if c.editing
                             .with_untracked(|e| e.as_ref().is_some_and(|e| (&e.chat_id, e.ts) == (&key.0, key.1))) =>
                     {
                         close()
                     }
-                    Ok(()) => {}
+                    Ok(()) => drafts::drop_draft(c, &edit_key),
                     Err(e) => ops::failed(c, tr().err_not_sent, e),
                 }
                 // Saved, the editor closes and its signals go.
@@ -127,36 +131,27 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
     view! {
         <div class="inline-edit" on:click=|e| e.stop_propagation()>
             <div class="inline-edit-box">
-                <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
-                    on:input=move |_| {
+                <crate::compose::FieldArea field
+                    on_input=move |t: String| {
+                        text.set(t);
                         if let Some(el) = area.get_untracked() {
-                            text.set(crate::editor::tidy(&el, &crate::custom::lookup(c)));
                             reveal_editor(&el);
                         }
                     }
-                    on:beforeinput=move |e: ev::InputEvent| {
-                        if let Some(el) = area.get_untracked() {
-                            crate::editor::before_input(&el, &e, &crate::custom::lookup(c));
+                    on_key=move |e: ev::KeyboardEvent| match e.key().as_str() {
+                        "Escape" => { e.prevent_default(); e.stop_propagation(); cancel_key(); }
+                        "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
+                            e.prevent_default();
+                            save_key();
                         }
-                    }
-                    on:paste=move |e: ev::ClipboardEvent| { field.paste_link(&e); }
-                    on:keydown=move |e: ev::KeyboardEvent| {
-                        if e.is_composing() || field.hotkey(&e) { return; }
-                        match e.key().as_str() {
-                            "Escape" => { e.prevent_default(); e.stop_propagation(); cancel(); }
-                            "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
-                                e.prevent_default();
-                                save_key();
+                        "Enter" => {
+                            e.prevent_default();
+                            if let Some(el) = area.get_untracked() {
+                                text.set(insert_text(&el, "\n", 0));
                             }
-                            "Enter" => {
-                                e.prevent_default();
-                                if let Some(el) = area.get_untracked() {
-                                    text.set(insert_text(&el, "\n", 0));
-                                }
-                            }
-                            _ => {}
                         }
-                    }></div>
+                        _ => {}
+                    }/>
                 <crate::compose::FormatBar field emoji=true/>
             </div>
             <div class="inline-edit-actions">
@@ -233,30 +228,33 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         }
     });
 
-    // Chat draft: fill it in on opening, save it while typing (main composer only). The draft keeps
-    // only the text: a reply started in another chat ends when the chat changes.
+    // Which field this is: the open chat's composer, or the reply field of its open thread.
+    let field_key = Memo::new(move |_| {
+        let chat = c.current.get();
+        if thread {
+            c.thread.get().map(|parent| DraftKey::Thread(chat, parent))
+        } else {
+            Some(DraftKey::Chat(chat))
+        }
+    });
+    // Its draft: filled in when the field becomes another chat's or thread's, saved while typing.
+    // A change from elsewhere shows too: a message sent from this field before it was built
+    // again clears the draft when it has gone, and "Drafts" can delete it.
     Effect::new(move |_| {
-        let id = c.current.get();
-        if !thread {
-            set_draft.set(c.drafts.with_untracked(|d| d.get(&id).cloned().unwrap_or_default()));
-            if c.replying
-                .with_untracked(|r| r.as_ref().is_some_and(|r| r.msg.chat_id != id))
-            {
-                c.replying.set(None);
-            }
+        let stored = field_key.with(|k| {
+            k.as_ref()
+                .map(|k| c.drafts.with(|d| d.get(k).map(|d| d.text.clone()).unwrap_or_default()))
+        });
+        let stored = stored.unwrap_or_default();
+        if draft.with_untracked(|d| *d != stored) {
+            set_draft.set(stored);
         }
     });
 
-    // The reply this field sends: to a message of its chat, in its thread for the thread field.
+    // The reply this field sends, kept with its draft.
     let reply = Memo::new(move |_| {
-        let (chat, place) = (c.current.get(), if thread { c.thread.get() } else { None });
-        if thread && place.is_none() {
-            return None;
-        }
-        c.replying.with(|r| {
-            r.clone()
-                .filter(|r| r.msg.chat_id == chat && r.msg.thread_parent == place)
-        })
+        let key = field_key.get()?;
+        c.drafts.with(|d| d.get(&key).and_then(|d| d.reply.clone()))
     });
     // Starting a reply puts the caret at the end of this field.
     Effect::new(move |prev: Option<Option<(ChatId, Timestamp)>>| {
@@ -271,17 +269,9 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         now
     });
     let remember = move |text: &str| {
-        if thread {
-            return;
+        if let Some(key) = field_key.get_untracked() {
+            drafts::set_text(c, &key, text, None);
         }
-        let id = c.current.get_untracked();
-        c.drafts.update(|d| {
-            if text.trim().is_empty() {
-                d.remove(&id);
-            } else {
-                d.insert(id, text.to_owned());
-            }
-        });
     };
 
     let placeholder = move || {
@@ -315,32 +305,31 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             // A reply is a text message: attached files follow it without a caption. Files alone
             // keep the reply bar for the text that comes next.
             let replied = replying.is_some() && !text.is_empty();
+            // Files go on their own: the message shows in the feed with their upload at once, and
+            // the field is free.
             let result = match (replying.clone(), with_files) {
                 (Some(r), true) if !text.is_empty() => {
                     match ops::send(c, chat.clone(), text, thread_parent, Some(r)).await {
-                        Ok(()) => ops::send_files(c, chat, String::new(), thread_parent).await,
+                        Ok(()) => ops::send_files(c, chat, String::new(), thread_parent),
                         Err(e) => Err(e),
                     }
                 }
-                (_, true) => ops::send_files(c, chat, text, thread_parent).await,
+                (_, true) => ops::send_files(c, chat, text, thread_parent),
                 (r, false) => ops::send(c, chat, text, thread_parent, r).await,
             };
             // The composer may be gone by now (the user left the chat view while files uploaded).
             sending.try_set(false);
-            if result.is_ok() && replied && c.replying.get_untracked() == replying {
-                c.replying.set(None);
+            let key = DraftKey::field(chat_for_draft.clone(), thread_parent);
+            if result.is_ok() && replied && drafts::get(c, &key).reply == replying {
+                drafts::set_reply(c, &key, None);
             }
             match result {
                 Ok(()) => {
                     // Clear only what was sent: while the message was on its way the user may have
                     // switched to another chat or thread, or kept typing.
                     let unchanged = |d: &str| d.trim() == sent_text;
-                    if !thread {
-                        c.drafts.update(|d| {
-                            if d.get(&chat_for_draft).is_some_and(|t| unchanged(t)) {
-                                d.remove(&chat_for_draft);
-                            }
-                        });
+                    if unchanged(&drafts::get(c, &key).text) {
+                        drafts::set_text(c, &key, "", None);
                     }
                     let same_place = c.current.get_untracked() == chat_for_draft && parent() == thread_parent;
                     if same_place && draft.try_get_untracked().is_some_and(|d| unchanged(&d)) {
@@ -399,9 +388,6 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         crate::compose::attach_dropped(c);
     }
     let on_key = move |ev: web_sys::KeyboardEvent| {
-        if ev.is_composing() || field.hotkey(&ev) {
-            return;
-        }
         let n = suggestions.with_untracked(Vec::len);
         if n > 0 {
             match ev.key().as_str() {
@@ -453,6 +439,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 });
                 if let Some(m) = last {
                     ev.prevent_default();
+                    c.editing_in_thread.set(thread);
                     c.editing.set(Some(m));
                 }
             }
@@ -494,15 +481,10 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 // the chat, and so the attribute, changes.
                 <div class="editor-box">
                     <div class="editor-placeholder" hidden=move || !draft.with(String::is_empty)>{placeholder}</div>
-                    <div
-                        class="editor"
-                        node_ref=area
-                        contenteditable="plaintext-only"
-                        role="textbox"
-                        aria-multiline="true"
-                        aria-placeholder=placeholder
-                        on:input=move |_| {
-                            let Some(text) = area.get_untracked().map(|el| crate::editor::tidy(&el, &crate::custom::lookup(c))) else { return };
+                    <crate::compose::FieldArea
+                        field
+                        placeholder=Signal::derive(placeholder)
+                        on_input=move |text: String| {
                             remember(&text);
                             set_draft.set(text);
                             ops::typing(c, c.current.get_untracked());
@@ -525,19 +507,10 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                             suggest_sel.set(0);
                             suggestions.set(found);
                         }
-                        on:beforeinput=move |e: ev::InputEvent| {
-                            if let Some(el) = area.get_untracked() {
-                                crate::editor::before_input(&el, &e, &crate::custom::lookup(c));
-                            }
-                        }
-                        on:keydown=on_key
-                        on:paste=move |e: ev::ClipboardEvent| {
-                            if !crate::compose::attach_pasted(c, &e, parent()) {
-                                field.paste_link(&e);
-                            }
-                        }
-                        on:blur=move |_| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
-                    ></div>
+                        on_key=on_key
+                        on_paste=move |e: ev::ClipboardEvent| crate::compose::attach_pasted(c, &e, parent())
+                        on_blur=move |_: ()| set_timeout(move || { suggestions.try_set(vec![]); }, Duration::from_millis(150))
+                    />
                 </div>
                 <Show when=move || !suggestions.with(Vec::is_empty)>
                     <div class="emoji-suggest">

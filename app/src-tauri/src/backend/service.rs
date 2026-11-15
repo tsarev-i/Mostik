@@ -20,6 +20,7 @@ use mostik_core::custom_emoji::{
     self as ce, EmojiSet, MAX_UPLOAD, SERVICE_CHAT_NAME, SERVICE_DESCRIPTION, SERVICE_MARKER, UPLOAD_SIDE,
 };
 use mostik_core::{Chat, ChatId, NotifyLevel, Snapshot, Timestamp, UserId};
+use mostik_ipc::cmd::{self, Args, DeleteEmojiArgs, Out};
 use mostik_yandex::clock;
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::id_pattern;
@@ -33,7 +34,7 @@ use tokio::sync::Mutex;
 use super::chats::{chat_info_raw, put_notify_level};
 use super::files::pick;
 use super::messages::history_page;
-use super::{AppState, Live, PendingFile, Shared, live, push, rpc, rpc_ok, text};
+use super::{AppState, Live, Shared, live, push, rpc, rpc_ok, text};
 
 /// The custom emoji sets changed: the payload is the new list.
 pub const EMOJI_EVENT: &str = "mostik://emoji";
@@ -851,13 +852,13 @@ pub async fn serve(app: &AppHandle, file_id: &str) -> Result<(Vec<u8>, String), 
 
 /// The custom emoji sets, from disk until the connection reads the chats.
 #[tauri::command]
-pub fn custom_emoji(app: AppHandle) -> Vec<EmojiSet> {
+pub fn custom_emoji(app: AppHandle) -> Out<cmd::CustomEmoji> {
     sets(&app)
 }
 
 /// Picks an image for a new emoji.
 #[tauri::command]
-pub async fn pick_emoji_image(app: AppHandle) -> Result<Option<PendingFile>, String> {
+pub async fn pick_emoji_image(app: AppHandle) -> Result<Out<cmd::PickEmojiImage>, String> {
     use tauri_plugin_dialog::DialogExt;
     let dialog = app
         .dialog()
@@ -1037,23 +1038,15 @@ async fn create(app: &AppHandle, live: &Live, org: Option<u64>) -> Result<(Strin
     Ok((id, orgs))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NewEmoji {
-    path: String,
-    name: String,
-    /// The organization the user is in now.
-    org: Option<u64>,
-}
-
 /// Adds a custom emoji: the picked image goes to the organization's service chat with the
 /// caption `:name:`. Returns the new sets.
 #[tauri::command]
 pub async fn add_custom_emoji(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    emoji: NewEmoji,
-) -> Result<Vec<EmojiSet>, String> {
+    args: Args<cmd::AddCustomEmoji>,
+) -> Result<Out<cmd::AddCustomEmoji>, String> {
+    let emoji = args;
     let allowed = state
         .allowed_files
         .lock()
@@ -1119,9 +1112,12 @@ pub async fn add_custom_emoji(
 pub async fn delete_custom_emoji(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Timestamp,
-) -> Result<Vec<EmojiSet>, String> {
+    args: Args<cmd::DeleteCustomEmoji>,
+) -> Result<Out<cmd::DeleteCustomEmoji>, String> {
+    let DeleteEmojiArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+    } = args;
     let live = live(&state).await?;
     let _busy = hold(&state, &live).await.ok_or("signed out")?;
     push(&live, wire::delete(&chat_id, ts)).await?;

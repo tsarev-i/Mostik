@@ -4,18 +4,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mostik_core::{ChatId, Message, Timestamp, User};
+use mostik_core::{ChatId, Message, Timestamp};
+use mostik_ipc::cmd::{
+    self, Args, ChatArgs, EditArgs, ForwardArgs, HistoryArgs, ImportantArgs, MsgArgs, Out, PinArgs, ReactionArgs,
+    SendArgs, UnreadArgs,
+};
+use mostik_ipc::{HistoryPage, Sent};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::wire::{self, HistoryRequest, request_id};
 use mostik_yandex::xiva_client::XivaError;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 
 use super::events::unnamed_mentions;
 use super::files::prefetch_previews;
-use super::{AppState, EVENT, Live, fill_profiles, live, push, target_chat};
+use super::{AppState, EVENT, Live, fill_profiles, live, note_files, push, target_chat};
 
 /// History page sizes. A page of 50 takes the server 0.5–1.5 s in a busy channel and 20 about
 /// 0.1–0.3 s, so a chat opens with a short page; older pages and threads take more at once.
@@ -25,32 +29,19 @@ const THREAD_PAGE: u32 = 50;
 /// Seconds a history page may take: twice that with the repeat, about what one wait used to be.
 const HISTORY_TIMEOUT_S: u64 = 12;
 
-/// A history page and the authors of its messages the app has not seen yet: the chat list at
-/// start-up holds one message per chat, so most authors of an opened chat arrive only here.
-#[derive(Serialize)]
-pub struct HistoryPage {
-    messages: Vec<Message>,
-    users: Vec<User>,
-    /// The server may have older messages. Decided by the raw page: service records such as
-    /// joins are dropped by the parser, so fewer messages than asked does not mean the end.
-    more: bool,
-    /// The time of the oldest record of the page, deleted messages and service records included:
-    /// the next page starts before it, or a run of deleted messages would be asked for again.
-    oldest: Option<Timestamp>,
-    /// How far the others have read the chat (`LastSeenTsMcs`); 0 for a thread.
-    peer_seen: Timestamp,
-}
-
 /// History page: the latest messages before `before` (exclusive). The page comes back at once;
 /// directory profiles of its new authors follow as [`LiveEvent::Users`].
 #[tauri::command]
 pub async fn history(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    before: Option<Timestamp>,
-    thread: Option<Timestamp>,
-) -> Result<HistoryPage, String> {
+    args: Args<cmd::History>,
+) -> Result<Out<cmd::History>, String> {
+    let HistoryArgs {
+        chat_id: ChatId(chat_id),
+        before,
+        thread,
+    } = args;
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
     let limit = match (thread, before) {
@@ -96,6 +87,7 @@ pub async fn history(
         });
     }
     prefetch_previews(live.clone(), &data.messages);
+    note_files(&state, &live.me, &data.messages);
     let peer_seen = match thread {
         None => data.chats.first().map_or(0, |c| c.peer_seen_ts),
         Some(_) => 0,
@@ -154,7 +146,13 @@ pub(super) async fn history_page(
 }
 
 #[tauri::command]
-pub async fn mark_read(state: tauri::State<'_, AppState>, chat_id: String) -> Result<(), String> {
+pub async fn mark_read(
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::MarkRead>,
+) -> Result<Out<cmd::MarkRead>, String> {
+    let ChatArgs {
+        chat_id: ChatId(chat_id),
+    } = args;
     let live = live(&state).await?;
     let Some((ts, seq)) = live.shared.lock().ok().and_then(|mut sh| {
         let last = sh.last.get(&chat_id).copied().filter(|(ts, seq)| *ts > 0 && *seq > 0)?;
@@ -172,29 +170,25 @@ pub async fn mark_read(state: tauri::State<'_, AppState>, chat_id: String) -> Re
     sent
 }
 
-/// What a message replies to: message `ts` of the chat (or thread) it is sent to, with the quoted fragment.
-#[derive(Debug, Deserialize)]
-pub struct ReplyRef {
-    ts: Timestamp,
-    quote: Option<String>,
-}
-
 /// Sends a text message; with `reply`, a reply to a message of the same chat or thread.
 #[tauri::command]
 pub async fn send_message(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    text: String,
-    thread: Option<Timestamp>,
-    reply: Option<ReplyRef>,
-) -> Result<Message, String> {
+    args: Args<cmd::SendMessage>,
+) -> Result<Out<cmd::SendMessage>, String> {
+    let SendArgs {
+        chat_id: ChatId(chat_id),
+        text,
+        thread,
+        reply,
+    } = args;
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
     let msg = match &reply {
         Some(r) => wire::reply(&target, &request_id(), &text, &target, r.ts, r.quote.as_deref()),
         None => wire::plain_text(&target, &request_id(), &text),
     };
-    let sent = Sent::from_reply(&push(&live, msg).await?)?;
+    let sent = sent_from_reply(&push(&live, msg).await?)?;
     Ok(Message {
         chat_id: ChatId(chat_id),
         ts: sent.ts,
@@ -219,15 +213,18 @@ pub async fn send_message(
 #[tauri::command]
 pub async fn edit_message(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Timestamp,
-    text: String,
-    thread: Option<Timestamp>,
-    whole: Option<bool>,
-) -> Result<(), String> {
+    args: Args<cmd::EditMessage>,
+) -> Result<Out<cmd::EditMessage>, String> {
+    let EditArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+        text,
+        thread,
+        whole,
+    } = args;
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    let msg = if whole.unwrap_or(false) {
+    let msg = if whole {
         let original = original_plain(&live, &target, ts).await?;
         wire::edit_whole(&original, &target, ts, &text)
     } else {
@@ -262,10 +259,13 @@ pub(super) async fn original_plain(live: &Live, target: &str, ts: Timestamp) -> 
 #[tauri::command]
 pub async fn delete_message(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Timestamp,
-    thread: Option<Timestamp>,
-) -> Result<(), String> {
+    args: Args<cmd::DeleteMessage>,
+) -> Result<Out<cmd::DeleteMessage>, String> {
+    let MsgArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+        thread,
+    } = args;
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
     push(&live, wire::delete(&target, ts)).await.map(|_| ())
@@ -274,12 +274,15 @@ pub async fn delete_message(
 #[tauri::command]
 pub async fn set_reaction(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Timestamp,
-    kind: u64,
-    add: bool,
-    thread: Option<Timestamp>,
-) -> Result<(), String> {
+    args: Args<cmd::SetReaction>,
+) -> Result<Out<cmd::SetReaction>, String> {
+    let ReactionArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+        kind,
+        add,
+        thread,
+    } = args;
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
     push(&live, wire::reaction(&target, ts, kind, add)).await.map(|_| ())
@@ -288,18 +291,24 @@ pub async fn set_reaction(
 #[tauri::command]
 pub async fn set_important(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Timestamp,
-    important: bool,
-    thread: Option<Timestamp>,
-) -> Result<(), String> {
+    args: Args<cmd::SetImportant>,
+) -> Result<Out<cmd::SetImportant>, String> {
+    let ImportantArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+        important,
+        thread,
+    } = args;
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
     push(&live, wire::importance(&target, ts, important)).await.map(|_| ())
 }
 
 #[tauri::command]
-pub async fn typing(state: tauri::State<'_, AppState>, chat_id: String) -> Result<(), String> {
+pub async fn typing(state: tauri::State<'_, AppState>, args: Args<cmd::Typing>) -> Result<Out<cmd::Typing>, String> {
+    let ChatArgs {
+        chat_id: ChatId(chat_id),
+    } = args;
     let live = live(&state).await?;
     push(&live, wire::typing(&chat_id)).await.map(|_| ())
 }
@@ -308,10 +317,13 @@ pub async fn typing(state: tauri::State<'_, AppState>, chat_id: String) -> Resul
 #[tauri::command]
 pub async fn mark_unread(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Timestamp,
-    seq_no: u64,
-) -> Result<(), String> {
+    args: Args<cmd::MarkUnread>,
+) -> Result<Out<cmd::MarkUnread>, String> {
+    let UnreadArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+        seq_no,
+    } = args;
     let live = live(&state).await?;
     // Reading the chat again must send the marker again.
     if let Ok(mut sh) = live.shared.lock() {
@@ -329,9 +341,12 @@ pub async fn mark_unread(
 #[tauri::command]
 pub async fn pin_message(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    ts: Option<Timestamp>,
-) -> Result<(), String> {
+    args: Args<cmd::PinMessage>,
+) -> Result<Out<cmd::PinMessage>, String> {
+    let PinArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+    } = args;
     let live = live(&state).await?;
     let mut pin = json!({ "ChatId": chat_id });
     if let Some(ts) = ts {
@@ -340,36 +355,30 @@ pub async fn pin_message(
     push(&live, json!({ "Pin": pin })).await.map(|_| ())
 }
 
-/// A sent message: time and number.
-#[derive(Serialize)]
-pub struct Sent {
-    pub(super) ts: Timestamp,
-    pub(super) seq_no: u64,
-}
-
-impl Sent {
-    /// From Telemost's answer to the push of a new message.
-    pub(super) fn from_reply(resp: &Value) -> Result<Self, String> {
-        Ok(Self {
-            ts: resp
-                .pointer("/MessageInfo/TimestampMcs")
-                .and_then(convert::uint)
-                .ok_or("Telemost did not return the message time")?,
-            seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
-        })
-    }
+/// [`Sent`] from Telemost's answer to the push of a new message.
+pub(super) fn sent_from_reply(resp: &Value) -> Result<Sent, String> {
+    Ok(Sent {
+        ts: resp
+            .pointer("/MessageInfo/TimestampMcs")
+            .and_then(convert::uint)
+            .ok_or("Telemost did not return the message time")?,
+        seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
+    })
 }
 
 /// Forwards message `ts` from `from_chat` (a thread reply from the thread chat) to `to_chat` with a comment.
 #[tauri::command]
 pub async fn forward_message(
     state: tauri::State<'_, AppState>,
-    from_chat: String,
-    ts: Timestamp,
-    thread: Option<Timestamp>,
-    to_chat: String,
-    text: String,
-) -> Result<Sent, String> {
+    args: Args<cmd::ForwardMessage>,
+) -> Result<Out<cmd::ForwardMessage>, String> {
+    let ForwardArgs {
+        from_chat: ChatId(from_chat),
+        ts,
+        thread,
+        to_chat: ChatId(to_chat),
+        text,
+    } = args;
     let live = live(&state).await?;
     let source = target_chat(&from_chat, thread)?;
     let mut plain = json!({
@@ -380,5 +389,5 @@ pub async fn forward_message(
     if !text.trim().is_empty() {
         plain["Text"] = json!({ "MessageText": text.trim() });
     }
-    Sent::from_reply(&push(&live, json!({ "Plain": plain })).await?)
+    sent_from_reply(&push(&live, json!({ "Plain": plain })).await?)
 }

@@ -43,3 +43,6 @@
 .theme-group { margin-top: 16px; font-size: 13px; font-weight: 700; color: var(--text-muted); }
 .image-link { display: block; margin-top: 4px; color: var(--link); }
 .image-link:hover { text-decoration: underline; }
+/* "Tray icon": the white one on a dark chip, the way a panel shows it. */
+.tray-preview { width: 28px; height: 28px; flex: none; border-radius: 6px; }
+.tray-preview.white { padding: 4px; box-sizing: border-box; background: #24262c; }
