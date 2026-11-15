@@ -131,9 +131,18 @@ pub fn subscribe(c: Ctx) {
         if let Ok(call) = bridge::current_call().await {
             c.call.set(call);
         }
-        bridge::listen(bridge::RING_EVENT, move |ring: Option<bridge::Ring>| c.ring.set(ring)).await;
-        // A call may have started ringing before the subscription.
-        if let Ok(ring) = bridge::ring_info().await {
+        let rang = std::rc::Rc::new(std::cell::Cell::new(false));
+        let heard = rang.clone();
+        bridge::listen(bridge::RING_EVENT, move |ring: Option<bridge::Ring>| {
+            heard.set(true);
+            c.ring.set(ring)
+        })
+        .await;
+        // A call may have started ringing before the subscription. An event that came meanwhile
+        // is newer than the answer: the dialog it opened or closed stays so.
+        if let Ok(ring) = bridge::ring_info().await
+            && !rang.get()
+        {
             c.ring.set(ring);
         }
         bridge::listen(bridge::SIGNED_OUT_EVENT, move |reason: String| {

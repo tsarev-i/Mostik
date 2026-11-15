@@ -19,11 +19,25 @@ const FILES: &[(&str, &[u8])] = &[
 /// The ring of an incoming call: one pass of a loop, rendered to join seamlessly end to start.
 const RINGTONE: &[u8] = include_bytes!("../sounds/ringtone.wav");
 
+/// How long the ringtone waits before it tries again an output it could not open.
+const RING_RETRY: Duration = Duration::from_secs(2);
+
 /// Rings the ringtone round and round for as long as `keep` says so (asked every 50 ms, so the
-/// ringing stops at once). Blocks: run it on a thread of its own.
+/// ringing stops at once). Blocks until then even without a sound: an output that cannot be
+/// opened (none, or one taken by another program) is tried again every few seconds, and the
+/// call rings on meanwhile. Run it on a thread of its own.
 pub fn ring_while(keep: impl Fn() -> bool) {
-    if let Err(e) = ring_loop(&keep) {
-        eprintln!("ringtone: {e}");
+    let mut failed = false;
+    while keep() {
+        let Err(e) = ring_loop(&keep) else { return };
+        if !failed {
+            eprintln!("ringtone: {e}");
+            failed = true;
+        }
+        let retry = std::time::Instant::now() + RING_RETRY;
+        while keep() && std::time::Instant::now() < retry {
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
