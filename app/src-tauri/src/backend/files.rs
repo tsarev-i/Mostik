@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mostik_core::{ChatId, Message, Timestamp};
+use mostik_ipc::cmd::{self, Args, FileArgs, Out, PathArgs, SendFilesArgs, UrlArgs};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::id_pattern;
 use mostik_yandex::web::{WebClient, percent_decode};
@@ -12,7 +13,7 @@ use mostik_yandex::wire::{self, request_id};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 
-use super::messages::Sent;
+use super::messages::sent_from_reply;
 use super::{AppState, Live, PendingFile, allow_files, live, push, service, target_chat, text};
 use crate::call;
 
@@ -160,9 +161,9 @@ pub(super) fn prefetch_previews(live: Arc<Live>, messages: &[Message]) {
 pub async fn save_file(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    file_id: String,
-    name: String,
-) -> Result<String, String> {
+    args: Args<cmd::SaveFile>,
+) -> Result<Out<cmd::SaveFile>, String> {
+    let FileArgs { file_id, name } = args;
     let live = live(&state).await?;
     let dir = app.path().download_dir().map_err(|e| e.to_string())?;
     let (path, file) = crate::downloads::create_new(&dir, &crate::downloads::safe_name(&name))
@@ -197,7 +198,7 @@ async fn download_to(
 
 /// "Edit" in your own profile: the name and photo are edited in Yandex ID.
 #[tauri::command]
-pub fn open_yandex_id() -> Result<(), String> {
+pub fn open_yandex_id() -> Result<Out<cmd::OpenYandexId>, String> {
     open_external("https://id.yandex.ru/personal")
 }
 
@@ -205,7 +206,12 @@ pub fn open_yandex_id() -> Result<(), String> {
 /// [`mostik_core::markup::safe_url`]): the address comes from someone else's text.
 /// A Telemost meeting link opens in the call window, like a huddle link in Slack.
 #[tauri::command]
-pub async fn open_url(app: AppHandle, state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
+pub async fn open_url(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::OpenUrl>,
+) -> Result<Out<cmd::OpenUrl>, String> {
+    let UrlArgs { url } = args;
     if !mostik_core::markup::safe_url(&url) {
         return Err("this link cannot be opened".into());
     }
@@ -260,7 +266,7 @@ pub(crate) fn open_external(url: &str) -> Result<(), String> {
 
 /// "+" in the composer: the system file picker.
 #[tauri::command]
-pub async fn pick_files(app: AppHandle) -> Result<Vec<PendingFile>, String> {
+pub async fn pick_files(app: AppHandle) -> Result<Out<cmd::PickFiles>, String> {
     use tauri_plugin_dialog::DialogExt;
     pick(&app, app.dialog().file(), true).await
 }
@@ -310,7 +316,7 @@ pub async fn keep_file(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     request: tauri::ipc::Request<'_>,
-) -> Result<PendingFile, String> {
+) -> Result<Out<cmd::KeepFile>, String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("no file contents".into());
     };
@@ -355,7 +361,8 @@ pub async fn keep_file(
 
 /// A file taken off the message (× on its card): a pasted one is no longer kept.
 #[tauri::command]
-pub fn forget_file(state: tauri::State<'_, AppState>, path: String) {
+pub fn forget_file(state: tauri::State<'_, AppState>, args: Args<cmd::ForgetFile>) -> Out<cmd::ForgetFile> {
+    let PathArgs { path } = args;
     if !path.starts_with(KEPT) {
         return;
     }
@@ -372,11 +379,14 @@ pub fn forget_file(state: tauri::State<'_, AppState>, path: String) {
 #[tauri::command]
 pub async fn send_files(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    thread: Option<Timestamp>,
-    paths: Vec<String>,
-    text: String,
-) -> Result<Vec<Message>, String> {
+    args: Args<cmd::SendFiles>,
+) -> Result<Out<cmd::SendFiles>, String> {
+    let SendFilesArgs {
+        chat_id: ChatId(chat_id),
+        thread,
+        paths,
+        text,
+    } = args;
     let live = live(&state).await?;
     let allowed = state.allowed_files.lock().map(|a| a.clone()).unwrap_or_default();
     if let Some(bad) = paths.iter().find(|p| !allowed.contains(*p)) {
@@ -490,7 +500,7 @@ async fn send_plain(
     msg: Value,
     text: &str,
 ) -> Result<Message, String> {
-    let sent = Sent::from_reply(&push(live, msg.clone()).await?)?;
+    let sent = sent_from_reply(&push(live, msg.clone()).await?)?;
     let fake = json!({ "ClientMessage": msg, "ServerMessageInfo": {
         "Timestamp": sent.ts, "SeqNo": sent.seq_no, "From": { "Guid": live.me.0 } } });
     let mut m = match convert::from_push(&fake, Some(&live.me)) {

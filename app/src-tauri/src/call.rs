@@ -23,7 +23,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mostik_yandex::session::CookieJar;
-use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Url};
 use tokio::sync::Mutex;
 
@@ -43,14 +42,7 @@ const WIDTH: f64 = 960.0;
 const HEIGHT: f64 = 680.0;
 
 /// What the UI shows about the current call.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallInfo {
-    /// The chat whose meeting it is; `None` for a meeting link from a message.
-    pub chat_id: Option<String>,
-    /// `#dev`, a person's name or "Telemost meeting".
-    pub label: String,
-}
+pub use mostik_ipc::CallInfo;
 
 struct Active {
     info: CallInfo,

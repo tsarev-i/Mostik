@@ -3,11 +3,12 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use mostik_core::{Message, Timestamp, User};
+use mostik_core::{ChatId, Message, Timestamp, User};
+use mostik_ipc::Threads;
+use mostik_ipc::cmd::{self, Args, Out, ThreadReadArgs};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::shape;
 use mostik_yandex::wire;
-use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -15,17 +16,14 @@ use super::connection::{id_patterns, probing, write_probe};
 use super::notify::{mentions_me, notify};
 use super::{AppState, EVENT, Live, Shared, live, push, target_chat};
 
-#[derive(Serialize)]
-pub struct Threads {
-    threads: Vec<mostik_core::FollowedThread>,
-    users: Vec<User>,
-}
-
 /// Threads the user follows, with unread counts, like Slack's "Threads". The UI asks once per
 /// connection and then keeps the list current from the pushes. The thread ID format goes to
 /// the diagnostics.
 #[tauri::command]
-pub async fn followed_threads(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Threads, String> {
+pub async fn followed_threads(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Out<cmd::FollowedThreads>, String> {
     let live = live(&state).await?;
     let v = live.xiva.call("history", &wire::thread_list(0), 30).await;
     if probing()
@@ -142,11 +140,14 @@ pub(super) fn reply_notifies_now(
 #[tauri::command]
 pub async fn mark_thread_read(
     state: tauri::State<'_, AppState>,
-    chat_id: String,
-    parent: Timestamp,
-    ts: Timestamp,
-    seq_no: u64,
-) -> Result<(), String> {
+    args: Args<cmd::MarkThreadRead>,
+) -> Result<Out<cmd::MarkThreadRead>, String> {
+    let ThreadReadArgs {
+        chat_id: ChatId(chat_id),
+        parent,
+        ts,
+        seq_no,
+    } = args;
     let live = live(&state).await?;
     let thread = target_chat(&chat_id, Some(parent))?;
     push(&live, wire::seen_marker(&thread, ts, seq_no)).await.map(|_| ())

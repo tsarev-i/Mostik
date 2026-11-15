@@ -3047,6 +3047,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "mostik-core",
+ "mostik-ipc",
  "mostik-yandex",
  "rodio",
  "serde",
@@ -3069,6 +3070,16 @@ version = "0.4.0"
 dependencies = [
  "emojis",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mostik-ipc"
+version = "0.4.0"
+dependencies = [
+ "mostik-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3080,6 +3091,7 @@ dependencies = [
  "js-sys",
  "leptos",
  "mostik-core",
+ "mostik-ipc",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

@@ -14,3 +14,7 @@ mock = []
 [dependencies]
 serde.workspace = true
 emojis.workspace = true
+
+[dev-dependencies]
+# Pins the wire format of the live events in the tests of `event`.
+serde_json.workspace = true

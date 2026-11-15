@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use mostik_core::{Chat, ChatKind, Message, NotifyLevel, Snapshot, Timestamp, User, UserId};
+use mostik_core::{Chat, ChatId, ChatKind, Message, NotifyLevel, Timestamp, User, UserId};
+pub use mostik_ipc::{Boot, Dropped, OpenTarget, PendingFile};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::shape;
 use mostik_yandex::web::{WebClient, WebError};
 use mostik_yandex::wire::PushRequest;
 use mostik_yandex::xiva_client::XivaClient;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
@@ -46,36 +46,19 @@ pub const EVENT: &str = "mostik://event";
 /// Open a message: the user clicked its notification.
 pub const OPEN_EVENT: &str = "mostik://open";
 
-/// The message a clicked notification was about.
-#[derive(Clone, Serialize)]
-pub struct OpenTarget {
-    pub chat_id: String,
-    pub ts: Timestamp,
-    pub thread_parent: Option<Timestamp>,
-}
-
-impl OpenTarget {
-    /// From the `extra` data [`notify`] gives a notification.
-    pub fn from_extra(extra: &std::collections::HashMap<String, Value>) -> Option<Self> {
-        Some(OpenTarget {
-            chat_id: extra.get("chat")?.as_str()?.to_owned(),
-            ts: extra.get("ts")?.as_u64()?,
-            thread_parent: extra.get("thread").and_then(Value::as_u64),
-        })
-    }
+/// The message a clicked notification was about, from the `extra` data [`notify`] gives the
+/// notification.
+pub fn open_target(extra: &std::collections::HashMap<String, Value>) -> Option<OpenTarget> {
+    Some(OpenTarget {
+        chat_id: ChatId(extra.get("chat")?.as_str()?.to_owned()),
+        ts: extra.get("ts")?.as_u64()?,
+        thread_parent: extra.get("thread").and_then(Value::as_u64),
+    })
 }
 /// Fresh snapshot after a reconnect.
 pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 /// The session is no longer valid: the UI shows the login screen with this reason.
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
-
-/// Result of `bootstrap` and `login`: either the login screen or a ready snapshot.
-#[derive(Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Boot {
-    NeedLogin { reason: Option<String> },
-    Ready { snapshot: Box<Snapshot> },
-}
 
 /// State updated from live events.
 #[derive(Default)]
@@ -156,16 +139,7 @@ pub struct Live {
     shared: Arc<StdMutex<Shared>>,
 }
 
-/// What notifies, from "Preferences": the UI sends `all`, `direct` or `nothing`.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NotifyMode {
-    #[default]
-    All,
-    /// Direct chats and mentions.
-    Direct,
-    Nothing,
-}
+pub use mostik_ipc::cmd::NotifyMode;
 
 /// UI settings the backend needs (from "Preferences" in the UI).
 #[derive(Clone)]
@@ -206,15 +180,6 @@ pub struct TrayItems {
     pub quit: tauri::menu::MenuItem<tauri::Wry>,
 }
 
-/// A file the user picked in the dialog or dropped onto the window: only such files may be sent.
-#[derive(Clone, Serialize)]
-pub struct PendingFile {
-    pub path: String,
-    pub name: String,
-    pub size: u64,
-    pub image: bool,
-}
-
 fn pending_file(path: &std::path::Path) -> Option<PendingFile> {
     let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
     let name = path.file_name()?.to_string_lossy().into_owned();
@@ -234,14 +199,6 @@ pub const FILES_EVENT: &str = "mostik://files";
 /// Files are dragged over the chat window: where, in logical pixels of the window; `None` when
 /// the drag leaves or ends.
 pub const DRAG_EVENT: &str = "mostik://drag";
-
-/// Files dropped onto the chat window and where, in logical pixels of the window.
-#[derive(Serialize)]
-pub struct Dropped {
-    pub files: Vec<PendingFile>,
-    pub x: f64,
-    pub y: f64,
-}
 
 /// Allows sending the files (dialog, drag and drop) and returns their description for the UI.
 pub fn allow_files(app: &AppHandle, paths: &[std::path::PathBuf]) -> Vec<PendingFile> {

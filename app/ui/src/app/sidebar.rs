@@ -219,7 +219,7 @@ fn CallBar() -> impl IntoView {
     let c = ctx();
     move || {
         c.call.get().map(|call| {
-            let chat = call.chat_id.clone().map(ChatId);
+            let chat = call.chat_id.clone();
             let open_chat = move |_| {
                 if let Some(id) = chat.clone() {
                     ops::open_chat(c, id);

@@ -74,7 +74,7 @@ pub(super) fn ChannelHeader() -> impl IntoView {
                         // A call going on in the chat turns the button into "Join", as in Slack,
                         // unless the user is already in it.
                         let current = c.current.get();
-                        let joined = c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_deref() == Some(current.0.as_str())));
+                        let joined = c.call.with(|k| k.as_ref().is_some_and(|k| k.chat_id.as_ref() == Some(&current)));
                         let live = !joined && c.active_calls.with(|a| a.contains_key(&current));
                         let title = match (live, in_call(c, &current)) {
                             (true, Some(n)) => format!("{} · {}", tr().call_live_hint, tr().in_call(n)),

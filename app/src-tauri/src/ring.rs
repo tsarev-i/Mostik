@@ -13,8 +13,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use mostik_core::User;
+use mostik_ipc as ipc;
+use mostik_ipc::cmd::{self, AnswerArgs, Args, Out};
 use mostik_yandex::wire::{self, EndRinging};
-use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, UserAttentionType};
 
 /// The ringing call changed: [`Ring`] or `null`.
@@ -23,18 +24,24 @@ pub const RING_EVENT: &str = "mostik://ring";
 /// Telemost repeats the ringing every 5 s: with no repeat for this long it has stopped ringing.
 const STALE: Duration = Duration::from_secs(12);
 
-/// A call ringing for the user. The dialog shows only the caller.
-#[derive(Clone, Serialize)]
+/// A call ringing for the user. The dialog shows only the caller: the UI gets [`ipc::Ring`].
+#[derive(Clone)]
 pub struct Ring {
     /// `RingingId`.
-    #[serde(skip)]
     pub id: String,
-    #[serde(skip)]
     pub chat_id: String,
     /// The meeting link.
-    #[serde(skip)]
     pub url: String,
     pub caller: User,
+}
+
+impl Ring {
+    /// What the incoming call dialog shows.
+    fn shown(&self) -> ipc::Ring {
+        ipc::Ring {
+            caller: self.caller.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -154,7 +161,7 @@ fn send_end(app: &AppHandle, id: String, reason: EndRinging) {
 /// Shows the dialog of `ring` in the main window, or hides it. The window is not raised over other
 /// programs: out of focus, it asks for attention while the call rings.
 fn show(app: &AppHandle, ring: Option<&Ring>) {
-    let _ = app.emit(RING_EVENT, ring);
+    let _ = app.emit(RING_EVENT, ring.map(Ring::shown));
     if let Some(w) = app.get_webview_window("main") {
         let attention = ring.is_some() && !w.is_focused().unwrap_or(false);
         let _ = w.request_user_attention(attention.then_some(UserAttentionType::Critical));
@@ -175,19 +182,26 @@ fn complete_caller(app: &AppHandle, ring: Ring) {
             cur.caller = caller;
             cur.clone()
         };
-        let _ = app.emit(RING_EVENT, Some(&updated));
+        let _ = app.emit(RING_EVENT, Some(updated.shown()));
     });
 }
 
 /// The ringing call, for a main window that has just loaded.
 #[tauri::command]
-pub fn ring_info(app: AppHandle) -> Option<Ring> {
-    app.state::<RingState>().0.lock().ok()?.current.clone()
+pub fn ring_info(app: AppHandle) -> Out<cmd::RingInfo> {
+    app.state::<RingState>()
+        .0
+        .lock()
+        .ok()?
+        .current
+        .as_ref()
+        .map(Ring::shown)
 }
 
 /// "Accept" or "Decline" in the dialog. Accepting opens the call like "Join" in the chat.
 #[tauri::command]
-pub async fn answer_ring(app: AppHandle, accept: bool) -> Result<(), String> {
+pub async fn answer_ring(app: AppHandle, args: Args<cmd::AnswerRing>) -> Result<Out<cmd::AnswerRing>, String> {
+    let AnswerArgs { accept } = args;
     let ring = {
         let state = app.state::<RingState>();
         let inner = state.0.lock().map_err(|e| e.to_string())?;

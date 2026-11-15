@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use mostik_core::UserId;
+use mostik_ipc::cmd::{self, Args, GuidsArgs, Out, StatusArgs};
 use mostik_yandex::convert;
 use mostik_yandex::wire::request_id;
 use serde_json::{Value, json};
@@ -36,10 +37,11 @@ async fn subscribe_body(live: &Live, extra: Value) -> Result<Value, String> {
 #[tauri::command]
 pub async fn presence(
     state: tauri::State<'_, AppState>,
-    guids: Vec<String>,
-) -> Result<Vec<mostik_core::PresenceInfo>, String> {
+    args: Args<cmd::Presence>,
+) -> Result<Out<cmd::Presence>, String> {
+    let GuidsArgs { guids } = args;
     let live = live(&state).await?;
-    let guids: Vec<String> = guids.into_iter().take(150).collect();
+    let guids: Vec<String> = guids.into_iter().take(150).map(|g| g.0).collect();
     let mut out: BTreeMap<String, mostik_core::PresenceInfo> = BTreeMap::new();
     for chunk in guids.chunks(50) {
         let body = subscribe_body(&live, json!({ "ToGuids": chunk, "MessageBodyTypes": [26] })).await?;
@@ -80,11 +82,14 @@ pub async fn presence(
 #[tauri::command]
 pub async fn set_status(
     state: tauri::State<'_, AppState>,
-    availability: u64,
-    emoji: String,
-    text: String,
-    duration: Option<u64>,
-) -> Result<(), String> {
+    args: Args<cmd::SetStatus>,
+) -> Result<Out<cmd::SetStatus>, String> {
+    let StatusArgs {
+        availability,
+        emoji,
+        text,
+        duration,
+    } = args;
     let live = live(&state).await?;
     // As the official web client does: "Do not disturb" also turns notifications off
     // (`NotificationMode` 1), on every device of the user.

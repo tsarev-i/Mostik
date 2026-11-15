@@ -20,7 +20,8 @@ Mostik talks to the undocumented protocol of the Telemost web client (HTTP RPC p
 
 ## Source
 
-- [crates/mostik-core](https://github.com/tsarev-i/Mostik/tree/HEAD/crates/mostik-core): domain model, markup parser, demo data
+- [crates/mostik-core](https://github.com/tsarev-i/Mostik/tree/HEAD/crates/mostik-core): domain model, live events, markup parser, demo data
+- [crates/mostik-ipc](https://github.com/tsarev-i/Mostik/tree/HEAD/crates/mostik-ipc): contract between the backend and the UI: Tauri commands, their arguments and results
 - [crates/mostik-yandex](https://github.com/tsarev-i/Mostik/tree/HEAD/crates/mostik-yandex): Telemost web client protocol
 - [app/ui](https://github.com/tsarev-i/Mostik/tree/HEAD/app/ui): Leptos UI compiled to wasm; runs on demo data in a plain browser
 - [app/src-tauri](https://github.com/tsarev-i/Mostik/tree/HEAD/app/src-tauri): Tauri 2 desktop shell

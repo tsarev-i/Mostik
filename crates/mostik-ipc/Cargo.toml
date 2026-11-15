@@ -1,0 +1,18 @@
+[package]
+name = "mostik-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Mostik process contract: the Tauri commands and the types the backend and the UI exchange"
+
+[dependencies]
+mostik-core.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+# Demo data for the round trip of a whole snapshot.
+mostik-core = { workspace = true, features = ["mock"] }
+# Pins the wire format in the tests.
+serde_json.workspace = true

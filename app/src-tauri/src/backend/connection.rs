@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use mostik_core::{ChatKind, Presence, Snapshot, User, UserId};
+use mostik_ipc::cmd::{self, Out};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::identity;
@@ -107,7 +108,7 @@ fn session_expired(app: &AppHandle) -> &'static str {
 }
 
 #[tauri::command]
-pub async fn bootstrap(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Boot, String> {
+pub async fn bootstrap(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Out<cmd::Bootstrap>, String> {
     let generation = state.session.current();
     match store::load() {
         None => Ok(Boot::NeedLogin { reason: None }),
@@ -116,7 +117,7 @@ pub async fn bootstrap(app: AppHandle, state: tauri::State<'_, AppState>) -> Res
 }
 
 #[tauri::command]
-pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Boot, String> {
+pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Out<cmd::Login>, String> {
     let rx = login::open(&app)?;
     let jar = rx.await.map_err(|_| {
         text(
@@ -136,7 +137,7 @@ pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<
 /// left on disk. The app is signed out in any case; an error says what did not work out, and
 /// the UI shows it on the login screen.
 #[tauri::command]
-pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Out<cmd::Logout>, String> {
     // From here on nothing of the old session is saved again or reconnected.
     let generation = state.session.renew();
     let live = state.live.lock().await.take();
