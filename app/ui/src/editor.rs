@@ -136,6 +136,8 @@ fn mark_class(kind: Mark) -> &'static str {
         Mark::Code => "f-code",
         Mark::CodeBlock => "f-code-block",
         Mark::Link => "f-link",
+        // Its address is its text: the tooltip follows the typing (see [`tidy`]).
+        Mark::Url => "f-link f-url",
     }
 }
 
@@ -188,18 +190,26 @@ pub fn render(el: &HtmlElement, text: &str, emoji: &dyn Fn(&str) -> Option<Strin
                 inner,
                 close,
             } => {
-                span_of(MARKER, open);
+                // A bare address has no markers to hide.
+                if !open.is_empty() {
+                    span_of(MARKER, open);
+                }
                 if let Some(shown) = span_of(mark_class(kind), inner) {
-                    if kind == Mark::Link
-                        && let Some(address) = close.strip_prefix("](").and_then(|c| c.strip_suffix(')'))
-                    {
+                    let address = match kind {
+                        Mark::Link => close.strip_prefix("](").and_then(|c| c.strip_suffix(')')),
+                        Mark::Url => Some(inner),
+                        _ => None,
+                    };
+                    if let Some(address) = address {
                         let _ = shown.set_attribute("title", address);
                     }
                     if inner_tail(kind, inner) {
                         append_tail(&doc, &shown);
                     }
                 }
-                span_of(MARKER, close);
+                if !close.is_empty() {
+                    span_of(MARKER, close);
+                }
                 // A code block is a block: the caret has its own lines around it.
                 let plain_next = matches!(spans.get(i + 1), Some(EditSpan::Plain(t)) if !t.starts_with('\n'));
                 if kind != Mark::CodeBlock
@@ -275,9 +285,13 @@ fn shape_of(spans: &[EditSpan]) -> Vec<Piece> {
                 inner,
                 close,
             } => {
-                out.push((MARKER.to_owned(), open.to_owned(), false));
+                if !open.is_empty() {
+                    out.push((MARKER.to_owned(), open.to_owned(), false));
+                }
                 out.push((mark_class(kind).to_owned(), inner.to_owned(), inner_tail(kind, inner)));
-                out.push((MARKER.to_owned(), close.to_owned(), false));
+                if !close.is_empty() {
+                    out.push((MARKER.to_owned(), close.to_owned(), false));
+                }
             }
         }
     }
@@ -421,6 +435,17 @@ pub fn tidy(el: &HtmlElement, emoji: &dyn Fn(&str) -> Option<String>) -> String 
     });
     let spans = edit_spans(&text);
     if !codes && field_tail(&text, &spans) == tail && shape(el).is_some_and(|s| s == shape_of(&spans)) {
+        // Typing in a bare address leaves the field as it was, its tooltip included.
+        if let Ok(urls) = el.query_selector_all(".f-url") {
+            for i in 0..urls.length() {
+                if let Some(url) = urls.item(i).and_then(|n| n.dyn_into::<Element>().ok()) {
+                    let address = url.text_content().unwrap_or_default();
+                    if url.get_attribute("title").as_deref() != Some(address.as_str()) {
+                        let _ = url.set_attribute("title", &address);
+                    }
+                }
+            }
+        }
         return text;
     }
     let caret = selection(el).0;
@@ -432,7 +457,7 @@ pub fn tidy(el: &HtmlElement, emoji: &dyn Fn(&str) -> Option<String>) -> String 
 }
 
 /// The marked spans of the field's text as byte offsets: where each one starts, where its text
-/// starts and ends, and where it ends.
+/// starts and ends, and where it ends. Only spans with markers: a bare address is edited as text.
 fn marked_spans(text: &str) -> Vec<[usize; 4]> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -442,7 +467,9 @@ fn marked_spans(text: &str) -> Vec<[usize; 4]> {
             EditSpan::Marked { open, inner, close, .. } => {
                 let inner_at = at + open.len();
                 let close_at = inner_at + inner.len();
-                out.push([at, inner_at, close_at, close_at + close.len()]);
+                if !(open.is_empty() && close.is_empty()) {
+                    out.push([at, inner_at, close_at, close_at + close.len()]);
+                }
                 at = close_at + close.len();
             }
         }
@@ -699,6 +726,25 @@ mod tests {
         assert_eq!(insert_shown("a [bc](https://x.ru) d", 4, "x"), None);
         assert_eq!(insert_shown("a **b** c", 5, "x"), None);
         assert_eq!(insert_shown("a **b** c", 1, "x"), None);
+    }
+
+    /// A bare address has no markers: next to it the browser types and deletes, the caret
+    /// steps as over text, and the shape of the field has no empty marker spans.
+    #[test]
+    fn a_bare_address_is_edited_as_text() {
+        assert_eq!(delete_shown("a https://x.ru b", 15, 16), None);
+        assert_eq!(delete_shown("a https://x.ru b", 1, 2), None);
+        assert_eq!(insert_shown("a https://x.ru b", 14, "x"), None);
+        assert_eq!(insert_shown("a https://x.ru b", 2, "x"), None);
+        assert_eq!(past_markers("a https://x.ru", 2, false), 2);
+        assert_eq!(past_markers("a https://x.ru", 14, true), 14);
+        assert_eq!(
+            shape_of(&edit_spans("a https://x.ru")),
+            vec![
+                (String::new(), "a ".to_owned(), false),
+                ("f-link f-url".to_owned(), "https://x.ru".to_owned(), false)
+            ]
+        );
     }
 
     #[test]

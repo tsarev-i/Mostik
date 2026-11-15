@@ -507,10 +507,12 @@ pub enum Mark {
     Code,
     CodeBlock,
     Link,
+    /// A bare `http(s)://…` address, which a message shows as a link: it has no markers.
+    Url,
 }
 
 /// Splits the text of the message field into plain text and marked spans, the same markup as
-/// [`parse_blocks`] and [`parse_inline`] read.
+/// [`parse_blocks`] and [`parse_inline`] read, bare web addresses included.
 ///
 /// The markers of a code block take the line breaks a message drops around its code: after the
 /// opening fence, before the closing one and after it, so the block shown in the field neither
@@ -543,7 +545,21 @@ pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
             }
         }
         // Lengths in bytes of the opening marker, the text and the closing marker.
-        let span = found.or_else(|| md_link(rest).map(|(t, _, len)| (Mark::Link, 1, t.len(), len - 1 - t.len())));
+        let span = found
+            .or_else(|| md_link(rest).map(|(t, _, len)| (Mark::Link, 1, t.len(), len - 1 - t.len())))
+            .or_else(|| {
+                // Where [`parse_inline`] makes a bare address a link: at the start of a word, and
+                // only up to a code block, which [`parse_blocks`] takes out first.
+                let word_start = text[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+                let block = rest
+                    .find("```")
+                    .filter(|&f| rest[f + 3..].contains("```"))
+                    .unwrap_or(rest.len());
+                (word_start && rest.starts_with(['h', 'H']))
+                    .then(|| bare_link(&rest[..block]))
+                    .flatten()
+                    .map(|len| (Mark::Url, 0, len, 0))
+            });
         let Some((kind, open, inner, close)) = span else {
             i += rest.chars().next().map_or(1, char::len_utf8);
             continue;
@@ -641,6 +657,7 @@ mod tests {
             "a\n```\nx\n\n```\nb ```\n``` ``````",
             "**** ** unclosed __x",
             "Привет, **мир** 👋",
+            "link https://x.y/a(b) and https://z.ru.",
             "",
         ] {
             let joined: String = edit_spans(text)
@@ -677,6 +694,59 @@ mod tests {
             }
         );
         assert_eq!(edit_spans("****"), vec![EditSpan::Plain("****")]);
+    }
+
+    #[test]
+    fn edit_spans_find_bare_links() {
+        let url = |inner| EditSpan::Marked {
+            kind: Mark::Url,
+            open: "",
+            inner,
+            close: "",
+        };
+        assert_eq!(
+            edit_spans("see https://x.y/a?b=1, ok"),
+            vec![
+                EditSpan::Plain("see "),
+                url("https://x.y/a?b=1"),
+                EditSpan::Plain(", ok")
+            ]
+        );
+        assert_eq!(edit_spans("HTTP://x.y"), vec![url("HTTP://x.y")]);
+        // As in a message: not inside a word, code or a link caption, and not a bare scheme.
+        assert_eq!(edit_spans("ahttps://x.y"), vec![EditSpan::Plain("ahttps://x.y")]);
+        assert_eq!(edit_spans("https://"), vec![EditSpan::Plain("https://")]);
+        // A code block right after it is a block, as in a message; an unclosed fence is text.
+        assert!(matches!(
+            edit_spans("https://x.ru/```a```")[..],
+            [
+                EditSpan::Marked {
+                    kind: Mark::Url,
+                    inner: "https://x.ru/",
+                    ..
+                },
+                EditSpan::Marked {
+                    kind: Mark::CodeBlock,
+                    ..
+                }
+            ]
+        ));
+        assert_eq!(edit_spans("https://x.ru/```a"), vec![url("https://x.ru/```a")]);
+        assert!(matches!(
+            edit_spans("`https://x.y`")[..],
+            [EditSpan::Marked { kind: Mark::Code, .. }]
+        ));
+        assert!(matches!(
+            edit_spans("[https://x.y](https://x.y)")[..],
+            [EditSpan::Marked { kind: Mark::Link, .. }]
+        ));
+        assert!(matches!(
+            edit_spans("**b**https://x.y")[..],
+            [
+                EditSpan::Marked { kind: Mark::Bold, .. },
+                EditSpan::Marked { kind: Mark::Url, .. }
+            ]
+        ));
     }
 
     #[test]
