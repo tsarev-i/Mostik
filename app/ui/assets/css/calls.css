@@ -154,7 +154,7 @@
 .files-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--text); font: inherit; }
 .files-filter { height: 28px; padding: 0 12px; border: 1px solid var(--border); border-radius: 14px; font-size: 13px; color: var(--text); }
 .files-filter:hover { background: var(--bg-block); }
-.files-filter.active { border-color: var(--accent-blue); background: var(--accent-blue); color: #fff; }
+.files-filter.active { border-color: transparent; background: var(--sidebar-selected); color: #fff; }
 .files-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; }
 .files-row:hover { background: var(--bg-block); }
 .files-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; text-align: left; }
