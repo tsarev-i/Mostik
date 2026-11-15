@@ -97,8 +97,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        clear_tray_dirs();
-        tray = tray.temp_dir_path(tray_dir());
+        clear_tray_dirs(app);
+        tray = tray.temp_dir_path(make_tray_dir(app)?);
     }
     tray.build(app)?;
     Ok(())
@@ -107,24 +107,57 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 /// Where the tray icon is painted on Linux: the panel reads it from a file. Each running copy has a
 /// folder of its own: in the shared `$XDG_RUNTIME_DIR/tray-icon` two copies overwrite and delete
 /// each other's `tray-icon-main-N.png`, so the unread mark of one shows on the other or vanishes.
+/// The folder is the user's own: `$XDG_RUNTIME_DIR`, or without it the app cache, never the shared
+/// `/tmp`, where another user of the computer could make the folder first.
 #[cfg(target_os = "linux")]
-fn tray_dir() -> std::path::PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(format!("mostik-tray-{}", std::process::id()))
+fn tray_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let (parent, prefix) = tray_parent(app)?;
+    Some(parent.join(format!("{prefix}{}", std::process::id())))
+}
+
+/// The folder the tray folders of running copies are in and the start of their names.
+#[cfg(target_os = "linux")]
+fn tray_parent(app: &AppHandle) -> Option<(std::path::PathBuf, &'static str)> {
+    match std::env::var_os("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty()) {
+        Some(runtime) => Some((runtime.into(), "mostik-tray-")),
+        None => app.path().app_cache_dir().ok().map(|cache| (cache, "tray-")),
+    }
+}
+
+/// Makes this copy's tray folder, empty and open to the user only. Without a folder of the user's
+/// own the tray is left out: the tray library would fall back to `/tmp`.
+#[cfg(target_os = "linux")]
+fn make_tray_dir(app: &AppHandle) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let not_own = || std::io::Error::other("no folder of the user's own for the tray icon");
+    let dir = tray_dir(app).ok_or_else(not_own)?;
+    let parent = dir.parent().ok_or_else(not_own)?;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
+    // In a folder others can write to, they could swap this copy's folder for a link to elsewhere
+    // between the checks here and the icon written into it.
+    let meta = std::fs::metadata(parent)?;
+    // SAFETY: `geteuid` only reads the process's credentials and cannot fail.
+    if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o002 != 0 {
+        return Err(not_own());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    Ok(dir)
 }
 
 /// Removes the tray folders of copies that are gone: one stopped by a signal leaves its folder.
 #[cfg(target_os = "linux")]
-fn clear_tray_dirs() {
-    let dir = tray_dir();
-    let Some(Ok(entries)) = dir.parent().map(std::fs::read_dir) else {
+fn clear_tray_dirs(app: &AppHandle) {
+    let Some((parent, prefix)) = tray_parent(app) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("mostik-tray-")) else {
+        let Some(pid) = name.to_str().and_then(|n| n.strip_prefix(prefix)) else {
             continue;
         };
         if pid.parse::<u32>().is_ok() && !std::path::Path::new("/proc").join(pid).exists() {
@@ -304,7 +337,9 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 call::shutdown(app);
                 #[cfg(target_os = "linux")]
-                let _ = std::fs::remove_dir_all(tray_dir());
+                if let Some(dir) = tray_dir(app) {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
             }
         });
 }
