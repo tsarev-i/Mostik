@@ -125,6 +125,8 @@ pub struct Ctx {
     pub deleted: RwSignal<VecDeque<(ChatId, Timestamp)>>,
     /// Chats hidden from the sidebar with "×", kept between runs.
     pub hidden: RwSignal<hidden::Hidden>,
+    /// Chats opened from "Find a conversation", shown whatever the sidebar filter, kept between runs.
+    pub kept: RwSignal<hidden::Kept>,
     /// Own sidebar sections: the Telemost chat folders of the current organization.
     pub folders: Memo<folders::Folders>,
     /// The sidebar sections: the Telemost ones with the folders.

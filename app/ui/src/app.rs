@@ -143,6 +143,7 @@ pub fn App() -> impl IntoView {
         picked: RwSignal::new(Default::default()),
         deleted: RwSignal::new(Default::default()),
         hidden: RwSignal::new(hidden::load()),
+        kept: RwSignal::new(hidden::load_kept()),
         folders: folder_list,
         sections: Memo::new(move |_| snap.with(|s| folder_list.with(|f| folders::arrange(&s.sections, f)))),
         org_now: Memo::new(move |_| {
@@ -204,6 +205,7 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| c.drafts.with(drafts::save));
     Effect::new(move |_| c.chat_order.with(order::save));
     Effect::new(move |_| c.hidden.with(hidden::save));
+    Effect::new(move |_| c.kept.with(hidden::save_kept));
     // An edit opened in the thread pane ends when the pane closes or shows another thread: its
     // editor is gone, and an invisible edit would keep Esc from cancelling a reply. Its text stays
     // in the drafts, as when another editor opens.
@@ -266,13 +268,17 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    // Unread count in the window title, as in Slack.
-    Effect::new(move |_| {
+    // Unread count in the window title, as in Slack. Counted in a `Memo`: the title goes to the
+    // backend only when it changes, not on every change of the snapshot.
+    let title = Memo::new(move |_| {
         let unread: u32 = c
             .snap
             .with(|s| s.chats.iter().filter(|ch| !ch.muted).map(|ch| ch.unread.min(1)).sum());
         c.settings.with(|s| s.lang);
-        let title = tr().window_title(unread);
+        tr().window_title(unread)
+    });
+    Effect::new(move |_| {
+        let title = title.get();
         document().set_title(&title);
         if bridge::available() {
             spawn_local(async move {

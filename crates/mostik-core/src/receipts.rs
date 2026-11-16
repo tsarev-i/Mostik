@@ -48,7 +48,7 @@ pub fn read_status(chat: &Chat, me: &UserId, m: &Message) -> Option<ReadStatus> 
         ChatKind::Group { .. } => m.reads.as_ref().map(|r| ReadStatus::Read {
             count: r.count,
             recent: r.recent.clone(),
-            everyone: chat.member_count > 1 && r.count + 1 >= chat.member_count,
+            everyone: chat.member_count > 1 && r.count.saturating_add(1) >= chat.member_count,
         }),
         ChatKind::Notes | ChatKind::Broadcast => None,
     }
@@ -124,7 +124,7 @@ impl Snapshot {
                 .filter(|m| own(m) && m.ts < ts)
                 .max_by_key(|m| m.ts)
                 .is_some_and(|m| match &m.reads {
-                    Some(r) => !r.recent.contains(user) && r.count + 1 < members,
+                    Some(r) => !r.recent.contains(user) && r.count.saturating_add(1) < members,
                     None => true,
                 });
         }

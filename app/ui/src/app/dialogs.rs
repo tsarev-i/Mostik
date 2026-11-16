@@ -428,9 +428,14 @@ pub(super) fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
                     if let Some(folder) = folder {
                         ops::change_folders(c, |f| folders::move_chat(f, &id, Some(&folder), None));
                     }
-                    close();
-                    c.view.set(ViewMode::Home);
-                    ops::open_chat(c, id);
+                    // Only the dialog that asked closes and opens the channel: the user may have
+                    // closed it meanwhile and be filling in another one. Its signals are gone
+                    // with it.
+                    if busy.try_get_untracked().is_some() {
+                        close();
+                        c.view.set(ViewMode::Home);
+                        ops::open_chat(c, id);
+                    }
                 }
                 Err(e) => ops::failed(c, tr().err_create_channel, e),
             }

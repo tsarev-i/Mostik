@@ -104,7 +104,7 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
                 last_reply_ts: m.ts,
                 participants: vec![],
             });
-            t.reply_count += 1;
+            t.reply_count = t.reply_count.saturating_add(1);
             t.last_reply_ts = t.last_reply_ts.max(m.ts);
             if !t.participants.contains(&m.author) {
                 t.participants.push(m.author.clone());
@@ -113,9 +113,9 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
     } else if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == m.chat_id) {
         ch.last_ts = ch.last_ts.max(m.ts);
         if counts {
-            ch.unread += 1;
+            ch.unread = ch.unread.saturating_add(1);
             if mentioned {
-                ch.mentions += 1;
+                ch.mentions = ch.mentions.saturating_add(1);
             }
         }
     }

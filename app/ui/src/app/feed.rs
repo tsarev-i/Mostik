@@ -4,6 +4,7 @@
 use leptos::context::Provider;
 use leptos::html;
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use mostik_core::*;
 
 use crate::i18n::tr;
@@ -253,8 +254,10 @@ pub(super) fn MessageList() -> impl IntoView {
         restoring.set_value(true);
         request_animation_frame(restore);
     });
+    // A message highlighted in this chat holds the list where it is; one in another chat does not.
     Effect::new(move |_| {
-        if c.highlight.with(Option::is_some) {
+        let id = c.current.get();
+        if c.highlight.with(|h| h.as_ref().is_some_and(|(chat, _)| *chat == id)) {
             stick.set(false);
         }
     });
@@ -423,17 +426,63 @@ pub(super) fn PinsView() -> impl IntoView {
             ))
         })
     });
-    // If the message is not loaded yet, load history up to it.
+    // A message not loaded yet is looked for back through the history. One that is not there
+    // (deleted: any member of a group can do that) shows as no pinned message. The tab is not set
+    // again: every `set` notifies, this view would be built anew and look again, for ever.
+    // A page that failed to load leaves the looking to "Retry" or to the connection coming back.
+    let gone = RwSignal::new(None::<(ChatId, Timestamp)>);
+    let failed = RwSignal::new(None::<(ChatId, Timestamp)>);
+    let looking = StoredValue::new(None::<(ChatId, Timestamp)>);
+    let retry = Trigger::new();
     Effect::new(move |_| {
-        if let Some((id, ts, None)) = data.get() {
-            ops::jump_to_message(c, id, ts, None);
-            c.chat_tab.set(ChatTab::Pins);
+        retry.track();
+        let Some((id, ts, None)) = data.get() else { return };
+        if !c.online.get() {
+            return;
         }
+        let key = Some((id.clone(), ts));
+        if looking.get_value() == key {
+            return;
+        }
+        looking.set_value(key.clone());
+        failed.set(None);
+        spawn_local(async move {
+            // Leaving the tab or the chat stops the looking.
+            let go_on = {
+                let (id, key) = (id.clone(), key.clone());
+                move |c: Ctx| looking.try_get_value().flatten() == key && c.current.get_untracked() == id
+            };
+            let still = go_on.clone();
+            let found = ops::load_back_to(c, &id, ts, None, go_on).await;
+            if !still(c) {
+                return;
+            }
+            // Done: a fresh latest page may take the message away again, and then it is looked for anew.
+            looking.try_set_value(None);
+            match found {
+                Some(true) => {}
+                Some(false) => {
+                    gone.try_set(Some((id, ts)));
+                }
+                None => {
+                    failed.try_set(Some((id, ts)));
+                }
+            }
+        });
     });
     view! {
         <div class="messages pins-list">
             {move || match data.get() {
                 None => view! { <div class="empty-state"><h3>{tr().no_pins}</h3></div> }.into_any(),
+                Some((id, ts, None)) if gone.with(|g| g.as_ref().is_some_and(|g| *g == (id.clone(), ts))) => {
+                    view! { <div class="empty-state"><h3>{tr().no_pins}</h3></div> }.into_any()
+                }
+                Some((id, ts, None)) if failed.with(|f| f.as_ref().is_some_and(|f| *f == (id.clone(), ts))) => view! {
+                    <div class="empty-state">
+                        <h3>{tr().err_older}</h3>
+                        <button class="btn small" on:click=move |_| retry.notify()>{tr().retry}</button>
+                    </div>
+                }.into_any(),
                 Some((id, ts, Some(m))) => view! {
                     <div class="pin-card">
                         <MessageRow msg=m grouped=false/>

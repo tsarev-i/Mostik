@@ -254,23 +254,23 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
 /// Whether a link from someone else's text may open: only `http`, `https` and `mailto`, so files
 /// and other schemes do not, and nothing that hides whitespace or control characters.
 pub fn safe_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    (lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:"))
-        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+    safe_scheme(url) && !url.chars().any(hides)
 }
 
-/// `[text](url)` at the start of the string: `(text, url, length in bytes)`.
-fn md_link(s: &str) -> Option<(String, String, usize)> {
-    let inner = s.strip_prefix('[')?;
-    let close = inner.find("](")?;
-    let text = &inner[..close];
-    if text.is_empty() || text.contains('\n') || text.contains('[') {
-        return None;
-    }
-    let tail = &inner[close + 2..];
-    let end = tail.find(')')?;
-    let url = &tail[..end];
-    safe_url(url).then(|| (text.to_owned(), url.to_owned(), 1 + close + 2 + end + 1))
+/// Whether `url` starts with `http://`, `https://` or `mailto:`, in any case.
+fn safe_scheme(url: &str) -> bool {
+    ["http://", "https://", "mailto:"].iter().any(|p| starts_ci(url, p))
+}
+
+/// Whether `s` starts with the ASCII `prefix`, in any case.
+fn starts_ci(s: &str, prefix: &str) -> bool {
+    s.get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+}
+
+/// What a safe address must not have.
+fn hides(c: char) -> bool {
+    c.is_whitespace() || c.is_control()
 }
 
 /// A `[caption](address)` link in the text of the message field, in bytes of that text.
@@ -395,37 +395,17 @@ pub fn pasted_link(text: &str) -> Option<String> {
 /// link caption (empty, several lines, a `[`).
 pub fn link_markup(caption: &str, address: &str) -> Option<String> {
     let markup = format!("[{caption}]({address})");
-    md_link(&markup)
-        .is_some_and(|(_, _, len)| len == markup.len())
+    Scan::new(&markup, false)
+        .link_at(0)
+        .is_some_and(|found| found.len() == markup.len())
         .then_some(markup)
-}
-
-/// Bare `http(s)://…` link up to whitespace; trailing punctuation is not part of the link.
-fn bare_link(s: &str) -> Option<usize> {
-    let lower: String = s.chars().take(8).collect::<String>().to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
-        return None;
-    }
-    let mut end = s
-        .find(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '"')
-        .unwrap_or(s.len());
-    while end > 0 {
-        let last = s[..end].chars().next_back()?;
-        let unbalanced = last == ')' && s[..end].matches('(').count() < s[..end].matches(')').count();
-        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '»') || unbalanced {
-            end -= last.len_utf8();
-        } else {
-            break;
-        }
-    }
-    (end > "https://".len()).then_some(end)
 }
 
 type MakeInline = fn(String) -> Inline;
 
 /// Markers that enclose inline markup, the same in a message and in its field: what each one is
 /// in the field and the span it makes in a message.
-const PAIRS: &[(&str, Mark, MakeInline)] = &[
+const PAIRS: [(&str, Mark, MakeInline); 5] = [
     ("`", Mark::Code, Inline::Code),
     ("**", Mark::Bold, Inline::Bold),
     ("__", Mark::Italic, Inline::Italic),
@@ -433,37 +413,246 @@ const PAIRS: &[(&str, Mark, MakeInline)] = &[
     ("++", Mark::Underline, Inline::Underline),
 ];
 
-/// Splits a text block into inline spans; `who` is what can be mentioned.
-pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
-    let mut out = Vec::new();
-    let mut plain = String::new();
-    let mut rest = text;
-    'outer: while !rest.is_empty() {
-        for (marker, _, make) in PAIRS {
-            if let Some(after) = rest.strip_prefix(marker)
-                && let Some(end) = after.find(marker)
-                && end > 0
+/// Markup found at a place of the text: its kind and the lengths in bytes of the opening marker,
+/// the text and the closing marker.
+#[derive(Debug, Clone, Copy)]
+struct Found {
+    kind: Mark,
+    open: usize,
+    inner: usize,
+    close: usize,
+}
+
+impl Found {
+    fn len(&self) -> usize {
+        self.open + self.inner + self.close
+    }
+}
+
+/// What [`Next`] looks for.
+#[derive(Clone, Copy)]
+enum Pattern {
+    Str(&'static str),
+    Char(fn(char) -> bool),
+}
+
+/// Where a pattern comes next in the text from some place on, remembered: asked again from a later
+/// place that is not past it, the text is not searched again. Asked from places that only go
+/// forward, as a scan does, it reads the text about once, where a `find` at every place read the
+/// whole rest of it each time: seconds on a long run of unclosed markers.
+struct Next {
+    pattern: Pattern,
+    /// Searched from the first place on, the pattern first comes at the second.
+    memo: Option<(usize, Option<usize>)>,
+}
+
+impl Next {
+    const fn new(pattern: Pattern) -> Self {
+        Self { pattern, memo: None }
+    }
+
+    /// The first place of the pattern in `text` at byte `start` or after it.
+    fn at(&mut self, text: &str, start: usize) -> Option<usize> {
+        if let Some((from, found)) = self.memo
+            && from <= start
+            && found.is_none_or(|f| start <= f)
+        {
+            return found;
+        }
+        let rest = text.get(start..)?;
+        let found = match self.pattern {
+            Pattern::Str(s) => rest.find(s),
+            Pattern::Char(f) => rest.find(f),
+        }
+        .map(|i| start + i);
+        self.memo = Some((start, found));
+        found
+    }
+}
+
+/// The markup of a text, found from its start to its end the same way for a message
+/// ([`parse_inline`]) and for its field ([`edit_spans`]).
+struct Scan<'a> {
+    text: &'a str,
+    /// Code blocks are found too (the field): a bare address ends before one.
+    blocks: bool,
+    /// The closing marker of each of [`PAIRS`].
+    pairs: [Next; PAIRS.len()],
+    /// The `](` and the `)` that end the caption and the address of a `[caption](address)` link,
+    /// and the `[` and the line break its caption must not have.
+    link_mid: Next,
+    link_end: Next,
+    bracket: Next,
+    line: Next,
+    /// What a link's address must not have.
+    hidden: Next,
+    /// Where a bare address ends.
+    url_end: Next,
+    /// Code-block fences: the closing one of a block, and the next block for a bare address
+    /// (a fence, then another after it).
+    fence_close: Next,
+    fence: Next,
+    fence_after: Next,
+}
+
+impl<'a> Scan<'a> {
+    fn new(text: &'a str, blocks: bool) -> Self {
+        Self {
+            text,
+            blocks,
+            pairs: PAIRS.map(|(marker, ..)| Next::new(Pattern::Str(marker))),
+            link_mid: Next::new(Pattern::Str("](")),
+            link_end: Next::new(Pattern::Str(")")),
+            bracket: Next::new(Pattern::Str("[")),
+            line: Next::new(Pattern::Str("\n")),
+            hidden: Next::new(Pattern::Char(hides)),
+            url_end: Next::new(Pattern::Char(|c| c.is_whitespace() || matches!(c, '<' | '>' | '"'))),
+            fence_close: Next::new(Pattern::Str("```")),
+            fence: Next::new(Pattern::Str("```")),
+            fence_after: Next::new(Pattern::Str("```")),
+        }
+    }
+
+    /// Inline markup at byte `i`, the first of: a pair of markers, a `[caption](address)` link, a
+    /// bare `http(s)://…` address (only at the start of a word, `word_start`).
+    fn inline_at(&mut self, i: usize, word_start: bool) -> Option<Found> {
+        self.pair_at(i)
+            .or_else(|| self.link_at(i))
+            .or_else(|| word_start.then(|| self.url_at(i)).flatten())
+    }
+
+    /// Text between two markers of [`PAIRS`]: not empty, and the first marker that closes wins.
+    fn pair_at(&mut self, i: usize) -> Option<Found> {
+        let text = self.text;
+        for ((marker, kind, _), close) in PAIRS.iter().zip(&mut self.pairs) {
+            if !text[i..].starts_with(marker) {
+                continue;
+            }
+            let start = i + marker.len();
+            if let Some(end) = close.at(text, start)
+                && end > start
             {
-                flush(&mut out, &mut plain);
-                out.push(make(after[..end].to_owned()));
-                rest = &after[end + marker.len()..];
-                continue 'outer;
+                return Some(Found {
+                    kind: *kind,
+                    open: marker.len(),
+                    inner: end - start,
+                    close: marker.len(),
+                });
             }
         }
-        if let Some((text, url, len)) = md_link(rest) {
-            flush(&mut out, &mut plain);
-            out.push(Inline::Link { text, url });
-            rest = &rest[len..];
-            continue;
+        None
+    }
+
+    /// `[caption](address)`: a caption of one line without `[`, a safe address ([`safe_url`]).
+    fn link_at(&mut self, i: usize) -> Option<Found> {
+        let text = self.text;
+        if !text[i..].starts_with('[') {
+            return None;
         }
+        let start = i + 1;
+        let mid = self.link_mid.at(text, start)?;
+        let before = |at: Option<usize>, end: usize| at.is_some_and(|a| a < end);
+        if mid == start || before(self.bracket.at(text, start), mid) || before(self.line.at(text, start), mid) {
+            return None;
+        }
+        let address = mid + 2;
+        let end = self.link_end.at(text, address)?;
+        if !safe_scheme(&text[address..end]) || before(self.hidden.at(text, address), end) {
+            return None;
+        }
+        Some(Found {
+            kind: Mark::Link,
+            open: 1,
+            inner: mid - start,
+            close: end + 1 - mid,
+        })
+    }
+
+    /// A bare `http(s)://…` address up to whitespace (or a code block, in the field); punctuation
+    /// at its end and a `)` that closes nothing in it are not part of it.
+    fn url_at(&mut self, i: usize) -> Option<Found> {
+        let text = self.text;
+        let rest = &text[i..];
+        if !starts_ci(rest, "http://") && !starts_ci(rest, "https://") {
+            return None;
+        }
+        let mut stop = self.url_end.at(text, i).unwrap_or(text.len());
+        if self.blocks
+            && let Some(fence) = self.fence.at(text, i)
+            && self.fence_after.at(text, fence + 3).is_some()
+        {
+            stop = stop.min(fence);
+        }
+        let url = &text[i..stop];
+        // Counted once: the end only loses `)` and punctuation.
+        let opened = url.matches('(').count();
+        let mut closed = url.matches(')').count();
+        let mut end = url.len();
+        while let Some(last) = url[..end].chars().next_back() {
+            let unbalanced = last == ')' && opened < closed;
+            if !(matches!(last, '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '»') || unbalanced) {
+                break;
+            }
+            end -= last.len_utf8();
+            closed -= usize::from(last == ')');
+        }
+        (end > "https://".len()).then_some(Found {
+            kind: Mark::Url,
+            open: 0,
+            inner: end,
+            close: 0,
+        })
+    }
+
+    /// A code block between ```` ``` ````. Its markers take the line breaks a message drops around
+    /// its code: after the opening fence, before the closing one and after it. A break that is all
+    /// the block holds stays in it.
+    fn code_block_at(&mut self, i: usize) -> Option<Found> {
+        let text = self.text;
+        if !self.blocks || !text[i..].starts_with("```") {
+            return None;
+        }
+        let end = self.fence_close.at(text, i + 3)?;
+        let body = &text[i + 3..end];
+        let lead = usize::from(body.len() > 1 && body.starts_with('\n'));
+        let trail = usize::from(body.len() - lead > 1 && body.ends_with('\n'));
+        let next = usize::from(text[end + 3..].starts_with('\n'));
+        Some(Found {
+            kind: Mark::CodeBlock,
+            open: 3 + lead,
+            inner: body.len() - lead - trail,
+            close: trail + 3 + next,
+        })
+    }
+}
+
+/// Splits a text block into inline spans; `who` is what can be mentioned.
+pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
+    let mut scan = Scan::new(text, false);
+    let mut out = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
         let word_start = plain.chars().next_back().is_none_or(|c| !c.is_alphanumeric());
-        if word_start && let Some(len) = bare_link(rest) {
+        if let Some(found) = scan.inline_at(i, word_start) {
             flush(&mut out, &mut plain);
-            out.push(Inline::Link {
-                text: rest[..len].to_owned(),
-                url: rest[..len].to_owned(),
+            let inner = text[i + found.open..i + found.open + found.inner].to_owned();
+            out.push(match found.kind {
+                Mark::Link => Inline::Link {
+                    text: inner,
+                    url: text[i + found.open + found.inner + 2..i + found.len() - 1].to_owned(),
+                },
+                Mark::Url => Inline::Link {
+                    text: inner.clone(),
+                    url: inner,
+                },
+                kind => match PAIRS.iter().find(|(_, k, _)| *k == kind) {
+                    Some((_, _, make)) => make(inner),
+                    None => Inline::Text(inner),
+                },
             });
-            rest = &rest[len..];
+            i += found.len();
             continue;
         }
         if word_start
@@ -472,12 +661,12 @@ pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
         {
             flush(&mut out, &mut plain);
             out.push(span);
-            rest = &after[len..];
+            i += 1 + len;
             continue;
         }
         let ch = rest.chars().next().expect("rest is not empty");
         plain.push(ch);
-        rest = &rest[ch.len_utf8()..];
+        i += ch.len_utf8();
     }
     flush(&mut out, &mut plain);
     out
@@ -518,62 +707,27 @@ pub enum Mark {
 /// opening fence, before the closing one and after it, so the block shown in the field neither
 /// starts nor ends with an empty line. A break that is all the block holds stays in it.
 pub fn edit_spans(text: &str) -> Vec<EditSpan<'_>> {
+    let mut scan = Scan::new(text, true);
     let mut out = Vec::new();
     let mut plain_start = 0;
     let mut i = 0;
     while i < text.len() {
-        let rest = &text[i..];
-        let mut found = None;
-        if let Some(after) = rest.strip_prefix("```")
-            && let Some(end) = after.find("```")
-        {
-            let body = &after[..end];
-            let lead = usize::from(body.len() > 1 && body.starts_with('\n'));
-            let trail = usize::from(body.len() - lead > 1 && body.ends_with('\n'));
-            let next = usize::from(after[end + 3..].starts_with('\n'));
-            found = Some((Mark::CodeBlock, 3 + lead, end - lead - trail, trail + 3 + next));
-        }
-        if found.is_none() {
-            for (marker, kind, _) in PAIRS {
-                if let Some(after) = rest.strip_prefix(marker)
-                    && let Some(end) = after.find(marker)
-                    && end > 0
-                {
-                    found = Some((*kind, marker.len(), end, marker.len()));
-                    break;
-                }
-            }
-        }
-        // Lengths in bytes of the opening marker, the text and the closing marker.
-        let span = found
-            .or_else(|| md_link(rest).map(|(t, _, len)| (Mark::Link, 1, t.len(), len - 1 - t.len())))
-            .or_else(|| {
-                // Where [`parse_inline`] makes a bare address a link: at the start of a word, and
-                // only up to a code block, which [`parse_blocks`] takes out first.
-                let word_start = text[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
-                let block = rest
-                    .find("```")
-                    .filter(|&f| rest[f + 3..].contains("```"))
-                    .unwrap_or(rest.len());
-                (word_start && rest.starts_with(['h', 'H']))
-                    .then(|| bare_link(&rest[..block]))
-                    .flatten()
-                    .map(|len| (Mark::Url, 0, len, 0))
-            });
-        let Some((kind, open, inner, close)) = span else {
-            i += rest.chars().next().map_or(1, char::len_utf8);
+        let word_start = text[..i].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        let Some(found) = scan.code_block_at(i).or_else(|| scan.inline_at(i, word_start)) else {
+            i += text[i..].chars().next().map_or(1, char::len_utf8);
             continue;
         };
         if plain_start < i {
             out.push(EditSpan::Plain(&text[plain_start..i]));
         }
+        let (inner, close) = (i + found.open, i + found.open + found.inner);
         out.push(EditSpan::Marked {
-            kind,
-            open: &rest[..open],
-            inner: &rest[open..open + inner],
-            close: &rest[open + inner..open + inner + close],
+            kind: found.kind,
+            open: &text[i..inner],
+            inner: &text[inner..close],
+            close: &text[close..i + found.len()],
         });
-        i += open + inner + close;
+        i += found.len();
         plain_start = i;
     }
     if plain_start < text.len() {
@@ -669,6 +823,34 @@ mod tests {
                 .collect();
             assert_eq!(joined, text);
         }
+    }
+
+    #[test]
+    fn unclosed_markers_take_linear_time() {
+        // Each of these took seconds when every place searched the rest of the text again (#18);
+        // now all of them together take milliseconds. The limit leaves room for a slow machine.
+        let n = 50_000;
+        let texts = [
+            format!("https://x.ru/{}", ")".repeat(n)),
+            "[".repeat(n),
+            "[a ".repeat(n),
+            "**a ".repeat(n),
+            "` a".repeat(n),
+            "[a](".repeat(n),
+            format!("{}x)", "[a](http://".repeat(n)),
+            format!("{}```", "h ".repeat(n)),
+            "[a\n".repeat(n),
+        ];
+        let started = std::time::Instant::now();
+        for text in &texts {
+            parse_inline(text, &Mentionable::default());
+            edit_spans(text);
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

@@ -28,6 +28,12 @@ pub fn uint(v: &Value) -> Option<u64> {
     Some(x.min(MAX_SAFE_INTEGER))
 }
 
+/// A count from a response as `u32`: one too large stops at `u32::MAX` rather than wrapping
+/// around to a small number.
+pub fn count32(x: u64) -> u32 {
+    u32::try_from(x).unwrap_or(u32::MAX)
+}
+
 /// Thread chat for message `ts` of chat `chat_id`: `0/<ns>/<uuid>` → `100/<ns>/<uuid>_<ts>`.
 /// Verified on a live session for `0/0/…` groups; other chats do not support threads.
 pub fn thread_chat_id(chat_id: &str, ts: Timestamp) -> Option<String> {
@@ -41,7 +47,9 @@ fn thread_parent(thread_id: &str) -> Option<(String, Timestamp)> {
     let rest = thread_id.strip_prefix("100/")?;
     let (ns, tail) = rest.split_once('/')?;
     let (uuid, ts) = tail.rsplit_once('_')?;
-    Some((format!("0/{ns}/{uuid}"), ts.parse().ok()?))
+    // A time the UI could not hold exactly is not a time.
+    let ts = ts.parse().ok().filter(|ts| *ts <= MAX_SAFE_INTEGER)?;
+    Some((format!("0/{ns}/{uuid}"), ts))
 }
 
 /// Chat kind by its ID: `<guid>_<guid>` is direct, `1/…` is a channel, everything else is a group.
@@ -84,7 +92,7 @@ fn reactions(sm: &Value, me: Option<&UserId>) -> Vec<Reaction> {
         .flatten()
         .filter_map(|r| {
             let kind = n(r, &["Type"])?;
-            let count = n(r, &["Count"]).unwrap_or(0) as u32;
+            let count = count32(n(r, &["Count"]).unwrap_or(0));
             (count > 0).then(|| Reaction {
                 kind,
                 emoji: crate::reactions::emoji(kind).to_owned(),
@@ -109,7 +117,7 @@ fn reads(sm: &Value) -> Option<Reads> {
         return None;
     }
     Some(Reads {
-        count: n(sm, &["ReadsCount"]).unwrap_or(0) as u32,
+        count: count32(n(sm, &["ReadsCount"]).unwrap_or(0)),
         recent: sm
             .get("RecentUserReads")
             .and_then(Value::as_array)
@@ -169,8 +177,8 @@ fn attachment(kind: AttachmentKind, v: &Value) -> Option<Attachment> {
         file_id,
         name: s(info, &["Name"]).unwrap_or("file").to_owned(),
         size: n(info, &["Size"]).unwrap_or(0),
-        width: n(v, &["Width"]).unwrap_or(0) as u32,
-        height: n(v, &["Height"]).unwrap_or(0) as u32,
+        width: count32(n(v, &["Width"]).unwrap_or(0)),
+        height: count32(n(v, &["Height"]).unwrap_or(0)),
     })
 }
 
@@ -264,7 +272,7 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
     let thread = n(info, &["ThreadState", "LastSeqNo"])
         .filter(|c| *c > 0)
         .map(|count| ThreadSummary {
-            reply_count: count as u32,
+            reply_count: count32(count),
             last_reply_ts: n(info, &["ThreadState", "LastTsMcs"]).unwrap_or(ts),
             participants: vec![],
         });
@@ -573,8 +581,8 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
         out.chats.push(Chat {
             name: s(info, &["Name"]).unwrap_or_default().to_owned(),
             description: s(info, &["Description"]).filter(|d| !d.is_empty()).map(str::to_owned),
-            member_count: n(info, &["MemberCount"]).unwrap_or(0) as u32,
-            unread: unread.min(999) as u32,
+            member_count: count32(n(info, &["MemberCount"]).unwrap_or(0)),
+            unread: count32(unread.min(999)),
             muted: chat.get("Muted").and_then(Value::as_bool).unwrap_or(false),
             last_ts,
             peer_seen_ts: n(chat, &["LastSeenTsMcs"]).unwrap_or(0),
@@ -643,7 +651,7 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
         parent.ts = parent_ts;
         let last_seq = n(chat, &["LastSeqNo"]).unwrap_or(0);
         out.push(FollowedThread {
-            unread: last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0)) as u32,
+            unread: count32(last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0))),
             last_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
             last_seq,
             parent: *parent,
@@ -754,7 +762,7 @@ fn state_sync(sync: &Value) -> Option<LiveEvent> {
     let d = &data["data"];
     let chat_id = || s(d, &["chat_id"]).map(|id| ChatId(id.to_owned()));
     let text = |key: &str| s(d, &[key]).map(str::to_owned);
-    let count = || n(d, &["members_count"]).map(|c| c as u32);
+    let count = || n(d, &["members_count"]).map(count32);
     match s(&data, &["type"])? {
         "you_added" => Some(LiveEvent::Joined {
             chat_id: s(d, &["chat", "chat_id"])
@@ -780,7 +788,7 @@ fn state_sync(sync: &Value) -> Option<LiveEvent> {
             chat_id: chat_id()?,
             url: meeting_url(s(d, &["meeting_id"])?),
             started: n(d, &["create_timestamp"])?,
-            participants: n(d, &["participants_count"]).unwrap_or(0) as u32,
+            participants: count32(n(d, &["participants_count"]).unwrap_or(0)),
             ended: n(d, &["status"]) == Some(2),
         })),
         "user_bucket" => {
@@ -884,7 +892,7 @@ pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
     Some(Chat {
         name: s(info, &["name"]).unwrap_or_default().to_owned(),
         description: s(info, &["description"]).filter(|d| !d.is_empty()).map(str::to_owned),
-        member_count: n(info, &["members_count"]).unwrap_or(0) as u32,
+        member_count: count32(n(info, &["members_count"]).unwrap_or(0)),
         organizations,
         ..Chat::new(ChatId(id.to_owned()), kind)
     })
@@ -1831,6 +1839,12 @@ mod tests {
         assert_eq!(thread_chat_id("0/0/abc-1", 42).as_deref(), Some("100/0/abc-1_42"));
         assert_eq!(thread_chat_id("aa_bb", 42), None);
         assert_eq!(thread_parent("100/0/abc-1_42"), Some(("0/0/abc-1".into(), 42)));
+        // A parent time past what the UI holds exactly is no parent.
+        let at_limit = format!("100/0/abc-1_{MAX_SAFE_INTEGER}");
+        assert_eq!(thread_parent(&at_limit), Some(("0/0/abc-1".into(), MAX_SAFE_INTEGER)));
+        assert_eq!(thread_parent(&format!("100/0/abc-1_{}", MAX_SAFE_INTEGER + 1)), None);
+        assert_eq!(count32(u64::from(u32::MAX) + 1), u32::MAX);
+        assert_eq!(count32(7), 7);
         let reply = json!({"ClientMessage": {"Plain": {"ChatId": "100/0/abc_42", "Text": {"MessageText": "r"}}},
                            "ServerMessageInfo": {"Timestamp": 50, "From": {"Guid": "u1"}}});
         match from_push(&reply, None) {

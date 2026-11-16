@@ -172,6 +172,11 @@ fn add_older_page(c: Ctx, id: &ChatId, before: Timestamp, page: bridge::HistoryP
 /// if the chat history needs to be loaded from the server.
 fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
     c.hold_unread.set(None);
+    // A highlight left in the chat the user goes from would keep the next chat's list off its
+    // bottom.
+    if c.highlight.with_untracked(Option::is_some) {
+        c.highlight.set(None);
+    }
     c.chat_tab.set(ChatTab::Messages);
     let prev = c.current.get_untracked();
     if record && !prev.0.is_empty() && prev != id {
@@ -297,42 +302,72 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
     };
     let target = thread_parent.unwrap_or(ts);
     let chat2 = chat.clone();
+    let shown = chat.clone();
     let show = move || {
         if let Some(parent) = thread_parent {
             open_thread(c, parent);
         }
-        c.highlight.set(Some((chat.clone(), ts)));
+        c.highlight.set(Some((shown.clone(), ts)));
     };
     if !load && !c.live {
         return show();
     }
     spawn_local(async move {
+        // A chat opened anew shows its latest history, as from the sidebar.
         if load {
-            load_latest(c, &chat2).await;
+            load_latest(c, &chat).await;
         }
-        let has = |c: Ctx| {
-            c.snap
-                .with_untracked(|s| s.messages.iter().any(|m| m.chat_id == chat2 && m.ts == target))
-        };
         // The user may leave the chat while its history loads: then loading stops and nothing
         // shows, or the thread would open in the chat they went to.
-        let here = |c: Ctx| c.current.get_untracked() == chat2;
-        let mut pages = 0;
-        while c.live && here(c) && !has(c) && pages < 20 && !c.exhausted.with_untracked(|e| e.contains(&chat2)) {
-            let loaded = cursor(&chat2);
-            let Some(before) = c.snap.with_untracked(|s| older_page_before(s, &chat2, loaded)) else {
-                break;
-            };
-            match bridge::history(&chat2.0, Some(before), None).await {
-                Ok(page) => add_older_page(c, &chat2, before, page),
-                Err(e) => return failed(c, tr().err_older, e),
-            }
-            pages += 1;
-        }
-        if here(c) {
+        let here = move |c: Ctx| c.current.get_untracked() == chat2;
+        if load_back_to(c, &chat, target, Some(20), here).await.is_some() {
             show();
         }
     });
+}
+
+/// Loads the latest page of chat `chat` if it is not loaded over this connection and the message
+/// is not there yet, then older pages until its message `ts` is there, the history ends, `pages`
+/// pages have come (no limit with `None`) or `go_on` turns false. `Some(found)` when it is done, `None` when `go_on` turned false
+/// or a page failed to load.
+pub async fn load_back_to(
+    c: Ctx,
+    chat: &ChatId,
+    ts: Timestamp,
+    pages: Option<u32>,
+    go_on: impl Fn(Ctx) -> bool,
+) -> Option<bool> {
+    let has = |c: Ctx| {
+        c.snap
+            .with_untracked(|s| s.messages.iter().any(|m| &m.chat_id == chat && m.ts == ts))
+    };
+    // A message already there needs no request: offline it would only fail.
+    if c.live && !has(c) && !history_loaded(chat) {
+        load_latest(c, chat).await;
+        if !history_loaded(chat) {
+            return None;
+        }
+    }
+    let mut loaded = 0;
+    while c.live
+        && go_on(c)
+        && !has(c)
+        && pages.is_none_or(|p| loaded < p)
+        && !c.exhausted.with_untracked(|e| e.contains(chat))
+    {
+        let Some(before) = c.snap.with_untracked(|s| older_page_before(s, chat, cursor(chat))) else {
+            break;
+        };
+        match bridge::history(&chat.0, Some(before), None).await {
+            Ok(page) => add_older_page(c, chat, before, page),
+            Err(e) => {
+                failed(c, tr().err_older, e);
+                return None;
+            }
+        }
+        loaded += 1;
+    }
+    go_on(c).then(|| has(c))
 }
 
 /// "Mark as read" from the chat menu.

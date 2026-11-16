@@ -160,6 +160,21 @@ impl FileCache {
     }
 }
 
+/// The `Content-Type` an attachment of type `kind` goes out with over `mostikfile`: a picture keeps
+/// its own, anything else is plain bytes (`application/octet-stream`), so no page, script or
+/// document of a message ever runs as one.
+pub fn served_type(kind: &str) -> &str {
+    let essence = kind.split(';').next().unwrap_or_default().trim();
+    let image = essence
+        .get(.."image/".len())
+        .is_some_and(|t| t.eq_ignore_ascii_case("image/"));
+    if image && essence.len() > "image/".len() {
+        kind
+    } else {
+        "application/octet-stream"
+    }
+}
+
 /// Serves an attachment for the `mostikfile://localhost/<id>?size=…` scheme.
 pub async fn serve_file(app: &AppHandle, path: &str, query: Option<&str>) -> Result<(Vec<u8>, String), String> {
     let id = percent_decode(path.trim_start_matches('/'));
@@ -275,6 +290,9 @@ pub async fn save_file(
     args: Args<cmd::SaveFile>,
 ) -> Result<Out<cmd::SaveFile>, String> {
     let FileArgs { file_id, name } = args;
+    if !mostik_yandex::web::valid_file_id(&file_id) {
+        return Err("bad file identifier".into());
+    }
     let live = live(&state).await?;
     let rule = state
         .known_files
@@ -601,6 +619,19 @@ pub async fn send_files(
         let all = state.kept_files.lock().map_err(|e| e.to_string())?;
         to_send.iter().map(|p| all.get(*p).cloned()).collect()
     };
+    // Telemost refuses a file over its limit only once all of it has gone: none goes then.
+    for (path, kept) in to_send.iter().zip(&kept) {
+        let size = match kept {
+            Some(bytes) => bytes.len() as u64,
+            None => tokio::fs::metadata(path)
+                .await
+                .map_err(|e| format!("{path}: {e}"))?
+                .len(),
+        };
+        if size > cmd::MAX_UPLOAD {
+            return Err(format!("{}: {}", file_name(path), cmd::FILE_TOO_LARGE));
+        }
+    }
     // Files are read and uploaded a few at a time, the first failure stops the rest at once; the
     // gallery keeps their order.
     let uploads: Vec<_> = to_send
@@ -997,6 +1028,22 @@ mod tests {
         assert!(Saving::start(&count).is_none());
         drop(saves);
         assert!(Saving::start(&count).is_some());
+    }
+
+    #[test]
+    fn only_pictures_keep_their_type() {
+        assert_eq!(served_type("image/png"), "image/png");
+        assert_eq!(served_type("IMAGE/JPEG; q=1"), "IMAGE/JPEG; q=1");
+        for other in [
+            "text/html",
+            "application/pdf",
+            "image/",
+            "imagé/x",
+            "",
+            "application/javascript",
+        ] {
+            assert_eq!(served_type(other), "application/octet-stream", "{other:?}");
+        }
     }
 
     #[test]

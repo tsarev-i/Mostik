@@ -110,15 +110,20 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
             let (close, edit_key) = (close.clone(), edit_key.clone());
             spawn_local(async move {
                 match ops::edit(c, m, t).await {
-                    // Only if it is still this message's editor: while the edit went, the user may
-                    // have opened another one. Its draft is saved either way.
+                    // Only the editor that sent it closes: while the edit went, the user may have
+                    // closed it and opened another one, of this very message too. Its signals are
+                    // gone with it.
+                    Ok(()) if busy.try_get_untracked().is_some() => close(),
+                    // Its draft is saved, unless an editor of the message is open again and
+                    // keeps what is typed in it.
                     Ok(())
-                        if c.editing
+                        if !c
+                            .editing
                             .with_untracked(|e| e.as_ref().is_some_and(|e| (&e.chat_id, e.ts) == (&key.0, key.1))) =>
                     {
-                        close()
+                        drafts::drop_draft(c, &edit_key)
                     }
-                    Ok(()) => drafts::drop_draft(c, &edit_key),
+                    Ok(()) => {}
                     Err(e) => ops::failed(c, tr().err_not_sent, e),
                 }
                 // Saved, the editor closes and its signals go.

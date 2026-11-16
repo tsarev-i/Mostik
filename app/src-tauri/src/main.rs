@@ -201,15 +201,28 @@ fn main() {
         .manage(update::UpdateState::default())
         .register_asynchronous_uri_scheme_protocol("mostikfile", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
+            // Attachments are the main window's: the call and sign-in windows show other sites.
+            let main = ctx.webview_label() == "main";
             let path = request.uri().path().to_owned();
             let query = request.uri().query().map(str::to_owned);
             tauri::async_runtime::spawn(async move {
-                let response = match backend::serve_file(&app, &path, query.as_deref()).await {
+                let served = if main {
+                    backend::serve_file(&app, &path, query.as_deref()).await
+                } else {
+                    Err("attachments are served to the main window only".into())
+                };
+                let response = match served {
+                    // Never a page: a picture keeps its type, anything else goes as bytes, the type
+                    // is not guessed, and whatever opens it runs in a sandbox, without scripts.
                     Ok((bytes, kind)) => tauri::http::Response::builder()
-                        .header("Content-Type", kind)
+                        .header("Content-Type", backend::served_type(&kind))
+                        .header("X-Content-Type-Options", "nosniff")
+                        .header("Content-Security-Policy", "sandbox")
                         .header("Cache-Control", "max-age=3600")
                         .body(bytes),
-                    Err(e) => tauri::http::Response::builder().status(404).body(e.into_bytes()),
+                    Err(e) => tauri::http::Response::builder()
+                        .status(if main { 404 } else { 403 })
+                        .body(e.into_bytes()),
                 };
                 if let Ok(r) = response {
                     responder.respond(r);

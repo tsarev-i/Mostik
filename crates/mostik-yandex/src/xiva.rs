@@ -25,6 +25,16 @@ pub const PROTOCOL_VERSION: u32 = 5;
 /// The version of a push whose body is protobuf: a duplicate of a JSON push.
 pub const PROTOBUF_VERSION: u32 = 4;
 
+/// How deep a msgpack header may nest: it is a flat array, and a frame nested deeper is garbage
+/// that would only cost recursion to read.
+const HEADER_DEPTH: usize = 4;
+
+/// The msgpack header at the start of `bytes`, nested no deeper than [`HEADER_DEPTH`]. rmpv counts
+/// its steps rather than levels: two for an array or a map, three for a string at the bottom.
+fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<Mp, rmpv::decode::Error> {
+    rmpv::decode::read_value_with_max_depth(cursor, 2 * HEADER_DEPTH + 3)
+}
+
 /// The three words between the msgpack header and the JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Meta {
@@ -116,7 +126,7 @@ pub fn rpc_seq(bytes: &[u8]) -> Option<u64> {
     if kind != FRAME_RPC {
         return None;
     }
-    let header = rmpv::decode::read_value(&mut Cursor::new(rest)).ok()?;
+    let header = read_header(&mut Cursor::new(rest)).ok()?;
     header.as_array()?.get(1)?.as_u64()
 }
 
@@ -124,7 +134,7 @@ pub fn rpc_seq(bytes: &[u8]) -> Option<u64> {
 pub fn decode(bytes: &[u8]) -> Result<Frame, FrameError> {
     let (&kind, rest) = bytes.split_first().ok_or(FrameError::Empty)?;
     let mut cursor = Cursor::new(rest);
-    let header = rmpv::decode::read_value(&mut cursor).map_err(|e| FrameError::Header(e.to_string()))?;
+    let header = read_header(&mut cursor).map_err(|e| FrameError::Header(e.to_string()))?;
     let tail = &rest[cursor.position() as usize..];
     if tail.len() < 12 {
         return Err(FrameError::Truncated);
@@ -266,6 +276,21 @@ mod tests {
                 event: "delivery".into()
             }
         );
+    }
+
+    #[test]
+    fn a_deep_header_is_refused() {
+        // [[[[[[[[0]]]]]]]] and a body: past the depth a frame never has.
+        let mut frame = vec![FRAME_RPC];
+        frame.extend([0x91; 8]);
+        frame.push(0x00);
+        frame.extend([5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(matches!(decode(&frame), Err(FrameError::Header(_))));
+        assert_eq!(rpc_seq(&frame), None);
+        // Four levels with a string at the bottom are read, five are not.
+        let nested = |levels: usize| [vec![0x91; levels], vec![0xa1, b'x']].concat();
+        assert!(read_header(&mut Cursor::new(&nested(4)[..])).is_ok());
+        assert!(read_header(&mut Cursor::new(&nested(5)[..])).is_err());
     }
 
     #[test]
