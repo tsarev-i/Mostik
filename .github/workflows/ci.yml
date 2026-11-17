@@ -124,9 +124,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The oldest Ubuntu image: its glibc 2.35 lets the AppImage run on older distributions.
+          # Not 22.04: the bundled WebKit takes the host's FreeType, and headers older than 2.13 make it
+          # crash on COLRv1 emoji under FreeType 2.13+ (#57). The AppImage needs glibc 2.39 or newer.
           - platform: linux
-            os: ubuntu-22.04
+            os: ubuntu-24.04
           - platform: windows
             os: windows-2025
           # Apple Silicon only, no Intel build. The .app is what the updater installs,
