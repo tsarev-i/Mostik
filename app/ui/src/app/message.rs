@@ -719,16 +719,10 @@ pub(super) fn message_menu_items(
             <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::start_reply(c, m_reply.clone(), None); }>
                 {menu_item(I::Reply, tr().reply)}
             </button>
-            {selected.map(|q| {
-                let copied = q.clone();
-                view! {
-                    <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::start_reply(c, m_quote.clone(), Some(q.clone())); }>
-                        {menu_item(I::Quote, tr().quote_selection)}
-                    </button>
-                    <button class="menu-icon-item" on:click=move |_| { close_menus(c); copy(copied.clone()); }>
-                        {menu_item(I::Copy, tr().copy_selection)}
-                    </button>
-                }
+            {selected.map(|q| view! {
+                <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::start_reply(c, m_quote.clone(), Some(q.clone())); }>
+                    {menu_item(I::Quote, tr().quote_selection)}
+                </button>
             })}
             <div class="menu-sep"></div>
         }
@@ -744,9 +738,12 @@ pub(super) fn message_menu_items(
         <button class="menu-icon-item" on:click=move |_| { close_menus(c); copy(ops::message_link(&m_link)); c.notice.set(Some(tr().link_copied.into())); }>
             {menu_item(I::Link, tr().copy_link)}
         </button>
+        // With text of the message selected, the selection, as "Copy" does anywhere else.
         <button class="menu-icon-item" on:click=move |_| {
             close_menus(c);
-            copy(c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0)));
+            copy(quote.clone().unwrap_or_else(|| {
+                c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0))
+            }));
         }>{menu_item(I::Copy, tr().copy_text)}</button>
         <div class="menu-sep"></div>
         <button class="menu-icon-item" on:click=move |_| { close_menus(c); c.forwarding.set(Some(m_fwd.clone())); }>
