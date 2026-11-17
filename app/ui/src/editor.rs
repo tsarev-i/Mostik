@@ -8,7 +8,7 @@
 
 use mostik_core::markup::{EditSpan, Mark, edit_spans};
 
-use crate::text_edit::{delete_shown, insert_shown, past_markers, utf16_len, utf16_to_byte};
+use crate::text_edit::{delete_shown, past_markers, replace_shown, utf16_len, utf16_to_byte};
 use wasm_bindgen::JsCast;
 use web_sys::{Element, HtmlElement, Node};
 
@@ -472,20 +472,46 @@ fn deletion_range(el: &HtmlElement, back: bool, unit: &str) -> Option<(u32, u32)
     Some((a.min(b), a.max(b)))
 }
 
+/// The range of the field the input event changes, as the browser gives it, in UTF-16 offsets of
+/// the field's text.
+fn target_range(el: &HtmlElement, ev: &web_sys::InputEvent) -> Option<(Option<u32>, Option<u32>)> {
+    let range = ev.get_target_ranges().get(0).dyn_into::<web_sys::StaticRange>().ok()?;
+    Some((
+        offset_of(el, &range.start_container(), range.start_offset()),
+        offset_of(el, &range.end_container(), range.end_offset()),
+    ))
+}
+
 /// Before the browser types or deletes text next to the hidden markers, the change is made here:
 /// a deletion would take the markers along and the markup would fall apart (a fragment with its
 /// first character deleted would show its closing `~~`), and text typed right after a link in the
 /// middle of a line would go into its caption. The field changes as if typed in.
 pub fn before_input(el: &HtmlElement, ev: &web_sys::InputEvent, emoji: &dyn Fn(&str) -> Option<String>) {
     let kind = ev.input_type();
-    if kind == "insertText" && !ev.is_composing() {
-        let (Some(data), (Some(start), Some(end))) = (ev.data(), selection(el)) else {
+    // Typed, pasted (Ctrl+V comes here when the paste handler leaves it to the field) or put in
+    // by the spell checker over the word it replaces.
+    if matches!(
+        kind.as_str(),
+        "insertText" | "insertFromPaste" | "insertReplacementText"
+    ) && !ev.is_composing()
+    {
+        let data = ev
+            .data()
+            .or_else(|| ev.data_transfer().and_then(|d| d.get_data("text/plain").ok()))
+            .map(|d| d.replace("\r\n", "\n"));
+        // The spell checker replaces its word, which need not be selected.
+        let range = (kind == "insertReplacementText")
+            .then(|| target_range(el, ev))
+            .flatten()
+            .filter(|(start, end)| start.is_some() && end.is_some())
+            .unwrap_or_else(|| selection(el));
+        let (Some(data), (Some(start), Some(end))) = (data, range) else {
             return;
         };
-        if start != end {
+        if data.is_empty() {
             return;
         }
-        let Some((typed, caret)) = insert_shown(&value(el), start, &data) else {
+        let Some((typed, caret)) = replace_shown(&value(el), start, end, &data) else {
             return;
         };
         ev.prevent_default();
@@ -510,17 +536,7 @@ pub fn before_input(el: &HtmlElement, ev: &web_sys::InputEvent, emoji: &dyn Fn(&
     if ev.is_composing() {
         return;
     }
-    let target = ev
-        .get_target_ranges()
-        .get(0)
-        .dyn_into::<web_sys::StaticRange>()
-        .ok()
-        .and_then(|range| {
-            Some((
-                offset_of(el, &range.start_container(), range.start_offset())?,
-                offset_of(el, &range.end_container(), range.end_offset())?,
-            ))
-        });
+    let target = target_range(el, ev).and_then(|(start, end)| Some((start?, end?)));
     let Some((start, end)) = target.or_else(|| deletion_range(el, back, unit)) else {
         return;
     };

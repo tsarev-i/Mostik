@@ -203,6 +203,28 @@ pub(crate) fn insert_shown(text: &str, at: u32, data: &str) -> Option<(String, u
     Some((out, utf16_len(&text[..to]) + utf16_len(data)))
 }
 
+/// `text` with UTF-16 offsets `start..end` replaced by `data` (typed, pasted or put by the spell
+/// checker), when the place is next to hidden markers, as [`insert_shown`]: the shown text of the
+/// range goes as [`delete_shown`] takes it, the markers stay. Returns the text and the caret;
+/// `None` where the browser makes the change itself.
+pub(crate) fn replace_shown(text: &str, start: u32, end: u32, data: &str) -> Option<(String, u32)> {
+    let (start, end) = (start.min(end), start.max(end));
+    if start == end {
+        return insert_shown(text, start, data);
+    }
+    // Text replaced in a caption or other formatted text stays in it: the browser puts it there.
+    let (from, to) = (utf16_to_byte(text, Some(start)), utf16_to_byte(text, Some(end)));
+    if marked_spans(text)
+        .iter()
+        .any(|&[_, inner, close, _]| from < close && inner < to)
+    {
+        return None;
+    }
+    let (rest, at) =
+        delete_shown(text, start, end).unwrap_or_else(|| (format!("{}{}", &text[..from], &text[to..]), start));
+    insert_shown(&rest, at, data)
+}
+
 /// What the link dialog edits: the link the selection is in, or the selected text to make a link of.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct LinkTarget {
@@ -412,6 +434,32 @@ mod tests {
         assert_eq!(delete_shown("a https://x.ru b", 1, 2), None);
         assert_eq!(insert_shown("a https://x.ru b", 14, "x"), None);
         assert_eq!(insert_shown("a https://x.ru b", 2, "x"), None);
+    }
+
+    #[test]
+    fn a_replacement_next_to_a_link_stays_outside_it() {
+        // Pasted right after a link in the middle of a line: after it, not in its caption.
+        assert_eq!(
+            replace_shown("a [b](https://x.ru) c", 4, 4, "xy"),
+            Some(("a [b](https://x.ru)xy c".to_owned(), 21))
+        );
+        // A word typed after a link, then replaced by the spell checker.
+        assert_eq!(
+            replace_shown("[b](https://x.ru)wrod c", 17, 21, "word"),
+            Some(("[b](https://x.ru)word c".to_owned(), 21))
+        );
+        // Its range may start in the caption's end, as WebKit puts the caret there.
+        assert_eq!(
+            replace_shown("[b](https://x.ru)wrod c", 2, 21, "word"),
+            Some(("[b](https://x.ru)word c".to_owned(), 21))
+        );
+        // Part of a caption or of bold text replaced: it stays inside, as the browser does it.
+        assert_eq!(replace_shown("[abc](https://x.ru) tail", 1, 2, "X"), None);
+        assert_eq!(replace_shown("[abc](https://x.ru) tail", 3, 4, "X"), None);
+        assert_eq!(replace_shown("a **bc** d", 4, 6, "X"), None);
+        // Away from markers the browser does it.
+        assert_eq!(replace_shown("plain wrod here", 6, 10, "word"), None);
+        assert_eq!(replace_shown("a [bc](https://x.ru) d", 4, 4, "x"), None);
         assert_eq!(past_markers("a https://x.ru", 2, false), 2);
         assert_eq!(past_markers("a https://x.ru", 14, true), 14);
     }
