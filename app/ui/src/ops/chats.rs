@@ -9,7 +9,7 @@ use crate::app::{ChatTab, Ctx};
 use crate::bridge;
 use crate::i18n::tr;
 
-use super::snapshot::{document_visible, keep_known, reading};
+use super::snapshot::{document_visible, in_sight, keep_known, reading};
 use super::threads::{open_thread, read_thread};
 use super::{failed, learn_users};
 
@@ -385,10 +385,20 @@ thread_local! {
 /// meanwhile as unread, are read now, as in Slack.
 pub fn read_in_sight(c: Ctx) {
     let later = READ_LATER.with_borrow_mut(Option::take);
-    if !c.settings.with_untracked(|s| s.mark_read_on_open) {
+    if !c.settings.with_untracked(|s| s.mark_read_on_open) || !in_sight() {
         return;
     }
     let id = c.current.get_untracked();
+    // The thread pane stays in sight beside a page of the Home view ("Threads") that covers the
+    // chat, so it is read on its own, as a reply coming into it is ([`track_thread`]).
+    if let Some(parent) = c.thread.get_untracked()
+        && c.threads.with_untracked(|l| {
+            l.iter()
+                .any(|t| t.parent.chat_id == id && t.parent.ts == parent && t.unread > 0)
+        })
+    {
+        read_thread(c, id.clone(), parent);
+    }
     if !reading(c, &id) {
         return;
     }
@@ -406,15 +416,7 @@ pub fn read_in_sight(c: Ctx) {
         })
         .unwrap_or(false);
     if had_unread || later.as_ref() == Some(&id) {
-        mark_read(c, id.clone());
-    }
-    if let Some(parent) = c.thread.get_untracked()
-        && c.threads.with_untracked(|l| {
-            l.iter()
-                .any(|t| t.parent.chat_id == id && t.parent.ts == parent && t.unread > 0)
-        })
-    {
-        read_thread(c, id, parent);
+        mark_read(c, id);
     }
 }
 
