@@ -477,6 +477,7 @@ pub fn App() -> impl IntoView {
     scoped_window_listener(ev::blur, move |_| c.ctx_menu.set(None));
     scoped_window_listener(ev::focus, move |_| {
         ops::refresh_me(c);
+        ops::read_in_sight(c);
         ops::recount_soon(c);
     });
     scoped_window_listener(ev::resize, move |_| c.ctx_menu.set(None));

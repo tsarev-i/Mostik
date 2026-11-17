@@ -12,10 +12,8 @@ use super::threads::track_thread;
 
 /// Inserts or replaces a message; keeps the thread and unread counters up to date.
 pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
-    let current = c.current.get_untracked();
     let open_thread = c.thread.get_untracked();
-    let viewing =
-        current == m.chat_id && document_visible() && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
+    let viewing = reading(c, &m.chat_id);
     let start = loaded_from(&m);
     let mut shown = true;
     let mut added = false;
@@ -126,16 +124,23 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
 
 /// Whether chat `id` is in front of the user, so what comes in it is read: it is open and not
 /// covered by a page of the Home view, the user has not marked it unread while in it, and the
-/// window is not hidden.
+/// window is in sight ([`in_sight`]).
 pub(super) fn reading(c: Ctx, id: &ChatId) -> bool {
     c.current.with_untracked(|cur| cur == id)
         && !c.view.get_untracked().is_home_page()
         && c.hold_unread.with_untracked(|h| h.as_ref() != Some(id))
-        && document_visible()
+        && in_sight()
 }
 
 pub(super) fn document_visible() -> bool {
     !document().hidden()
+}
+
+/// Whether the window is in front of the user: shown and focused. A window under another one is
+/// not hidden, yet what comes into it notifies (see `backend::notify`) and so stays unread, as in
+/// Slack, until the window gets the focus back.
+pub(super) fn in_sight() -> bool {
+    document_visible() && document().has_focus().unwrap_or(true)
 }
 
 /// Chats in the sections ordered by recency, as in Telemost.

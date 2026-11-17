@@ -816,12 +816,16 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
     let data = {
         let id = id.clone();
         // Only what the row shows: a new message, the person's presence or anyone else's change
-        // would build it again, and the person's avatar would blink.
+        // would build it again, and the person's avatar would blink. The row shows the unread
+        // count, so it keeps the whole number.
         Memo::new(move |_| {
             c.snap.with(|s| {
                 s.chat(&id).map(|ch| {
                     (
-                        super::avatar::steady_chat(ch),
+                        Chat {
+                            unread: ch.unread,
+                            ..super::avatar::steady_chat(ch)
+                        },
                         display_title(s, ch),
                         chat_face(s, ch).as_ref().map(super::avatar::face),
                     )

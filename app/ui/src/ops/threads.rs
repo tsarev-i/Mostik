@@ -11,7 +11,7 @@ use crate::bridge::LiveEvent;
 use crate::i18n::tr;
 
 use super::chats::load_latest;
-use super::snapshot::document_visible;
+use super::snapshot::in_sight;
 use super::{failed, learn_users};
 
 pub fn open_thread(c: Ctx, parent: Timestamp) {
@@ -153,7 +153,7 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
     let mine = m.author == me;
     let open = c.current.with_untracked(|cur| cur == &m.chat_id)
         && c.thread.get_untracked() == Some(parent)
-        && document_visible();
+        && in_sight();
     let mut read_now = false;
     c.threads.update(|list| {
         let at = list
