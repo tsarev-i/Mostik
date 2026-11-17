@@ -194,7 +194,7 @@ pub fn render(el: &HtmlElement, text: &str, emoji: &dyn Fn(&str) -> Option<Strin
                 }
                 if let Some(shown) = span_of(mark_class(kind), inner) {
                     let address = match kind {
-                        Mark::Link => close.strip_prefix("](").and_then(|c| c.strip_suffix(')')),
+                        Mark::Link => mostik_core::markup::closing_address(close),
                         Mark::Url => Some(inner),
                         _ => None,
                     };
