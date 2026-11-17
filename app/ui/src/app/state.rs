@@ -123,6 +123,10 @@ pub struct Ctx {
     pub picked: RwSignal<std::collections::HashMap<String, UserId>>,
     /// The latest messages removed as deleted, so a deletion is counted once (see `ops::snapshot::remove`).
     pub deleted: RwSignal<VecDeque<(ChatId, Timestamp)>>,
+    /// The latest message outside the loaded history of its chat that a push changed (an edit of
+    /// an old message, its reactions): the feed has no copy to change, and a copy asked for alone
+    /// (a pinned one) is asked for again.
+    pub older_changed: RwSignal<Option<(ChatId, Timestamp)>>,
     /// Chats hidden from the sidebar with "×", kept between runs.
     pub hidden: RwSignal<hidden::Hidden>,
     /// Chats opened from "Find a conversation", shown whatever the sidebar filter, kept between runs.

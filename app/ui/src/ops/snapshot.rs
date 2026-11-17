@@ -57,6 +57,15 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
         added = add_new(s, &m, viewing, start);
         shown = added;
     });
+    // A change to a message outside the feed: the message itself, or the thread of a parent that
+    // is not loaded. A copy asked for alone (a pinned one) is asked for again.
+    let outside = match m.thread_parent {
+        None => (!shown).then_some(m.ts),
+        Some(parent) => (!is_loaded(c, &m.chat_id, parent)).then_some(parent),
+    };
+    if let Some(ts) = outside {
+        c.older_changed.set(Some((m.chat_id.clone(), ts)));
+    }
     if !shown {
         return;
     }
@@ -71,6 +80,12 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
     if c.live && read_on_open && reading(c, &m.chat_id) && (m.thread_parent.is_none() || viewing_reply) {
         mark_read(c, m.chat_id);
     }
+}
+
+/// Whether message `ts` of chat `chat` is among the loaded ones.
+fn is_loaded(c: Ctx, chat: &ChatId, ts: Timestamp) -> bool {
+    c.snap
+        .with_untracked(|s| s.messages.iter().any(|m| &m.chat_id == chat && m.ts == ts))
 }
 
 /// Adds message `m`, not loaded so far, and keeps the counters: an unread message from someone
@@ -198,6 +213,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
         return;
     }
     let mut parent = thread_parent;
+    let mut was_loaded = false;
     // Its thread's reply field, its editor and replies to it have nothing to go to now.
     crate::app::drafts::forget_message(c, chat, ts);
     c.snap.update(|s| {
@@ -206,6 +222,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
             .iter()
             .position(|m| &m.chat_id == chat && m.ts == ts)
             .map(|pos| s.messages.remove(pos));
+        was_loaded = removed.is_some();
         parent = parent.or_else(|| removed.as_ref().and_then(|m| m.thread_parent));
         match parent {
             Some(parent) => {
@@ -226,6 +243,14 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                 .retain(|m| !(&m.chat_id == chat && m.thread_parent == Some(ts))),
         }
     });
+    // Outside the feed, as in [`upsert`]: the message, or the parent whose thread lost a reply.
+    let outside = match parent {
+        None => (!was_loaded).then_some(ts),
+        Some(parent) => (!is_loaded(c, chat, parent)).then_some(parent),
+    };
+    if let Some(ts) = outside {
+        c.older_changed.set(Some((chat.clone(), ts)));
+    }
     c.threads.update(|list| match parent {
         Some(parent) => {
             if let Some(i) = list

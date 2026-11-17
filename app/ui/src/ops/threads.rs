@@ -27,7 +27,7 @@ pub fn open_thread(c: Ctx, parent: Timestamp) {
 /// Loads the replies of the open thread of message `parent` in chat `id` and marks it read.
 pub(super) fn load_thread(c: Ctx, id: ChatId, parent: Timestamp) {
     spawn_local(async move {
-        match bridge::history(&id.0, None, Some(parent)).await {
+        match bridge::history(&id.0, None, Some(parent), None).await {
             Ok(page) => {
                 let last = page.messages.iter().max_by_key(|m| m.ts).map(|m| (m.ts, m.seq_no));
                 // A thread that fits in one page gives the exact reply count, without the

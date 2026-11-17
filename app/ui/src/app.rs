@@ -142,6 +142,7 @@ pub fn App() -> impl IntoView {
         threads: RwSignal::new(vec![]),
         picked: RwSignal::new(Default::default()),
         deleted: RwSignal::new(Default::default()),
+        older_changed: RwSignal::new(None),
         hidden: RwSignal::new(hidden::load()),
         kept: RwSignal::new(hidden::load_kept()),
         folders: folder_list,

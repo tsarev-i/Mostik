@@ -33,6 +33,10 @@ pub(super) fn MessageRow(
     #[prop(into)] msg: Signal<Message>,
     #[prop(into)] grouped: Signal<bool>,
     #[prop(optional)] in_thread: bool,
+    /// A copy outside the loaded history (an old pinned message): it is only shown. What changes a
+    /// message (reactions, the menu, its thread) works on the loaded ones, so it is not offered.
+    #[prop(optional)]
+    detached: bool,
 ) -> impl IntoView {
     let c = ctx();
     let names = feed_names(c);
@@ -215,16 +219,18 @@ pub(super) fn MessageRow(
                             };
                             view! {
                                 <button class=if r.mine { "reaction mine" } else { "reaction" }
-                                    title=title
+                                    title=title disabled=detached
                                     on:click=move |_| msg.with_untracked(|m| ops::toggle_reaction(c, m, kind))>
                                     {glyph}
                                     <span class="count">{r.count}</span>
                                 </button>
                             }
                         }).collect_view()}
-                        <button class="reaction add" title=tr().add_reaction on:click=move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }>
-                            <Icon icon=I::SmilePlus size=16/>
-                        </button>
+                        {(!detached).then(|| view! {
+                            <button class="reaction add" title=tr().add_reaction on:click=move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }>
+                                <Icon icon=I::SmilePlus size=16/>
+                            </button>
+                        })}
                     </div>
                 }
             })
@@ -247,7 +253,7 @@ pub(super) fn MessageRow(
                         .collect::<Vec<_>>()
                 });
                 view! {
-                    <button class="thread-summary" on:click=open_thread>
+                    <button class="thread-summary" disabled=detached on:click=open_thread>
                         <span class="thread-faces">
                             {faces.into_iter().map(|u| view! { <Avatar user=u size=24/> }).collect_view()}
                         </span>
@@ -281,7 +287,7 @@ pub(super) fn MessageRow(
     // Selected text of the message keeps this menu: it offers to quote or copy the selection.
     let on_ctx = move |e: ev::MouseEvent| {
         let quote = selected_in_message(ts);
-        if editing.get_untracked() || (quote.is_none() && wants_native_menu(&e)) {
+        if detached || editing.get_untracked() || (quote.is_none() && wants_native_menu(&e)) {
             return;
         }
         e.prevent_default();
@@ -328,31 +334,33 @@ pub(super) fn MessageRow(
                     {thread_view}
                 </div>
             </div>
-            <div class="msg-actions">
-                <button title=tr().reaction on:click={
-                    let key = key.clone();
-                    move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }
-                }><Icon icon=I::SmilePlus size=16/></button>
-                {reply_btn}
-                <button title=move || if important.get() { tr().unmark_important } else { tr().mark_important }
-                    on:click=move |_| msg.with_untracked(|m| ops::toggle_important(c, m))>
-                    <Icon icon=I::Bookmark size=16/>
-                </button>
-                // "More" is the same menu as the right click, under the button; at the window edge it opens upwards.
-                // Pressing it keeps the text selected in the message, for "Quote selection".
-                <button title=tr().more on:mousedown=|e: ev::MouseEvent| e.prevent_default() on:click=move |e: ev::MouseEvent| {
-                    c.picker.set(None);
-                    let (x, y) = e
-                        .current_target()
-                        .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
-                        .map_or((e.client_x() as f64, e.client_y() as f64), |el| {
-                            let r = el.get_bounding_client_rect();
-                            (r.right(), r.bottom() + 4.0)
-                        });
-                    let quote = selected_in_message(ts);
-                    c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(msg.get_untracked()), mine, quote, in_thread } }));
-                }><Icon icon=I::Kebab size=16/></button>
-            </div>
+            {(!detached).then(|| view! {
+                <div class="msg-actions">
+                    <button title=tr().reaction on:click={
+                        let key = key.clone();
+                        move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }
+                    }><Icon icon=I::SmilePlus size=16/></button>
+                    {reply_btn}
+                    <button title=move || if important.get() { tr().unmark_important } else { tr().mark_important }
+                        on:click=move |_| msg.with_untracked(|m| ops::toggle_important(c, m))>
+                        <Icon icon=I::Bookmark size=16/>
+                    </button>
+                    // "More" is the same menu as the right click, under the button; at the window edge it opens upwards.
+                    // Pressing it keeps the text selected in the message, for "Quote selection".
+                    <button title=tr().more on:mousedown=|e: ev::MouseEvent| e.prevent_default() on:click=move |e: ev::MouseEvent| {
+                        c.picker.set(None);
+                        let (x, y) = e
+                            .current_target()
+                            .and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok())
+                            .map_or((e.client_x() as f64, e.client_y() as f64), |el| {
+                                let r = el.get_bounding_client_rect();
+                                (r.right(), r.bottom() + 4.0)
+                            });
+                        let quote = selected_in_message(ts);
+                        c.ctx_menu.set(Some(CtxMenu { x, y, target: CtxTarget::Message { msg: Box::new(msg.get_untracked()), mine, quote, in_thread } }));
+                    }><Icon icon=I::Kebab size=16/></button>
+                </div>
+            })}
             <Show when=move || picker_open.get()>
                 <ReactionPicker msg=msg/>
             </Show>

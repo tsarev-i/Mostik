@@ -83,7 +83,7 @@ fn recount(c: Ctx) {
         return;
     }
     spawn_local(async move {
-        match bridge::history(&id.0, None, None).await {
+        match bridge::history(&id.0, None, None, None).await {
             Ok(page) => c.snap.update(|s| s.take_reads(&id, &page.messages, page.peer_seen)),
             Err(e) => leptos::logging::warn!("read counters: {e}"),
         }
@@ -228,7 +228,7 @@ fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
 /// The latest history page of the chat instead of whatever was loaded.
 pub(super) async fn load_latest(c: Ctx, id: &ChatId) {
     let read_on_open = c.settings.with_untracked(|s| s.mark_read_on_open);
-    match bridge::history(&id.0, None, None).await {
+    match bridge::history(&id.0, None, None, None).await {
         Ok(page) => {
             let full = !page.more;
             FRESH.with_borrow_mut(|f| f.insert(id.clone()));
@@ -291,6 +291,17 @@ pub fn navigate(c: Ctx, back: bool) {
 /// Opens the chat and scrolls to message `ts` (a thread reply opens in the thread panel), highlighting it.
 /// If the message is old, loads history page by page until it is found.
 pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Option<Timestamp>) {
+    jump(c, chat, ts, thread_parent, Some(20));
+}
+
+/// "View in chat" on the pinned message: as [`jump_to_message`], with no limit to the pages loaded
+/// back to it, as the user asked to see that very message.
+pub fn view_pinned(c: Ctx, chat: ChatId, ts: Timestamp) {
+    jump(c, chat, ts, None, None);
+}
+
+/// [`jump_to_message`], loading at most `pages` older pages (`None`: no limit).
+fn jump(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Option<Timestamp>, pages: Option<u32>) {
     let same = c.current.get_untracked() == chat;
     let load = if same {
         if c.view.get_untracked().is_home_page() {
@@ -325,7 +336,7 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
         // The user may leave the chat while its history loads: then loading stops and nothing
         // shows, or the thread would open in the chat they went to.
         let here = move |c: Ctx| c.current.get_untracked() == chat2;
-        if load_back_to(c, &chat, target, Some(20), here).await.is_some() {
+        if load_back_to(c, &chat, target, pages, here).await.is_some() {
             show();
         }
     });
@@ -335,7 +346,7 @@ pub fn jump_to_message(c: Ctx, chat: ChatId, ts: Timestamp, thread_parent: Optio
 /// is not there yet, then older pages until its message `ts` is there, the history ends, `pages`
 /// pages have come (no limit with `None`) or `go_on` turns false. `Some(found)` when it is done, `None` when `go_on` turned false
 /// or a page failed to load.
-pub async fn load_back_to(
+pub(super) async fn load_back_to(
     c: Ctx,
     chat: &ChatId,
     ts: Timestamp,
@@ -363,7 +374,7 @@ pub async fn load_back_to(
         let Some(before) = c.snap.with_untracked(|s| older_page_before(s, chat, cursor(chat))) else {
             break;
         };
-        match bridge::history(&chat.0, Some(before), None).await {
+        match bridge::history(&chat.0, Some(before), None, None).await {
             Ok(page) => add_older_page(c, chat, before, page),
             Err(e) => {
                 failed(c, tr().err_older, e);
@@ -418,6 +429,17 @@ pub fn read_in_sight(c: Ctx) {
     if had_unread || later.as_ref() == Some(&id) {
         mark_read(c, id);
     }
+}
+
+/// The pinned message `ts` of chat `id`, which the loaded history does not have: asked for alone,
+/// not added to the feed. `None` when it is gone (deleted: any member of a group can do that).
+pub async fn pinned_message(c: Ctx, id: &ChatId, ts: Timestamp) -> Result<Option<Message>, String> {
+    // One record, the latest before one past its time: the message itself, if it is still there.
+    let page = bridge::history(&id.0, Some(ts.saturating_add(1)), None, Some(1)).await?;
+    if !page.users.is_empty() {
+        c.snap.update(|s| learn_users(s, page.users));
+    }
+    Ok(page.messages.into_iter().find(|m| m.ts == ts && m.chat_id == *id))
 }
 
 /// "Mark as read" from the chat menu.
@@ -493,7 +515,7 @@ fn ask_older(c: Ctx, id: ChatId, token: u64) {
         return end_older(c, &id, token);
     };
     spawn_local(async move {
-        match bridge::history(&id.0, Some(before), None).await {
+        match bridge::history(&id.0, Some(before), None, None).await {
             // The page goes on from the list only if the list still starts where it was asked
             // from: meanwhile the latest page may have replaced the list, or a jump to a message
             // or another load may have taken it further back. Else it is dropped (it would leave a
