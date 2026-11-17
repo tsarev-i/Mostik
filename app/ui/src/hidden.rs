@@ -1,14 +1,31 @@
 //! Chats hidden from the sidebar with "×", as closing a conversation in Slack. Kept in
 //! `localStorage`: chat → time of its last message when it was hidden. A hidden chat comes back
-//! with a new message (a muted one only with a mention) or when it is opened.
+//! with a new message (a muted one only with a mention) or when it is opened. The other way round,
+//! a chat opened from "Find a conversation" stays in the sidebar whatever its filter, until "×".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mostik_core::{Chat, ChatId, Timestamp};
 
 pub type Hidden = HashMap<ChatId, Timestamp>;
 
 const KEY: &str = "mostik.hidden";
+
+/// Chats opened from "Find a conversation": the sidebar filter ("Active", hiding muted ones) does
+/// not hide them, or one found there would go again as soon as another chat is opened.
+pub type Kept = HashSet<ChatId>;
+
+const KEPT_KEY: &str = "mostik.kept";
+
+pub fn load_kept() -> Kept {
+    crate::storage::load::<Vec<ChatId>>(KEPT_KEY)
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+pub fn save_kept(kept: &Kept) {
+    crate::storage::save(KEPT_KEY, &kept.iter().collect::<Vec<_>>());
+}
 
 pub fn load() -> Hidden {
     crate::storage::load::<Vec<(ChatId, Timestamp)>>(KEY)

@@ -36,7 +36,7 @@ pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
     }
 }
 
-/// Drops what the sidebar keeps in `localStorage` (hidden chats, the custom order) about chats
+/// Drops what the sidebar keeps in `localStorage` (hidden and kept chats, the custom order) about chats
 /// the user is no longer in.
 fn forget_gone_chats(c: Ctx, s: &Snapshot) {
     // An empty chat list is more likely a failure than an account without chats.
@@ -46,6 +46,9 @@ fn forget_gone_chats(c: Ctx, s: &Snapshot) {
     let known: std::collections::HashSet<&ChatId> = s.chats.iter().map(|ch| &ch.id).collect();
     if c.hidden.with_untracked(|h| h.keys().any(|id| !known.contains(id))) {
         c.hidden.update(|h| h.retain(|id, _| known.contains(id)));
+    }
+    if c.kept.with_untracked(|k| k.iter().any(|id| !known.contains(id))) {
+        c.kept.update(|k| k.retain(|id| known.contains(id)));
     }
     if c.chat_order
         .with_untracked(|o| o.values().flatten().any(|id| !known.contains(id)))

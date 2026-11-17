@@ -20,8 +20,8 @@ use crate::bridge;
 
 pub use calls::{call_user, leave_call, start_call};
 pub use chats::{
-    history_loaded, jump_to_message, leave_chat, load_older, mark_chat_read, navigate, open_chat, recount_soon,
-    stop_older,
+    history_loaded, jump_to_message, leave_chat, load_back_to, load_older, mark_chat_read, navigate, open_chat,
+    recount_soon, stop_older,
 };
 pub use links::{message_link, open_url};
 pub use messages::{
@@ -31,7 +31,7 @@ pub use messages::{
 };
 pub use people::{expire_presence, message_user, open_profile, refresh_me, refresh_presence, set_status};
 pub use session::{apply_boot, install_update, sign_out, subscribe};
-pub use sidebar::{change_folders, hide_chat, is_starred, set_notify_level, toggle_star};
+pub use sidebar::{change_folders, hide_chat, is_starred, keep_in_sidebar, set_notify_level, toggle_star};
 pub use snapshot::add_channel;
 // Only the demo (`app::show_demo`) loads the followed threads from outside.
 #[cfg(feature = "demo")]

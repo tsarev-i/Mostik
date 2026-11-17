@@ -13,6 +13,10 @@
 # Release version: X.Y comes from `[workspace.package] version` in Cargo.toml, Z is one more
 # than the latest vX.Y.* tag (or the patch from Cargo.toml if that is higher). To start a new
 # minor or major line, bump the version in Cargo.toml.
+#
+# Actions are pinned by commit SHA, the version in a comment beside it: the bundle job holds the
+# update signing key, and a moved tag must not change the code that gets it. To update one, take
+# the commit of its new release tag (`git ls-remote https://github.com/<owner>/<repo> refs/tags/<tag>`).
 name: CI
 
 on:
@@ -44,7 +48,7 @@ jobs:
       version: ${{ steps.versions.outputs.version }}
       release: ${{ steps.versions.outputs.release }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The toolchain is the declared MSRV, and the wasm-bindgen CLI must match the crate exactly.
       - name: Read versions
@@ -77,22 +81,22 @@ jobs:
     needs: version
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libasound2-dev
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
           toolchain: ${{ needs.version.outputs.rust }}
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: wasm-bindgen@${{ needs.version.outputs.wasm-bindgen }}
 
@@ -136,7 +140,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The AppImage bundles the tray library found here: Ayatana, the one current distributions ship.
       # ALSA plays the notification sounds; the AppImage uses the system's libasound.
@@ -147,14 +151,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev patchelf
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-15
         with:
           toolchain: ${{ needs.version.outputs.rust }}
           targets: wasm32-unknown-unknown${{ matrix.rust-targets && format(',{0}', matrix.rust-targets) || '' }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
         with:
           tool: wasm-bindgen@${{ needs.version.outputs.wasm-bindgen }},tauri-cli@${{ env.TAURI_CLI_VERSION }}
 
@@ -203,7 +207,7 @@ jobs:
           done
           ls -l dist
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mostik-${{ needs.version.outputs.version }}-${{ matrix.platform }}
           path: dist/*
@@ -221,7 +225,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: mostik-*
           path: dist

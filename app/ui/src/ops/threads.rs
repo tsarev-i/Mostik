@@ -183,7 +183,7 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
             read_now = t.unread > 0 || m.seq_no > 0;
             t.unread = 0;
         } else {
-            t.unread += 1;
+            t.unread = t.unread.saturating_add(1);
         }
         list.sort_by_key(|t| std::cmp::Reverse(t.last_ts));
     });

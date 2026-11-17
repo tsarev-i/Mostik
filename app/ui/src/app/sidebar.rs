@@ -264,6 +264,7 @@ fn FoundElsewhere(found: Memo<(Vec<Chat>, Vec<User>)>) -> impl IntoView {
                     let id = chat.id.clone();
                     c.snap.update(|s| ops::add_channel(s, chat));
                     c.sb_query.set(String::new());
+                    ops::keep_in_sidebar(c, id.clone());
                     ops::open_chat(c, id);
                 }
                 Err(e) => ops::failed(c, tr().err_join, e),
@@ -436,6 +437,7 @@ fn SidebarSection(section: Section) -> impl IntoView {
                         // The filter never hides starred chats and the chat with yourself: they are always on top.
                         section_id == "starred"
                             || current.as_ref() == Some(&ch.id)
+                            || c.kept.with(|k| k.contains(&ch.id))
                             || shown_in_sidebar(
                                 ch,
                                 filter,
@@ -922,6 +924,9 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
         }
         if c.view.get_untracked().is_home_page() {
             c.view.set(ViewMode::Home);
+        }
+        if c.sb_query.with_untracked(|q| !q.trim().is_empty()) {
+            ops::keep_in_sidebar(c, id.clone());
         }
         ops::open_chat(c, id.clone());
     };

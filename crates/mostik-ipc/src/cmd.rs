@@ -191,6 +191,14 @@ pub struct SendFilesArgs {
 /// in its own words.
 pub const UPLOAD_STALLED: &str = "the upload stopped, check the connection";
 
+/// The largest file Telemost takes in a message: a larger one is refused with `HTTP 400 bad_file`
+/// after the whole of it has gone. (Its own client sends those through Yandex Disk.)
+pub const MAX_UPLOAD: u64 = 50 * 1024 * 1024;
+
+/// How [`SendFiles`] fails for a file over [`MAX_UPLOAD`], after `<file name>: `, before anything is
+/// uploaded. The UI shows it in its own words.
+pub const FILE_TOO_LARGE: &str = "the file is larger than 50 MB";
+
 /// One file of a sending going on: [`CancelUpload`] stops its upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

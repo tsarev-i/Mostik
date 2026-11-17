@@ -49,9 +49,24 @@ pub fn hide_chat(c: Ctx, id: ChatId) {
     let Some(last) = c.snap.with_untracked(|s| s.chat(&id).map(|ch| ch.last_ts)) else {
         return;
     };
+    if c.kept.with_untracked(|k| k.contains(&id)) {
+        c.kept.update(|k| {
+            k.remove(&id);
+        });
+    }
     c.hidden.update(|h| {
         h.insert(id, last);
     });
+}
+
+/// A chat opened from "Find a conversation" stays in the sidebar whatever its filter, until it is
+/// hidden with "×".
+pub fn keep_in_sidebar(c: Ctx, id: ChatId) {
+    if !c.kept.with_untracked(|k| k.contains(&id)) {
+        c.kept.update(|k| {
+            k.insert(id);
+        });
+    }
 }
 
 /// What a chat notifies about: everything, mentions only or nothing.

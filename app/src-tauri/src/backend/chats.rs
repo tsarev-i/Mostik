@@ -313,7 +313,7 @@ pub async fn create_channel(
         member_count: info
             .get("members_count")
             .and_then(Value::as_u64)
-            .map_or(all.len() as u32, |n| n as u32),
+            .map_or(convert::count32(all.len() as u64), convert::count32),
         last_ts: clock::now_mcs(),
         ..Chat::new(ChatId(id), ChatKind::Group { public: server_public })
     };
@@ -540,7 +540,7 @@ fn rpc_chat(v: &Value, me: &UserId) -> Option<Chat> {
             .and_then(Value::as_str)
             .filter(|d| !d.is_empty())
             .map(str::to_owned),
-        member_count: v.get("members_count").and_then(Value::as_u64).unwrap_or(0) as u32,
+        member_count: convert::count32(v.get("members_count").and_then(Value::as_u64).unwrap_or(0)),
         organizations: v
             .get("organization_ids")
             .and_then(Value::as_array)

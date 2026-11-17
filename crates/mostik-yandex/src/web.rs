@@ -39,6 +39,9 @@ pub enum WebError {
     Stalled,
     #[error("could not write the file: {0}")]
     Write(#[from] std::io::Error),
+    /// Not a file id that [`valid_file_id`] lets into an address.
+    #[error("bad file identifier")]
+    BadFileId,
 }
 
 impl WebError {
@@ -297,7 +300,7 @@ impl WebClient {
         size: Option<&str>,
         limit: u64,
     ) -> Result<(Vec<u8>, String), WebError> {
-        self.fetch(&file_url(file_id, size), limit, STALL_TIMEOUT).await
+        self.fetch(file_url(file_id, size)?, limit, STALL_TIMEOUT).await
     }
 
     /// Writes a file of the Messenger storage into `out` as it arrives. A file larger than `limit`
@@ -308,7 +311,7 @@ impl WebClient {
         out: &mut (impl AsyncWrite + Unpin),
         limit: u64,
     ) -> Result<u64, WebError> {
-        let mut download = self.open(&file_url(file_id, None), limit, STALL_TIMEOUT).await?;
+        let mut download = self.open(file_url(file_id, None)?, limit, STALL_TIMEOUT).await?;
         while let Some(chunk) = download.next().await? {
             out.write_all(&chunk).await?;
         }
@@ -317,7 +320,7 @@ impl WebClient {
     }
 
     /// [`WebClient::fetch_file`] from `url`, with the given wait for data.
-    async fn fetch(&self, url: &str, limit: u64, stall: Duration) -> Result<(Vec<u8>, String), WebError> {
+    async fn fetch(&self, url: reqwest::Url, limit: u64, stall: Duration) -> Result<(Vec<u8>, String), WebError> {
         let mut download = self.open(url, limit, stall).await?;
         let mut bytes = Vec::with_capacity(download.expected as usize);
         while let Some(chunk) = download.next().await? {
@@ -327,7 +330,7 @@ impl WebClient {
     }
 
     /// Requests a file; refuses it at once when its `Content-Length` is over `limit`.
-    async fn open(&self, url: &str, limit: u64, stall: Duration) -> Result<Download, WebError> {
+    async fn open(&self, url: reqwest::Url, limit: u64, stall: Duration) -> Result<Download, WebError> {
         let request = self
             .http
             .get(url)
@@ -560,14 +563,35 @@ pub fn percent_decode(s: &str) -> String {
     percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
 }
 
-/// Address of a file or preview of the Messenger storage: `file_shortterm/<Id2>[?size=…]`.
-fn file_url(file_id: &str, size: Option<&str>) -> String {
-    let mut url = format!("https://{FILES_HOST}/file_shortterm/{file_id}");
-    if let Some(size) = size {
-        url.push_str("?size=");
-        url.push_str(size);
+/// Whether `id` may be the `Id2` of a file of the Messenger storage in an address of the files
+/// host: path segments (`disk/…`), none of them empty, `.` or `..`, without whitespace, control
+/// characters, `\`, `?`, `#` or `%`. Every address of a file takes its id through here, so an id
+/// from a message (or from a script in the window) cannot reach another path of the host.
+pub fn valid_file_id(id: &str) -> bool {
+    let bad = |c: char| c.is_whitespace() || c.is_control() || matches!(c, '\\' | '?' | '#' | '%');
+    !id.is_empty()
+        && id.len() <= 512
+        && id
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != ".." && !seg.contains(bad))
+}
+
+/// Address of a file or preview of the Messenger storage: `file_shortterm/<Id2>[?size=…]`, the id
+/// checked by [`valid_file_id`] and put in segment by segment, the size as a query parameter.
+fn file_url(file_id: &str, size: Option<&str>) -> Result<reqwest::Url, WebError> {
+    if !valid_file_id(file_id) {
+        return Err(WebError::BadFileId);
     }
-    url
+    let mut url = reqwest::Url::parse(&format!("https://{FILES_HOST}/file_shortterm/"))
+        .map_err(|e| WebError::BadResponse(e.to_string()))?;
+    url.path_segments_mut()
+        .map_err(|()| WebError::BadFileId)?
+        .pop_if_empty()
+        .extend(file_id.split('/'));
+    if let Some(size) = size {
+        url.query_pairs_mut().append_pair("size", size);
+    }
+    Ok(url)
 }
 
 /// A file download in progress, read piece by piece so that a file over its limit is dropped
@@ -753,6 +777,38 @@ mod tests {
         parts
     }
 
+    #[test]
+    fn file_ids_stay_in_their_path() {
+        let url = |id, size| file_url(id, size).map(|u| u.to_string());
+        assert_eq!(
+            url("disk/x1", Some("orig")).unwrap(),
+            "https://files.messenger.yandex.ru/file_shortterm/disk/x1?size=orig"
+        );
+        for bad in [
+            "",
+            "../../x",
+            "disk/../x",
+            "disk/./x",
+            "disk//x",
+            "/x",
+            "x/",
+            "a?b",
+            "a#b",
+            "a b",
+            "a%2e",
+            "a\\b",
+            "a\nb",
+        ] {
+            assert!(!valid_file_id(bad), "{bad:?}");
+            assert!(matches!(file_url(bad, None), Err(WebError::BadFileId)), "{bad:?}");
+        }
+        // The size is a query parameter, whatever it holds.
+        assert_eq!(
+            url("x", Some("a&b=c")).unwrap(),
+            "https://files.messenger.yandex.ru/file_shortterm/x?size=a%26b%3Dc"
+        );
+    }
+
     #[tokio::test]
     async fn a_file_over_its_limit_is_refused() {
         let second = Duration::from_secs(1);
@@ -762,17 +818,17 @@ mod tests {
         ];
         let url = serve_once(declared, Duration::ZERO).await;
         assert!(matches!(
-            client().fetch(&url, 50, second).await,
+            client().fetch(url.parse().unwrap(), 50, second).await,
             Err(WebError::TooLarge(50))
         ));
         // Without a length the download stops once it passes the limit.
         let url = serve_once(chunked(2), Duration::ZERO).await;
         assert!(matches!(
-            client().fetch(&url, 50, second).await,
+            client().fetch(url.parse().unwrap(), 50, second).await,
             Err(WebError::TooLarge(50))
         ));
         let url = serve_once(chunked(2), Duration::ZERO).await;
-        let (bytes, kind) = client().fetch(&url, 80, second).await.unwrap();
+        let (bytes, kind) = client().fetch(url.parse().unwrap(), 80, second).await.unwrap();
         assert_eq!((bytes.len(), kind.as_str()), (80, "image/png"));
     }
 
@@ -781,9 +837,15 @@ mod tests {
         let short = Duration::from_millis(300);
         let head = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n12345".to_vec();
         let url = serve_once(vec![head], Duration::from_secs(10)).await;
-        assert!(matches!(client().fetch(&url, 100, short).await, Err(WebError::Stalled)));
+        assert!(matches!(
+            client().fetch(url.parse().unwrap(), 100, short).await,
+            Err(WebError::Stalled)
+        ));
         let url = serve_once(vec![], Duration::from_secs(10)).await;
-        assert!(matches!(client().fetch(&url, 100, short).await, Err(WebError::Stalled)));
+        assert!(matches!(
+            client().fetch(url.parse().unwrap(), 100, short).await,
+            Err(WebError::Stalled)
+        ));
     }
 
     #[test]

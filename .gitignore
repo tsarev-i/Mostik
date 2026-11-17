@@ -26,3 +26,4 @@ CLAUDE.local.md
 
 # Third-party UI screenshots: local reference only, never published
 /docs/design/reference
+.worktrees/

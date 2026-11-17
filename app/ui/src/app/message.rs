@@ -873,13 +873,17 @@ pub(super) fn Outbox(#[prop(optional)] in_thread: bool) -> impl IntoView {
 
 /// Why a sending failed, in the interface's language where the backend's words are known.
 fn failure_reason(why: &str) -> String {
-    match why
-        .strip_suffix(mostik_ipc::cmd::UPLOAD_STALLED)
-        .and_then(|w| w.strip_suffix(": "))
-    {
-        Some(name) => format!("{name}: {}", tr().upload_stalled),
-        None => why.to_owned(),
-    }
+    let known = [
+        (mostik_ipc::cmd::UPLOAD_STALLED, tr().upload_stalled),
+        (mostik_ipc::cmd::FILE_TOO_LARGE, tr().file_too_large),
+    ];
+    known
+        .into_iter()
+        .find_map(|(theirs, ours)| {
+            let name = why.strip_suffix(theirs)?.strip_suffix(": ")?;
+            Some(format!("{name}: {ours}"))
+        })
+        .unwrap_or_else(|| why.to_owned())
 }
 
 /// One [`ops::Outgoing`] message.

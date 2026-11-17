@@ -38,7 +38,7 @@ pub mod threads;
 pub(crate) use calls::open_call;
 pub(crate) use connection::{probing, write_probe};
 pub(crate) use files::open_external;
-pub use files::serve_file;
+pub use files::{serve_file, served_type};
 pub use presence::clear_meeting_status_later;
 
 /// Live event for the UI.

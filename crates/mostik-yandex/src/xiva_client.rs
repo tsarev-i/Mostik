@@ -87,7 +87,7 @@ impl Liveness {
     fn check(&self) {
         let interval = self.ping_interval_ms.load(Ordering::SeqCst);
         let silent = now_ms().saturating_sub(self.last_frame.load(Ordering::SeqCst));
-        if !self.closed.load(Ordering::SeqCst) && silent > interval + interval / 2 {
+        if !self.closed.load(Ordering::SeqCst) && silent > interval.saturating_add(interval / 2) {
             eprintln!(
                 "xiva: nothing received for {} s, the connection is dropped",
                 silent / 1000
@@ -230,7 +230,8 @@ impl XivaClient {
                             if let Some(sec) = v.get("server-interval-sec").and_then(Value::as_u64)
                                 && sec > 0
                             {
-                                live.ping_interval_ms.store(sec * 1000, Ordering::SeqCst);
+                                // An hour at most: a larger one would leave a dead connection unnoticed.
+                                live.ping_interval_ms.store(sec.min(3600) * 1000, Ordering::SeqCst);
                             }
                             if let Some(id) = v.get("subscription-id").and_then(Value::as_str)
                                 && let Ok(mut s) = sub.lock()
