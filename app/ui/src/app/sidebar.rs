@@ -264,7 +264,7 @@ fn FoundElsewhere(found: Memo<(Vec<Chat>, Vec<User>)>) -> impl IntoView {
                     let id = chat.id.clone();
                     c.snap.update(|s| ops::add_channel(s, chat));
                     c.sb_query.set(String::new());
-                    ops::keep_in_sidebar(c, id.clone());
+                    keep_found(c, &id);
                     ops::open_chat(c, id);
                 }
                 Err(e) => ops::failed(c, tr().err_join, e),
@@ -437,13 +437,13 @@ fn SidebarSection(section: Section) -> impl IntoView {
                         // The filter never hides starred chats and the chat with yourself: they are always on top.
                         section_id == "starred"
                             || current.as_ref() == Some(&ch.id)
-                            || c.kept.with(|k| k.contains(&ch.id))
                             || shown_in_sidebar(
                                 ch,
                                 filter,
                                 hide_muted,
                                 now,
                                 c.drafts.with(|d| super::drafts::chat_has_text(d, &ch.id)),
+                                c.kept.with(|k| k.contains(&ch.id)),
                             )
                     })
                     .filter(|ch| in_current_org(c, ch))
@@ -787,23 +787,60 @@ fn chat_in_pane(c: Ctx) -> Option<ChatId> {
     (!c.view.get().is_home_page()).then(|| c.current.get())
 }
 
+/// A chat opened from "Find a conversation" stays in the sidebar ([`ops::keep_in_sidebar`]) when
+/// the filter would hide it now and keeping it brings it back: "Active" or "Hide muted" hides it.
+fn keep_found(c: Ctx, id: &ChatId) {
+    let (filter, hide_muted) = c.settings.with_untracked(|s| (s.sidebar_filter, s.hide_muted));
+    let has_draft = c.drafts.with_untracked(|d| super::drafts::chat_has_text(d, id));
+    let now = ops::now_mcs();
+    let keep = c.snap.with_untracked(|s| {
+        s.chat(id)
+            .is_some_and(|ch| keeps_found(ch, filter, hide_muted, now, has_draft))
+    });
+    if keep {
+        ops::keep_in_sidebar(c, id.clone());
+    }
+}
+
+/// Whether keeping a found chat changes what the sidebar shows: the filter hides it, and lets a
+/// kept one pass. Judged as it is once read, as opening it makes it: unread messages or a mention
+/// that show it now go then.
+fn keeps_found(ch: &Chat, filter: SidebarFilter, hide_muted: bool, now: Timestamp, has_draft: bool) -> bool {
+    let read = Chat {
+        unread: 0,
+        mentions: 0,
+        ..ch.clone()
+    };
+    !shown_in_sidebar(&read, filter, hide_muted, now, has_draft, false)
+        && shown_in_sidebar(&read, filter, hide_muted, now, has_draft, true)
+}
+
 /// A conversation without new messages for longer than this is inactive ("Active only" in Slack).
 const INACTIVE_AFTER_MCS: Timestamp = 30 * 24 * 3600 * 1_000_000;
 
 /// Whether to show a conversation in the sidebar with the selected filter. Mentions are always visible,
 /// as are conversations with a draft; a last message time of 0 means "unknown" and the conversation is not hidden.
-fn shown_in_sidebar(ch: &Chat, filter: SidebarFilter, hide_muted: bool, now: Timestamp, has_draft: bool) -> bool {
+/// A conversation `kept` from "Find a conversation" passes "Active" and "Hide muted", not "Unreads"
+/// and "Mentions": those show what needs reading.
+fn shown_in_sidebar(
+    ch: &Chat,
+    filter: SidebarFilter,
+    hide_muted: bool,
+    now: Timestamp,
+    has_draft: bool,
+    kept: bool,
+) -> bool {
     if ch.mentions > 0 || ch.kind == ChatKind::Notes {
         return true;
     }
-    if hide_muted && ch.muted {
+    if hide_muted && ch.muted && !kept {
         return false;
     }
     let unread = ch.unread > 0 && !ch.muted;
     match filter {
         SidebarFilter::All => true,
         SidebarFilter::Active => {
-            unread || has_draft || ch.last_ts == 0 || now.saturating_sub(ch.last_ts) <= INACTIVE_AFTER_MCS
+            kept || unread || has_draft || ch.last_ts == 0 || now.saturating_sub(ch.last_ts) <= INACTIVE_AFTER_MCS
         }
         SidebarFilter::Unreads => unread,
         SidebarFilter::Mentions => false,
@@ -930,7 +967,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
             c.view.set(ViewMode::Home);
         }
         if c.sb_query.with_untracked(|q| !q.trim().is_empty()) {
-            ops::keep_in_sidebar(c, id.clone());
+            keep_found(c, &id);
         }
         ops::open_chat(c, id.clone());
     };
@@ -1044,5 +1081,38 @@ mod tests {
         );
         assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::All)), Some((3, false)));
         assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::Nothing)), None);
+    }
+
+    #[test]
+    fn a_found_chat_passes_only_active_and_hide_muted() {
+        let now = 100 * INACTIVE_AFTER_MCS;
+        let old = || Chat {
+            last_ts: 1,
+            ..Chat::new(ChatId("c".into()), ChatKind::Group { public: true })
+        };
+        let muted = || Chat { muted: true, ..old() };
+        let shown = |ch: &Chat, filter, hide_muted, kept| shown_in_sidebar(ch, filter, hide_muted, now, false, kept);
+        // "Active" and "Hide muted" hide an inactive or muted chat, unless it was kept.
+        assert!(!shown(&old(), SidebarFilter::Active, false, false));
+        assert!(shown(&old(), SidebarFilter::Active, false, true));
+        assert!(!shown(&muted(), SidebarFilter::All, true, false));
+        assert!(shown(&muted(), SidebarFilter::All, true, true));
+        // "Unreads" and "Mentions" show what needs reading, kept or not.
+        for filter in [SidebarFilter::Unreads, SidebarFilter::Mentions] {
+            assert!(!shown(&old(), filter, false, true));
+            assert!(!shown(&muted(), filter, true, true));
+        }
+        // A found chat is kept only when keeping shows it.
+        let keeps = |ch: &Chat, filter, hide_muted| keeps_found(ch, filter, hide_muted, now, false);
+        assert!(keeps(&old(), SidebarFilter::Active, false));
+        assert!(keeps(&muted(), SidebarFilter::All, true));
+        // A mention or unread messages show it now, but opening it reads them.
+        assert!(keeps(&Chat { mentions: 1, ..muted() }, SidebarFilter::All, true));
+        assert!(keeps(&Chat { unread: 3, ..old() }, SidebarFilter::Active, false));
+        assert!(!keeps(&old(), SidebarFilter::All, false));
+        let fresh = Chat { last_ts: now, ..old() };
+        assert!(!keeps(&fresh, SidebarFilter::Active, false));
+        assert!(!keeps(&old(), SidebarFilter::Unreads, false));
+        assert!(!keeps(&old(), SidebarFilter::Mentions, false));
     }
 }
