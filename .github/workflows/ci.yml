@@ -194,17 +194,22 @@ jobs:
           cargo tauri build --ci ${{ matrix.build-args }} \
             --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":true}}'
 
-      # Without the version in the names (Mostik_amd64.AppImage): the README links to
-      # releases/latest/download/<name>, which then always gives the newest bundle.
+      # The platform in the names, the version not (Mostik_linux_amd64.AppImage): the README links to
+      # releases/latest/download/<name>, which then always gives the newest bundle. Tauri names the
+      # macOS update Mostik.app.tar.gz, without the architecture: it gets the one of the DMG.
       - name: Collect bundles
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           shopt -s nullglob
           mkdir -p dist
           for file in target/{,*/}release/bundle/*/*.{AppImage,exe,app.tar.gz}{,.sig} target/{,*/}release/bundle/*/*.dmg; do
             name=${file##*/}
-            cp "$file" "dist/${name/_${VERSION}_/_}"
+            rest=${name/_${VERSION}_/_}
+            rest=${rest#Mostik}
+            case $rest in .app.tar.gz*) rest=_aarch64$rest ;; esac
+            cp "$file" "dist/Mostik_${PLATFORM}${rest}"
           done
           ls -l dist
 
