@@ -151,9 +151,8 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
         (s.me.clone(), mentioned, parent_msg)
     });
     let mine = m.author == me;
-    let open = c.current.with_untracked(|cur| cur == &m.chat_id)
-        && c.thread.get_untracked() == Some(parent)
-        && in_sight();
+    let open =
+        c.current.with_untracked(|cur| cur == &m.chat_id) && c.thread.get_untracked() == Some(parent) && in_sight();
     let mut read_now = false;
     c.threads.update(|list| {
         let at = list

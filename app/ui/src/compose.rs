@@ -7,7 +7,7 @@ use leptos::html;
 use leptos::portal::Portal;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use mostik_core::Timestamp;
+use mostik_core::{ChatId, Timestamp};
 use wasm_bindgen::JsCast;
 
 use crate::app::{Ctx, place_caret, scoped_window_listener, selection, wrap_selection};
@@ -320,9 +320,14 @@ fn LinkDialog(field: Field, target: LinkTarget) -> impl IntoView {
 /// contents until the message goes. `thread` is the parent of the thread whose field takes them,
 /// `None` for the chat's own field. Returns whether there were any.
 fn attach(c: Ctx, data: Option<web_sys::DataTransfer>, thread: Option<Timestamp>) -> bool {
-    let files: Vec<web_sys::File> = data
+    let files: Vec<(String, web_sys::Blob)> = data
         .and_then(|d| d.files())
-        .map(|list| (0..list.length()).filter_map(|i| list.get(i)).collect())
+        .map(|list| {
+            (0..list.length())
+                .filter_map(|i| list.get(i))
+                .map(|f| (file_name(&f.name(), &f.type_()), f.into()))
+                .collect()
+        })
         .unwrap_or_default();
     if files.is_empty() {
         return false;
@@ -331,39 +336,78 @@ fn attach(c: Ctx, data: Option<web_sys::DataTransfer>, thread: Option<Timestamp>
         c.error.set(Some(tr().only_in_app_files.into()));
         return true;
     }
-    // A large file takes a while to read: it goes to the chat or thread it was pasted in, even if
-    // the user has moved on.
     let chat = c.current.get_untracked();
-    spawn_local(async move {
-        for f in files {
-            let name = file_name(&f.name(), &f.type_());
-            let kept = match wasm_bindgen_futures::JsFuture::from(f.array_buffer()).await {
-                Ok(data) => bridge::keep_file(&name, data.unchecked_ref()).await,
-                Err(e) => Err(format!("{name}: {e:?}")),
-            };
-            match kept {
-                Ok(file) => crate::ops::attach_files(c, chat.clone(), thread, vec![file]),
-                Err(e) => return c.error.set(Some(e)),
-            }
-        }
-    });
+    spawn_local(keep_all(c, chat, thread, files));
     true
+}
+
+/// Hands the `files` (name and contents) to the app and attaches them to the message in `chat`
+/// (in the thread of `thread`). A large file takes a while to read: it goes to the chat or thread
+/// it was pasted in, even if the user has moved on.
+async fn keep_all(c: Ctx, chat: ChatId, thread: Option<Timestamp>, files: Vec<(String, web_sys::Blob)>) {
+    for (name, blob) in files {
+        let kept = match wasm_bindgen_futures::JsFuture::from(blob.array_buffer()).await {
+            Ok(data) => bridge::keep_file(&name, data.unchecked_ref()).await,
+            Err(e) => Err(format!("{name}: {e:?}")),
+        };
+        match kept {
+            Ok(file) => crate::ops::attach_files(c, chat.clone(), thread, vec![file]),
+            Err(e) => return c.error.set(Some(e)),
+        }
+    }
 }
 
 /// Files pasted into a message are attached to it, unless they come with formatted text: a table
 /// copied from a spreadsheet or a document brings a picture of itself along, and then the text is
-/// what is meant. `thread` as in [`attach`]. Returns whether the files were taken.
+/// what is meant. `thread` as in [`attach`]. Returns whether the paste was taken.
 pub fn attach_pasted(c: Ctx, e: &ev::ClipboardEvent, thread: Option<Timestamp>) -> bool {
     let Some(data) = e.clipboard_data() else { return false };
     let has = |kind: &str| data.get_data(kind).is_ok_and(|t| !t.trim().is_empty());
     if has("text/plain") && has("text/html") {
         return false;
     }
-    let taken = attach(c, Some(data), thread);
-    if taken {
+    if attach(c, Some(data.clone()), thread) {
         e.prevent_default();
+        return true;
     }
-    taken
+    // Spaces and line breaks alone are pasted too.
+    let any = |kind: &str| data.get_data(kind).is_ok_and(|t| !t.is_empty());
+    if any("text/plain") || any("text/html") || any("text/uri-list") || !c.live {
+        return false;
+    }
+    // Nothing the field could paste: the WebKitGTK the AppImage carries gives a picture alone in
+    // the clipboard (a screenshot) to the paste event neither as a file nor as a type, but the
+    // Clipboard API, asked in the paste, reads it.
+    e.prevent_default();
+    let read = window().navigator().clipboard().read();
+    let chat = c.current.get_untracked();
+    spawn_local(async move {
+        let Ok(items) = wasm_bindgen_futures::JsFuture::from(read).await else {
+            return;
+        };
+        let mut files = Vec::new();
+        for item in js_sys::Array::from(&items).iter() {
+            let item: web_sys::ClipboardItem = item.unchecked_into();
+            let types: Vec<String> = item.types().iter().filter_map(|t| t.as_string()).collect();
+            let Some(kind) = picture_type(&types) else { continue };
+            if let Ok(blob) = wasm_bindgen_futures::JsFuture::from(item.get_type(kind)).await {
+                files.push((file_name("", kind), blob.unchecked_into()));
+            }
+        }
+        keep_all(c, chat, thread, files).await;
+    });
+    true
+}
+
+/// The type a clipboard item offering `types` is taken as a picture in: PNG if it is one of them,
+/// as the copy loses nothing, else the first picture type; `None` when it is no picture.
+fn picture_type(types: &[String]) -> Option<&str> {
+    let picture = |t: &&String| t.starts_with("image/");
+    types
+        .iter()
+        .find(|t| t.as_str() == "image/png")
+        .or_else(|| types.iter().find(picture))
+        .map(String::as_str)
 }
 
 /// Where files dropped onto the window go.
@@ -486,5 +530,13 @@ mod tests {
         assert_eq!(file_name("", "image/svg+xml"), "image.svg");
         assert_eq!(file_name("", "application/pdf"), "file.pdf");
         assert_eq!(file_name("", ""), "file");
+    }
+
+    #[test]
+    fn a_clipboard_picture_is_taken_as_png_first() {
+        let types = |list: &[&str]| list.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>();
+        assert_eq!(picture_type(&types(&["image/jpeg", "image/png"])), Some("image/png"));
+        assert_eq!(picture_type(&types(&["text/plain", "image/webp"])), Some("image/webp"));
+        assert_eq!(picture_type(&types(&["text/plain", "text/html"])), None);
     }
 }
