@@ -161,9 +161,11 @@ pub fn FieldArea(
                     field.paste_link(&e);
                 }
             }
+            // A field removed with the focus in it (the chat switched to "Files" or "Pinned") gets
+            // `blur` after its component, `on_blur` with it, is disposed (#61).
             on:blur=move |_| {
                 if let Some(blur) = on_blur {
-                    blur.run(());
+                    blur.try_run(());
                 }
             }
         ></div>
