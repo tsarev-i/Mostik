@@ -426,18 +426,58 @@ pub(super) fn PinsView() -> impl IntoView {
             ))
         })
     });
-    // A message not loaded yet is looked for back through the history. One that is not there
-    // (deleted: any member of a group can do that) shows as no pinned message. The tab is not set
-    // again: every `set` notifies, this view would be built anew and look again, for ever.
-    // A page that failed to load leaves the looking to "Retry" or to the connection coming back.
-    let gone = RwSignal::new(None::<(ChatId, Timestamp)>);
+    // A message the loaded history does not have is asked for alone: one record, the latest before
+    // one past its time. It shows here and does not go into the feed, so an old pinned message
+    // loads no history. One that is not there (deleted: any member of a group can do that) shows
+    // as no pinned message. The tab is not set again: every `set` notifies, this view would be
+    // built anew and ask again, for ever. A failed request leaves the asking to "Retry" or to the
+    // connection coming back.
+    let fetched = RwSignal::new(None::<(ChatId, Timestamp, Option<Message>)>);
     let failed = RwSignal::new(None::<(ChatId, Timestamp)>);
     let looking = StoredValue::new(None::<(ChatId, Timestamp)>);
     let retry = Trigger::new();
+    // Asked for again after a reconnection, and when a push changes it (an edit, its reactions or
+    // its thread, its deletion: see `older_changed`): one request each time.
+    // A change that comes while the message is being asked for may not be in the answer: then it
+    // is asked for once more when the answer comes.
+    let changed_meanwhile = StoredValue::new(false);
+    let ask_again = move || {
+        fetched.try_set(None);
+        retry.notify();
+    };
+    Effect::new(move |was_online: Option<bool>| {
+        let online = c.online.get();
+        if was_online == Some(false) && online {
+            ask_again();
+        }
+        online
+    });
+    Effect::new(move |_| {
+        let Some(pushed) = c.older_changed.get() else { return };
+        if looking.get_value().is_some_and(|k| k == pushed) {
+            changed_meanwhile.set_value(true);
+        } else if fetched.with_untracked(|f| f.as_ref().is_some_and(|(i, t, _)| (i, *t) == (&pushed.0, pushed.1))) {
+            ask_again();
+        }
+    });
+    let fetched_for = move |id: &ChatId, ts: Timestamp| {
+        fetched.with(|f| {
+            f.as_ref()
+                .filter(|(i, t, _)| i == id && *t == ts)
+                .map(|(_, _, m)| m.clone())
+        })
+    };
     Effect::new(move |_| {
         retry.track();
-        let Some((id, ts, None)) = data.get() else { return };
-        if !c.online.get() {
+        let Some((id, ts, None)) = data.get() else {
+            // Loaded with the history now (or no pin): the copy asked for alone is not used, and
+            // must not come back once the loaded one goes.
+            if fetched.with_untracked(Option::is_some) {
+                fetched.set(None);
+            }
+            return;
+        };
+        if !c.online.get() || fetched.with_untracked(|f| f.as_ref().is_some_and(|(i, t, _)| *i == id && *t == ts)) {
             return;
         }
         let key = Some((id.clone(), ts));
@@ -445,51 +485,55 @@ pub(super) fn PinsView() -> impl IntoView {
             return;
         }
         looking.set_value(key.clone());
+        changed_meanwhile.set_value(false);
         failed.set(None);
         spawn_local(async move {
-            // Leaving the tab or the chat stops the looking.
-            let go_on = {
-                let (id, key) = (id.clone(), key.clone());
-                move |c: Ctx| looking.try_get_value().flatten() == key && c.current.get_untracked() == id
-            };
-            let still = go_on.clone();
-            let found = ops::load_back_to(c, &id, ts, None, go_on).await;
-            if !still(c) {
+            let result = ops::pinned_message(c, &id, ts).await;
+            // The view is gone, or it asks for another message now.
+            if looking.try_get_value().flatten() != key {
                 return;
             }
-            // Done: a fresh latest page may take the message away again, and then it is looked for anew.
             looking.try_set_value(None);
-            match found {
-                Some(true) => {}
-                Some(false) => {
-                    gone.try_set(Some((id, ts)));
+            match result {
+                Ok(found) => {
+                    fetched.try_set(Some((id, ts, found)));
+                    if changed_meanwhile.try_get_value() == Some(true) {
+                        ask_again();
+                    }
                 }
-                None => {
+                Err(_) => {
                     failed.try_set(Some((id, ts)));
                 }
             }
         });
     });
+    // `detached`: a message asked for alone is only shown; "View in chat" loads it with its history.
+    let card = move |id: ChatId, ts: Timestamp, m: Message, detached: bool| {
+        view! {
+            <div class="pin-card">
+                <MessageRow msg=m grouped=false detached=detached/>
+                <button class="link" on:click=move |_| { c.chat_tab.set(ChatTab::Messages); ops::view_pinned(c, id.clone(), ts); }>{tr().view_in_chat}</button>
+            </div>
+        }
+        .into_any()
+    };
+    let none = || view! { <div class="empty-state"><h3>{tr().no_pins}</h3></div> }.into_any();
     view! {
         <div class="messages pins-list">
             {move || match data.get() {
-                None => view! { <div class="empty-state"><h3>{tr().no_pins}</h3></div> }.into_any(),
-                Some((id, ts, None)) if gone.with(|g| g.as_ref().is_some_and(|g| *g == (id.clone(), ts))) => {
-                    view! { <div class="empty-state"><h3>{tr().no_pins}</h3></div> }.into_any()
-                }
-                Some((id, ts, None)) if failed.with(|f| f.as_ref().is_some_and(|f| *f == (id.clone(), ts))) => view! {
-                    <div class="empty-state">
-                        <h3>{tr().err_older}</h3>
-                        <button class="btn small" on:click=move |_| retry.notify()>{tr().retry}</button>
-                    </div>
-                }.into_any(),
-                Some((id, ts, Some(m))) => view! {
-                    <div class="pin-card">
-                        <MessageRow msg=m grouped=false/>
-                        <button class="link" on:click=move |_| { c.chat_tab.set(ChatTab::Messages); ops::jump_to_message(c, id.clone(), ts, None); }>{tr().view_in_chat}</button>
-                    </div>
-                }.into_any(),
-                Some((_, _, None)) => view! { <div class="loading-older"><div class="spinner small"></div></div> }.into_any(),
+                None => none(),
+                Some((id, ts, Some(m))) => card(id, ts, m, false),
+                Some((id, ts, None)) => match fetched_for(&id, ts) {
+                    Some(Some(m)) => card(id, ts, m, true),
+                    Some(None) => none(),
+                    None if failed.with(|f| f.as_ref().is_some_and(|f| *f == (id.clone(), ts))) => view! {
+                        <div class="empty-state">
+                            <h3>{tr().err_older}</h3>
+                            <button class="btn small" on:click=move |_| retry.notify()>{tr().retry}</button>
+                        </div>
+                    }.into_any(),
+                    None => view! { <div class="loading-older"><div class="spinner small"></div></div> }.into_any(),
+                },
             }}
         </div>
     }

@@ -37,12 +37,20 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             ts,
             reactions,
             users,
-        } => c.snap.update(|s| {
-            learn_users(s, users);
-            if let Some(m) = s.messages.iter_mut().find(|m| m.chat_id == chat_id && m.ts == ts) {
-                m.reactions = reactions;
+        } => {
+            let mut loaded = false;
+            c.snap.update(|s| {
+                learn_users(s, users);
+                if let Some(m) = s.messages.iter_mut().find(|m| m.chat_id == chat_id && m.ts == ts) {
+                    m.reactions = reactions;
+                    loaded = true;
+                }
+            });
+            // A message outside the feed: a copy asked for alone (a pinned one) is asked for again.
+            if !loaded {
+                c.older_changed.set(Some((chat_id, ts)));
             }
-        }),
+        }
         LiveEvent::ThreadSeen { chat_id, parent } => c.threads.update(|list| {
             if let Some(t) = list
                 .iter_mut()

@@ -42,6 +42,9 @@ pub struct HistoryArgs {
     pub before: Option<Timestamp>,
     /// The parent of the thread, for a thread page.
     pub thread: Option<Timestamp>,
+    /// How many records at most; `None` for the page size the app picks. One message is looked
+    /// for with `before` one past its time and a limit of 1.
+    pub limit: Option<u32>,
 }
 
 /// Just a chat: for `mark_read`, `typing` and the other commands about a whole chat.
@@ -656,6 +659,7 @@ mod tests {
                 chat_id: ChatId("c1".into()),
                 before: None,
                 thread: None,
+                limit: None,
             }
         );
         let edit: EditArgs =
@@ -733,8 +737,9 @@ mod tests {
                 chat_id: chat(),
                 before: Some(10),
                 thread: None,
+                limit: Some(1),
             },
-            json!({ "chatId": "c1", "before": 10, "thread": null }),
+            json!({ "chatId": "c1", "before": 10, "thread": null, "limit": 1 }),
         );
         pinned(ChatArgs { chat_id: chat() }, json!({ "chatId": "c1" }));
         pinned(

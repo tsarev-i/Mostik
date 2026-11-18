@@ -118,15 +118,18 @@ pub async fn install_update() -> Result<(), String> {
     call::<cmd::InstallUpdate>(()).await
 }
 
+/// A history page; `limit` makes it shorter than the app's page (see [`cmd::HistoryArgs`]).
 pub async fn history(
     chat_id: &str,
     before: Option<Timestamp>,
     thread: Option<Timestamp>,
+    limit: Option<u32>,
 ) -> Result<HistoryPage, String> {
     let args = cmd::HistoryArgs {
         chat_id: ChatId(chat_id.into()),
         before,
         thread,
+        limit,
     };
     call::<cmd::History>(args).await
 }

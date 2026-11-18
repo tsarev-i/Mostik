@@ -301,7 +301,7 @@ pub fn link_at(text: &str, start: usize, end: usize) -> Option<LinkSpan> {
         let caption = at + open.len()..at + open.len() + inner.len();
         let range = at..caption.end + close.len();
         if kind == Mark::Link && caption.start <= start && end <= caption.end {
-            let address = close.strip_prefix("](")?.strip_suffix(')')?.to_owned();
+            let address = closing_address(close)?.to_owned();
             return Some(LinkSpan {
                 range,
                 caption,
@@ -311,6 +311,17 @@ pub fn link_at(text: &str, start: usize, end: usize) -> Option<LinkSpan> {
         at = range.end;
     }
     None
+}
+
+/// The address of a link between its `(` and `)`, without the title after it.
+fn link_target(between: &str) -> &str {
+    between.split(' ').next().unwrap_or_default()
+}
+
+/// The address of a `[caption](address)` link from its closing part, `](address)` or
+/// `](address "title")`, as [`edit_spans`] gives it.
+pub fn closing_address(close: &str) -> Option<&str> {
+    Some(link_target(close.strip_prefix("](")?.strip_suffix(')')?))
 }
 
 fn span_len(span: &EditSpan) -> usize {
@@ -543,7 +554,8 @@ impl<'a> Scan<'a> {
         None
     }
 
-    /// `[caption](address)`: a caption of one line without `[`, a safe address ([`safe_url`]).
+    /// `[caption](address)` or `[caption](address "title")`: a caption of one line without `[`, a
+    /// safe address ([`safe_url`]).
     fn link_at(&mut self, i: usize) -> Option<Found> {
         let text = self.text;
         if !text[i..].starts_with('[') {
@@ -557,8 +569,18 @@ impl<'a> Scan<'a> {
         }
         let address = mid + 2;
         let end = self.link_end.at(text, address)?;
-        if !safe_scheme(&text[address..end]) || before(self.hidden.at(text, address), end) {
+        if !safe_scheme(&text[address..end]) {
             return None;
+        }
+        // An address may be followed by a title, `(address "title")`, as the official client
+        // writes a link pasted as it is: one space, then the title in quotes up to the `)`.
+        if let Some(space) = self.hidden.at(text, address).filter(|&at| at < end) {
+            let title = &text[space..end];
+            let quoted =
+                title.len() >= 3 && title.starts_with(' ') && title[1..].starts_with('"') && title.ends_with('"');
+            if space == address || !quoted || before(self.line.at(text, space), end) {
+                return None;
+            }
         }
         Some(Found {
             kind: Mark::Link,
@@ -641,7 +663,7 @@ pub fn parse_inline(text: &str, who: &Mentionable) -> Vec<Inline> {
             out.push(match found.kind {
                 Mark::Link => Inline::Link {
                     text: inner,
-                    url: text[i + found.open + found.inner + 2..i + found.len() - 1].to_owned(),
+                    url: link_target(&text[i + found.open + found.inner + 2..i + found.len() - 1]).to_owned(),
                 },
                 Mark::Url => Inline::Link {
                     text: inner.clone(),
@@ -1294,6 +1316,42 @@ mod tests {
             ]
         );
         assert_eq!(plain("[docs](https://e.org)", &NONE), "docs");
+    }
+
+    #[test]
+    fn a_link_may_have_a_title() {
+        let text = "Ингрес [host.ru](https://host.ru:443 \"mssngr:raw-link:v1:null\"), порт 443";
+        assert_eq!(
+            parse_inline(text, &NONE),
+            vec![
+                t("Ингрес "),
+                Link {
+                    text: "host.ru".into(),
+                    url: "https://host.ru:443".into()
+                },
+                t(", порт 443"),
+            ]
+        );
+        let start = text.find("host").unwrap();
+        let link = link_at(text, start, start).unwrap();
+        assert_eq!(link.address, "https://host.ru:443");
+        assert_eq!(
+            &text[link.range],
+            "[host.ru](https://host.ru:443 \"mssngr:raw-link:v1:null\")"
+        );
+        // Only one space and a title in quotes: anything else after the address is no link with a
+        // caption (a bare address inside it still is one).
+        for bad in [
+            "[a](https://x.ru  \"t\")",
+            "[a](https://x.ru t)",
+            "[a](https://x.ru \"t)",
+            "[a](https://x.ru \"t\nu\")",
+            "[a]( \"t\")",
+            "[a](javascript:x \"t\")",
+        ] {
+            let captioned = |i: &Inline| matches!(i, Link { text, .. } if text == "a");
+            assert!(!parse_inline(bad, &NONE).iter().any(captioned), "{bad:?}");
+        }
     }
 
     #[test]

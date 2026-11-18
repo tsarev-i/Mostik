@@ -12,7 +12,7 @@ use std::time::Duration;
 use mostik_ipc::cmd::{self, Args, AutoUpdateArgs, Out};
 use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_updater::{Update, UpdaterExt};
+use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 
 /// Event with the new [`UpdateStatus`].
 pub const UPDATE_EVENT: &str = "mostik://update";
@@ -107,13 +107,49 @@ pub fn start(app: &AppHandle) {
     });
 }
 
+fn updater(app: &AppHandle) -> Result<Updater, String> {
+    let builder = app.updater_builder();
+    #[cfg(target_os = "linux")]
+    let builder = builder.target(linux_target());
+    builder.build().map_err(|e| e.to_string())
+}
+
+/// The latest.json key of the AppImage that starts here. One AppImage cannot serve every Linux
+/// (#60): the one built on Ubuntu 24.04 needs glibc 2.39, the one built on 22.04 crashes on COLRv1
+/// emoji under FreeType 2.13+ (#57). So the choice is made by the glibc of this system, not by the
+/// AppImage running now: a system updated to a newer glibc moves to the newer build with the
+/// next release.
+///
+/// Mostik 0.5.1 and older read `linux-x86_64-appimage`, then `linux-x86_64`: these keys stay for
+/// them only, and the release workflow points `linux-x86_64` to the 22.04 build.
+#[cfg(target_os = "linux")]
+fn linux_target() -> &'static str {
+    if glibc_at_least(2, 39) {
+        "linux-x86_64-new"
+    } else {
+        "linux-x86_64-legacy"
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn glibc_at_least(major: u32, minor: u32) -> bool {
+    // SAFETY: returns a pointer to a static NUL-terminated string such as "2.39".
+    let version = unsafe { std::ffi::CStr::from_ptr(libc::gnu_get_libc_version()) };
+    let mut parts = version.to_str().unwrap_or_default().split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(have_major)), Some(Ok(have_minor))) => (have_major, have_minor) >= (major, minor),
+        // Unknown: the 22.04 build starts on any glibc it may be.
+        _ => false,
+    }
+}
+
 async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
     if matches!(status(app), UpdateStatus::Installing { .. } | UpdateStatus::Unsupported) {
         return Ok(status(app));
     }
     // A release can go out before its macOS bundle (no runner for it yet): until the bundle is
     // added, latest.json has no entry for this platform, which means no update, not an error.
-    let checked = tokio::time::timeout(CHECK_TIMEOUT, app.updater().map_err(|e| e.to_string())?.check())
+    let checked = tokio::time::timeout(CHECK_TIMEOUT, updater(app)?.check())
         .await
         .map_err(|_| {
             crate::backend::text(

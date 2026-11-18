@@ -12,10 +12,8 @@ use super::threads::track_thread;
 
 /// Inserts or replaces a message; keeps the thread and unread counters up to date.
 pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
-    let current = c.current.get_untracked();
     let open_thread = c.thread.get_untracked();
-    let viewing =
-        current == m.chat_id && document_visible() && c.hold_unread.with_untracked(|h| h.as_ref() != Some(&m.chat_id));
+    let viewing = reading(c, &m.chat_id);
     let start = loaded_from(&m);
     let mut shown = true;
     let mut added = false;
@@ -59,6 +57,15 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
         added = add_new(s, &m, viewing, start);
         shown = added;
     });
+    // A change to a message outside the feed: the message itself, or the thread of a parent that
+    // is not loaded. A copy asked for alone (a pinned one) is asked for again.
+    let outside = match m.thread_parent {
+        None => (!shown).then_some(m.ts),
+        Some(parent) => (!is_loaded(c, &m.chat_id, parent)).then_some(parent),
+    };
+    if let Some(ts) = outside {
+        c.older_changed.set(Some((m.chat_id.clone(), ts)));
+    }
     if !shown {
         return;
     }
@@ -73,6 +80,12 @@ pub fn upsert(c: Ctx, m: Message, author: Option<User>) {
     if c.live && read_on_open && reading(c, &m.chat_id) && (m.thread_parent.is_none() || viewing_reply) {
         mark_read(c, m.chat_id);
     }
+}
+
+/// Whether message `ts` of chat `chat` is among the loaded ones.
+fn is_loaded(c: Ctx, chat: &ChatId, ts: Timestamp) -> bool {
+    c.snap
+        .with_untracked(|s| s.messages.iter().any(|m| &m.chat_id == chat && m.ts == ts))
 }
 
 /// Adds message `m`, not loaded so far, and keeps the counters: an unread message from someone
@@ -126,16 +139,23 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
 
 /// Whether chat `id` is in front of the user, so what comes in it is read: it is open and not
 /// covered by a page of the Home view, the user has not marked it unread while in it, and the
-/// window is not hidden.
+/// window is in sight ([`in_sight`]).
 pub(super) fn reading(c: Ctx, id: &ChatId) -> bool {
     c.current.with_untracked(|cur| cur == id)
         && !c.view.get_untracked().is_home_page()
         && c.hold_unread.with_untracked(|h| h.as_ref() != Some(id))
-        && document_visible()
+        && in_sight()
 }
 
 pub(super) fn document_visible() -> bool {
     !document().hidden()
+}
+
+/// Whether the window is in front of the user: shown and focused. A window under another one is
+/// not hidden, yet what comes into it notifies (see `backend::notify`) and so stays unread, as in
+/// Slack, until the window gets the focus back.
+pub(super) fn in_sight() -> bool {
+    document_visible() && document().has_focus().unwrap_or(true)
 }
 
 /// Chats in the sections ordered by recency, as in Telemost.
@@ -193,6 +213,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
         return;
     }
     let mut parent = thread_parent;
+    let mut was_loaded = false;
     // Its thread's reply field, its editor and replies to it have nothing to go to now.
     crate::app::drafts::forget_message(c, chat, ts);
     c.snap.update(|s| {
@@ -201,6 +222,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
             .iter()
             .position(|m| &m.chat_id == chat && m.ts == ts)
             .map(|pos| s.messages.remove(pos));
+        was_loaded = removed.is_some();
         parent = parent.or_else(|| removed.as_ref().and_then(|m| m.thread_parent));
         match parent {
             Some(parent) => {
@@ -221,6 +243,14 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                 .retain(|m| !(&m.chat_id == chat && m.thread_parent == Some(ts))),
         }
     });
+    // Outside the feed, as in [`upsert`]: the message, or the parent whose thread lost a reply.
+    let outside = match parent {
+        None => (!was_loaded).then_some(ts),
+        Some(parent) => (!is_loaded(c, chat, parent)).then_some(parent),
+    };
+    if let Some(ts) = outside {
+        c.older_changed.set(Some((chat.clone(), ts)));
+    }
     c.threads.update(|list| match parent {
         Some(parent) => {
             if let Some(i) = list

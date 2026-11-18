@@ -11,7 +11,7 @@ use crate::bridge::LiveEvent;
 use crate::i18n::tr;
 
 use super::chats::load_latest;
-use super::snapshot::document_visible;
+use super::snapshot::in_sight;
 use super::{failed, learn_users};
 
 pub fn open_thread(c: Ctx, parent: Timestamp) {
@@ -27,7 +27,7 @@ pub fn open_thread(c: Ctx, parent: Timestamp) {
 /// Loads the replies of the open thread of message `parent` in chat `id` and marks it read.
 pub(super) fn load_thread(c: Ctx, id: ChatId, parent: Timestamp) {
     spawn_local(async move {
-        match bridge::history(&id.0, None, Some(parent)).await {
+        match bridge::history(&id.0, None, Some(parent), None).await {
             Ok(page) => {
                 let last = page.messages.iter().max_by_key(|m| m.ts).map(|m| (m.ts, m.seq_no));
                 // A thread that fits in one page gives the exact reply count, without the
@@ -151,9 +151,8 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
         (s.me.clone(), mentioned, parent_msg)
     });
     let mine = m.author == me;
-    let open = c.current.with_untracked(|cur| cur == &m.chat_id)
-        && c.thread.get_untracked() == Some(parent)
-        && document_visible();
+    let open =
+        c.current.with_untracked(|cur| cur == &m.chat_id) && c.thread.get_untracked() == Some(parent) && in_sight();
     let mut read_now = false;
     c.threads.update(|list| {
         let at = list

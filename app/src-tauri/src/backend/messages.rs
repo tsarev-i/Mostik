@@ -41,14 +41,17 @@ pub async fn history(
         chat_id: ChatId(chat_id),
         before,
         thread,
+        limit,
     } = args;
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    let limit = match (thread, before) {
+    let page = match (thread, before) {
         (Some(_), _) => THREAD_PAGE,
         (None, None) => FIRST_PAGE,
         (None, Some(_)) => OLDER_PAGE,
     };
+    // A smaller page when asked, never a larger one.
+    let limit = limit.map_or(page, |l| l.clamp(1, page));
     let started = std::time::Instant::now();
     let (live, body) = history_page(&state, live, &target, limit, before).await?;
     let raw = body
