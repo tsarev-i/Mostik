@@ -3,6 +3,7 @@
 * Настройки открываются по Ctrl+, (⌘, на macOS).
 * Обновить Мостик можно с экрана входа. ([#47](https://github.com/tsarev-i/Mostik/issues/47))
 * Для своих сообщений в группе видно, сколько участников их прочитали и кто. ([#49](https://github.com/tsarev-i/Mostik/issues/49))
+* Добавлена проверка орфографии в сообщениях. ([#50](https://github.com/tsarev-i/Mostik/issues/50))
 
 ### Changed
 * На macOS ⌘W скрывает окно, Мостик остаётся в Dock.

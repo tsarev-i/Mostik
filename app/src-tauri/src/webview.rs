@@ -67,6 +67,45 @@ pub fn forget_site_data<R: Runtime>(window: &WebviewWindow<R>, what: SiteData) {
     }
 }
 
+/// Turns spell checking of the window's text fields on or off (#50). Only WebKitGTK needs it: it
+/// checks nothing until its web context is given languages. They are Russian and English, the
+/// languages people write in Telemost, and the system's; dictionaries come from the system
+/// (enchant, hunspell), and a language without one is skipped. Elsewhere the fields' `spellcheck`
+/// attribute, which the UI sets from the same preference, is enough.
+pub fn spell_check<R: Runtime>(window: &WebviewWindow<R>, enabled: bool) {
+    #[cfg(target_os = "linux")]
+    {
+        let languages = spelling_languages(&system_locale());
+        if let Err(e) = window.with_webview(move |pw| imp::spell_check(&pw, enabled, &languages)) {
+            eprintln!("could not set up spell checking: {e}");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (window, enabled);
+}
+
+/// The locale of the user's messages: `LC_ALL`, `LC_MESSAGES` or `LANG`, as gettext reads them.
+#[cfg(target_os = "linux")]
+fn system_locale() -> String {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .find(|v| !v.is_empty())
+        .unwrap_or_default()
+}
+
+/// Enchant language codes: Russian, English and the system's (`de_DE.UTF-8` gives `de_DE`), each once.
+#[cfg(any(target_os = "linux", test))]
+fn spelling_languages(locale: &str) -> Vec<String> {
+    let system = locale.split(['.', '@']).next().unwrap_or_default();
+    let mut languages = vec!["ru_RU".to_owned(), "en_US".to_owned()];
+    let plain = |l: &str| l.len() >= 2 && l.chars().all(|c| c.is_ascii_alphabetic() || c == '_');
+    if plain(system) && !matches!(system, "C" | "POSIX") && !languages.iter().any(|l| l == system) {
+        languages.push(system.to_owned());
+    }
+    languages
+}
+
 /// Separators to remove from a menu whose items are separators (`true`) or not: those at either
 /// end and all but the first of a run. Indices from the last, so removing them in that order
 /// keeps the rest in place.
@@ -142,6 +181,19 @@ mod imp {
             // `true` means do not show the menu.
             menu.n_items() == 0
         });
+    }
+
+    pub fn spell_check(pw: &PlatformWebview, enabled: bool, languages: &[String]) {
+        use webkit2gtk::WebContextExt;
+
+        let Some(context) = WebViewExt::context(&pw.inner()) else {
+            return;
+        };
+        if enabled {
+            let languages: Vec<&str> = languages.iter().map(String::as_str).collect();
+            context.set_spell_checking_languages(&languages);
+        }
+        context.set_spell_checking_enabled(enabled);
     }
 
     pub fn forget_site_data(pw: &PlatformWebview, what: super::SiteData) {
@@ -325,6 +377,16 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spelling_is_checked_in_russian_english_and_the_system_language() {
+        assert_eq!(spelling_languages("en_US.UTF-8"), ["ru_RU", "en_US"]);
+        assert_eq!(spelling_languages("ru_RU.UTF-8"), ["ru_RU", "en_US"]);
+        assert_eq!(spelling_languages("de_DE.UTF-8"), ["ru_RU", "en_US", "de_DE"]);
+        assert_eq!(spelling_languages("sr_RS@latin"), ["ru_RU", "en_US", "sr_RS"]);
+        assert_eq!(spelling_languages("C.UTF-8"), ["ru_RU", "en_US"]);
+        assert_eq!(spelling_languages(""), ["ru_RU", "en_US"]);
+    }
 
     #[test]
     fn only_the_app_itself_is_the_app() {

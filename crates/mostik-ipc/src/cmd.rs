@@ -349,6 +349,8 @@ pub struct PrefsArgs {
     pub sound: String,
     /// The tray icon on Linux and Windows; macOS always shows the white one as a template.
     pub tray_icon: TrayIcon,
+    /// Check spelling in the message fields (#50): on Linux WebKitGTK does it only when asked.
+    pub spell_check: bool,
 }
 
 /// The tray icon from "Preferences".
@@ -613,10 +615,11 @@ mod tests {
             lang: "en".into(),
             sound: "bell".into(),
             tray_icon: TrayIcon::App,
+            spell_check: true,
         };
         pinned(
             args,
-            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell", "trayIcon": "app" }),
+            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell", "trayIcon": "app", "spellCheck": true }),
         );
         let args = ThreadReadArgs {
             chat_id: ChatId("c1".into()),

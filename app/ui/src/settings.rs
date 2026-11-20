@@ -86,6 +86,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// The tray icon on Linux and Windows.
     pub tray_icon: TrayIcon,
+    /// Underline misspelled words in the message fields (#50).
+    pub spell_check: bool,
     /// The user's own keys of shortcuts, by [`crate::keys::Action::id`]; an action without an
     /// entry has its standard keys.
     pub shortcuts: BTreeMap<String, String>,
@@ -157,6 +159,7 @@ impl Default for Settings {
             hide_muted: false,
             auto_update: true,
             tray_icon: TrayIcon::default(),
+            spell_check: true,
             shortcuts: BTreeMap::new(),
         }
     }

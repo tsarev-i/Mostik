@@ -255,6 +255,7 @@ pub async fn set_preferences(s: &crate::settings::Settings) -> Result<(), String
             TrayIcon::White => cmd::TrayIcon::White,
             TrayIcon::App => cmd::TrayIcon::App,
         },
+        spell_check: s.spell_check,
     };
     call::<cmd::SetPreferences>(args).await
 }

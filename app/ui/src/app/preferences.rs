@@ -259,6 +259,10 @@ fn PrefLanguage() -> impl IntoView {
             <option value="en" selected=move || c.settings.with(|s| s.lang == Lang::En)>"English"</option>
         </select>
         <p class="pref-hint">{tr().p_language_hint}</p>
+        // As in Slack's "Language & region".
+        <h3 class="pref-h">{tr().p_spelling}</h3>
+        {checkbox(c, tr().p_spell_check, |s| s.spell_check, |s, v| s.spell_check = v)}
+        <p class="pref-hint">{tr().p_spell_check_hint}</p>
     }
 }
 

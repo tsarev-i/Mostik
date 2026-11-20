@@ -143,6 +143,7 @@ pub fn FieldArea(
     let area = field.area;
     view! {
         <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
+            spellcheck=move || if c.settings.with(|s| s.spell_check) { "true" } else { "false" }
             aria-placeholder=move || placeholder.get()
             on:input=move |_| {
                 if let Some(el) = area.get_untracked() {
