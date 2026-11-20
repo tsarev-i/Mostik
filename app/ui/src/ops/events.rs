@@ -56,15 +56,10 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
                 .iter_mut()
                 .find(|t| t.parent.chat_id == chat_id && t.parent.ts == parent)
             {
-                t.unread = 0;
+                t.read();
             }
         }),
-        LiveEvent::Seen { chat_id } => c.snap.update(|s| {
-            if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == chat_id) {
-                ch.unread = 0;
-                ch.mentions = 0;
-            }
-        }),
+        LiveEvent::Seen { chat_id } => c.snap.update(|s| s.read_chat(&chat_id)),
         LiveEvent::PeerSeen {
             chat_id,
             user,

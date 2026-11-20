@@ -183,6 +183,13 @@ pub struct Chat {
     /// furthest reader of a group.
     #[serde(default)]
     pub peer_seen_ts: Timestamp,
+    /// The sequence number of the latest message (`LastSeqNo`), as far as known.
+    #[serde(default)]
+    pub last_seq: u64,
+    /// How far the user has read the chat, by sequence number (`LastSeenByMeSeqNo`): a message
+    /// numbered above it is unread (see [`Snapshot::among_unread`]).
+    #[serde(default)]
+    pub seen_seq: u64,
 }
 
 /// User's organization: a "workspace" in Slack terms.
@@ -412,6 +419,17 @@ pub struct FollowedThread {
     /// Time and number of the last reply: the order of the list and the read marker.
     pub last_ts: Timestamp,
     pub last_seq: u64,
+    /// How far the user has read the thread, by the replies' sequence numbers.
+    #[serde(default)]
+    pub seen_seq: u64,
+}
+
+impl FollowedThread {
+    /// The thread is read up to its last known reply.
+    pub fn read(&mut self) {
+        self.unread = 0;
+        self.seen_seq = self.seen_seq.max(self.last_seq);
+    }
 }
 
 /// Forwarded message: author, time, text and attachments of the original.
@@ -571,36 +589,40 @@ impl Snapshot {
 
     /// Whether message `ts` of `chat` (a reply in thread `parent`, or a feed message) is still
     /// unread, so that deleting it lowers the `unread` count: a message deleted after it came must
-    /// not leave the chat unread with nothing to read in it.
-    ///
-    /// Telemost counts unread messages by sequence numbers (`LastSeqNo − LastSeenByMeSeqNo`), so
-    /// the unread ones are the last `unread` numbers, whatever part of the history is loaded (after
-    /// a reconnection only the latest message of a chat may be). `last_seq` is the latest number
-    /// when known (a followed thread knows it); otherwise it is the loaded message of the chat's
-    /// last time, and without that nothing is said. Own messages and ones without a number never
-    /// count.
+    /// not leave the chat unread with nothing to read in it. Telemost counts unread messages by
+    /// sequence numbers, so it is the message numbered above `seen_seq`, the user's read position
+    /// ([`Chat::seen_seq`], [`FollowedThread::seen_seq`]): neither a gap in the loaded history
+    /// (after a reconnection) nor earlier deletions change that. Own messages and ones without a
+    /// number never count.
     pub fn among_unread(
         &self,
         chat: &ChatId,
         parent: Option<Timestamp>,
         ts: Timestamp,
         unread: u32,
-        last_seq: Option<u64>,
+        seen_seq: u64,
     ) -> bool {
-        let here = |m: &&Message| &m.chat_id == chat && m.thread_parent == parent;
-        let Some(m) = self.messages.iter().filter(here).find(|m| m.ts == ts) else {
-            return false;
-        };
-        if unread == 0 || m.seq_no == 0 || m.author == self.me {
-            return false;
+        self.messages
+            .iter()
+            .find(|m| &m.chat_id == chat && m.thread_parent == parent && m.ts == ts)
+            .is_some_and(|m| unread > 0 && m.seq_no > seen_seq && m.author != self.me)
+    }
+
+    /// The user has read `chat` to its end: no unread messages or mentions, and the read position
+    /// at the latest message known, loaded or counted.
+    pub fn read_chat(&mut self, chat: &ChatId) {
+        let loaded = self
+            .messages
+            .iter()
+            .filter(|m| &m.chat_id == chat && m.thread_parent.is_none())
+            .map(|m| m.seq_no)
+            .max()
+            .unwrap_or(0);
+        if let Some(ch) = self.chats.iter_mut().find(|ch| &ch.id == chat) {
+            ch.unread = 0;
+            ch.mentions = 0;
+            ch.seen_seq = ch.seen_seq.max(ch.last_seq).max(loaded);
         }
-        let last_seq = last_seq.filter(|n| *n > 0).or_else(|| {
-            // The latest message of the chat has to be loaded for its number to be the latest.
-            let last_ts = self.chat(chat).map(|ch| ch.last_ts)?;
-            let newest = self.messages.iter().filter(here).max_by_key(|m| m.ts)?;
-            (parent.is_none() && newest.ts >= last_ts && newest.seq_no > 0).then_some(newest.seq_no)
-        });
-        last_seq.is_some_and(|last| m.seq_no > last.saturating_sub(u64::from(unread)))
     }
 
     /// Whether `text` mentions the user: by id, by name, through a public chat or with `@all`.
@@ -784,6 +806,8 @@ impl Chat {
             pinned: None,
             organizations: vec![],
             peer_seen_ts: 0,
+            last_seq: 0,
+            seen_seq: 0,
         }
     }
 
@@ -890,7 +914,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_deleted_message_counts_as_unread_by_its_sequence_number() {
+    fn a_deleted_message_counts_as_unread_by_the_read_position() {
         let chat = ChatId("c".into());
         let msg = |ts: Timestamp, seq: u64, author: &str, parent: Option<Timestamp>| Message {
             thread_parent: parent,
@@ -898,7 +922,9 @@ mod tests {
             ..crate::mock::msg("c", ts, author, "")
         };
         let mut s = snapshot(vec![Chat {
-            last_ts: 500,
+            last_seq: 5,
+            seen_seq: 3,
+            unread: 2,
             ..Chat::new(chat.clone(), ChatKind::Group { public: false })
         }]);
         s.messages = vec![
@@ -909,25 +935,27 @@ mod tests {
             msg(500, 5, "anna", None),
             msg(600, 1, "anna", Some(100)),
         ];
-        // Two unread: 4 and 5.
-        assert!(s.among_unread(&chat, None, 500, 2, None));
-        assert!(s.among_unread(&chat, None, 400, 2, None));
-        assert!(!s.among_unread(&chat, None, 300, 2, None));
-        assert!(!s.among_unread(&chat, None, 500, 0, None));
+        let seen = |s: &Snapshot| s.chats[0].seen_seq;
+        assert!(s.among_unread(&chat, None, 500, 2, seen(&s)));
+        assert!(s.among_unread(&chat, None, 400, 2, seen(&s)));
+        assert!(!s.among_unread(&chat, None, 300, 2, seen(&s)));
+        assert!(!s.among_unread(&chat, None, 500, 0, seen(&s)));
         // Own messages never count.
-        assert!(!s.among_unread(&chat, None, 200, 5, None));
-        // A gap after a reconnection: 1 was read, 2..4 came offline and only 5 is loaded with it.
-        s.messages
-            .retain(|m| m.ts == 100 || m.ts == 500 || m.thread_parent.is_some());
-        assert!(!s.among_unread(&chat, None, 100, 2, None));
-        assert!(s.among_unread(&chat, None, 500, 2, None));
-        // Without the chat's latest message loaded nothing can be said.
-        s.chats[0].last_ts = 900;
-        assert!(!s.among_unread(&chat, None, 500, 2, None));
-        // A thread reply counts by the thread's own numbers, which the followed thread knows.
-        assert!(s.among_unread(&chat, Some(100), 600, 1, Some(1)));
-        assert!(!s.among_unread(&chat, Some(100), 600, 1, Some(3)));
-        assert!(!s.among_unread(&chat, Some(100), 600, 1, None));
+        assert!(!s.among_unread(&chat, None, 200, 5, 0));
+        // Deleting unread ones one by one, the newest first, keeps the others unread (the
+        // count going down does not move the read position).
+        s.messages.retain(|m| m.ts != 500);
+        assert!(s.among_unread(&chat, None, 400, 1, seen(&s)));
+        // A gap after a reconnection does not matter either.
+        s.messages.retain(|m| m.ts != 300);
+        assert!(!s.among_unread(&chat, None, 100, 1, seen(&s)));
+        // A thread reply counts against the thread's own position.
+        assert!(s.among_unread(&chat, Some(100), 600, 1, 0));
+        assert!(!s.among_unread(&chat, Some(100), 600, 1, 1));
+        // Read to the end: the position goes to the latest known number.
+        s.read_chat(&chat);
+        assert_eq!((s.chats[0].unread, s.chats[0].mentions, seen(&s)), (0, 0, 5));
+        assert!(!s.among_unread(&chat, None, 400, 1, seen(&s)));
     }
 
     #[test]

@@ -587,6 +587,8 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
             muted: chat.get("Muted").and_then(Value::as_bool).unwrap_or(false),
             last_ts,
             peer_seen_ts: n(chat, &["LastSeenTsMcs"]).unwrap_or(0),
+            last_seq: n(chat, &["LastSeqNo"]).unwrap_or(0),
+            seen_seq: n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0),
             pinned: n(chat, &["PinnedMessageInfo", "PinnedMessageTs"]).filter(|ts| *ts > 0),
             organizations: info
                 .get("OrganizationIds")
@@ -655,6 +657,7 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
             unread: count32(last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0))),
             last_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
             last_seq,
+            seen_seq: n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0),
             parent: *parent,
         });
     }

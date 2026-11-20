@@ -207,12 +207,7 @@ fn select_chat(c: Ctx, id: ChatId, record: bool) -> bool {
     c.editing.set(None);
     let read_on_open = c.settings.with_untracked(|s| s.mark_read_on_open);
     if read_on_open {
-        c.snap.update(|s| {
-            if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == id) {
-                ch.unread = 0;
-                ch.mentions = 0;
-            }
-        });
+        c.snap.update(|s| s.read_chat(&id));
     }
     if c.live && FRESH.with_borrow(|f| f.contains(&id)) {
         // What `load_latest` would do after loading.
@@ -416,12 +411,9 @@ pub fn read_in_sight(c: Ctx) {
     let had_unread = c
         .snap
         .try_maybe_update(|s| {
-            let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == id) else {
-                return (false, false);
-            };
-            let had = ch.unread > 0 || ch.mentions > 0;
+            let had = s.chat(&id).is_some_and(|ch| ch.unread > 0 || ch.mentions > 0);
             if had {
-                (ch.unread, ch.mentions) = (0, 0);
+                s.read_chat(&id);
             }
             (had, had)
         })
@@ -447,12 +439,7 @@ pub fn mark_chat_read(c: Ctx, id: ChatId) {
     if c.hold_unread.with_untracked(|h| h.as_ref() == Some(&id)) {
         c.hold_unread.set(None);
     }
-    c.snap.update(|s| {
-        if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == id) {
-            ch.unread = 0;
-            ch.mentions = 0;
-        }
-    });
+    c.snap.update(|s| s.read_chat(&id));
     mark_read(c, id);
 }
 
