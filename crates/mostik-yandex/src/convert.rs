@@ -175,7 +175,8 @@ fn attachment(kind: AttachmentKind, v: &Value) -> Option<Attachment> {
     Some(Attachment {
         kind,
         file_id,
-        name: s(info, &["Name"]).unwrap_or("file").to_owned(),
+        // Shown in the card and the Files tab, and the name a download is saved under (#42).
+        name: plain_file_name(s(info, &["Name"]).unwrap_or("file")),
         size: n(info, &["Size"]).unwrap_or(0),
         width: count32(n(v, &["Width"]).unwrap_or(0)),
         height: count32(n(v, &["Height"]).unwrap_or(0)),
@@ -1957,13 +1958,14 @@ mod tests {
     fn gallery_attachments() {
         let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Gallery": {"Text": "caption", "Items": [
             {"Image": {"FileInfo": {"Id2": "disk/x1", "Name": "a.png", "Size": 10}, "Width": 800, "Height": 600}},
-            {"Image": {"FileInfo": {"Id2": "disk/x2", "Name": "b.png", "Size": 20}, "Width": 10, "Height": 10}}]}}},
+            {"Image": {"FileInfo": {"Id2": "disk/x2", "Name": "b\u{202E}gnp.exe", "Size": 20}, "Width": 10, "Height": 10}}]}}},
             "ServerMessageInfo": {"Timestamp": 1, "From": {"Guid": "u"}}});
         match from_push(&v, None) {
             Some(LiveEvent::Upsert { message, .. }) => {
                 assert_eq!(message.text, "caption");
                 assert_eq!(message.attachments.len(), 2);
                 assert_eq!(message.attachments[0].file_id, "disk/x1");
+                assert_eq!(message.attachments[1].name, "b_gnp.exe");
                 assert_eq!(
                     (message.attachments[0].width, message.attachments[0].height),
                     (800, 600)

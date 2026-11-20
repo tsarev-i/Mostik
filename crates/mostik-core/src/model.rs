@@ -440,7 +440,20 @@ pub enum AttachmentKind {
     File,
 }
 
-/// Message attachment: a gallery image or a file.
+/// A Unicode bidi control: it reorders the text around it, so a file sent as
+/// `invoice<U+202E>fdp.exe` would show as `invoiceexe.pdf` (#42).
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A file name from someone else's message as it is shown and saved: its bidi controls become
+/// `_`, so the name reads as it really is (`invoice_fdp.exe`).
+pub fn plain_file_name(name: &str) -> String {
+    name.chars().map(|c| if is_bidi_control(c) { '_' } else { c }).collect()
+}
+
+/// Message attachment: a gallery image or a file. The name has no bidi controls (see
+/// [`plain_file_name`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub kind: AttachmentKind,
@@ -841,6 +854,18 @@ mod chat_icon_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_names_lose_their_bidi_controls() {
+        assert_eq!(plain_file_name("invoice\u{202E}fdp.exe"), "invoice_fdp.exe");
+        assert_eq!(
+            plain_file_name("a\u{200E}b\u{200F}c\u{202A}d\u{2066}e\u{2069}f\u{061C}.txt"),
+            "a_b_c_d_e_f_.txt"
+        );
+        // Letters of right-to-left scripts and the joiners stay.
+        assert_eq!(plain_file_name("שלום\u{200D}.txt"), "שלום\u{200D}.txt");
+        assert_eq!(plain_file_name("Отчёт.pdf"), "Отчёт.pdf");
+    }
 
     fn snapshot(chats: Vec<Chat>) -> Snapshot {
         Snapshot {
