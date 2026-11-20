@@ -1588,6 +1588,32 @@ impl Tr {
         }
     }
 
+    /// How many have read an own group message: of `others`, the members besides the author, when
+    /// known (#49).
+    pub fn read_by(&self, count: u32, others: Option<u32>, everyone: bool) -> String {
+        match (self.lang, others) {
+            (Lang::Ru, _) if everyone => "Прочитали все".to_owned(),
+            (Lang::En, _) if everyone => "Read by everyone".to_owned(),
+            (Lang::Ru, Some(of)) => format!("Прочитали {} из {of}", count.min(of)),
+            (Lang::En, Some(of)) => format!("Read by {} of {of}", count.min(of)),
+            (Lang::Ru, None) => format!("Прочитали: {count}"),
+            (Lang::En, None) => format!("Read by {count}"),
+        }
+    }
+
+    /// The latest readers of an own group message by name, and how many more: "Anna, Oleg, Ivan
+    /// and 9 more".
+    pub fn readers(&self, names: &[String], more: u32) -> String {
+        let mut who = names.to_vec();
+        if more > 0 {
+            who.push(match self.lang {
+                Lang::Ru => format!("ещё {more}"),
+                Lang::En => format!("{more} more"),
+            });
+        }
+        self.list(&who)
+    }
+
     /// "Anna, Boris and Vera".
     pub fn list(&self, names: &[String]) -> String {
         let and = match self.lang {
@@ -1841,6 +1867,20 @@ mod tests {
         );
         assert_eq!(EN.members_count(1), "1 member");
         assert_eq!(EN.members_count(21), "21 members");
+    }
+
+    #[test]
+    fn group_reads() {
+        assert_eq!(RU.read_by(12, Some(199), false), "Прочитали 12 из 199");
+        assert_eq!(EN.read_by(12, Some(199), false), "Read by 12 of 199");
+        assert_eq!(RU.read_by(5, Some(5), true), "Прочитали все");
+        assert_eq!(EN.read_by(3, None, false), "Read by 3");
+        // A count above a stale member count.
+        assert_eq!(EN.read_by(7, Some(5), false), "Read by 5 of 5");
+        let names = ["Anna".to_owned(), "Oleg".to_owned(), "Ivan".to_owned()];
+        assert_eq!(EN.readers(&names, 9), "Anna, Oleg, Ivan and 9 more");
+        assert_eq!(RU.readers(&names, 9), "Anna, Oleg, Ivan и ещё 9");
+        assert_eq!(EN.readers(&names[..1], 0), "Anna");
     }
 
     #[test]

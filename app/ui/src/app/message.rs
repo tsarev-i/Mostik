@@ -369,13 +369,40 @@ pub(super) fn MessageRow(
 }
 
 /// The hover tip of a message's time, as in Slack: the full date and time and, for an own message
-/// someone has read, "(read)" after it. When and by how many it was read does not matter.
+/// someone has read, "(read)" after it in a direct chat. In a group, how many of the members have
+/// read it and the latest of them by name, as the reaction tip names people (#49): in a chat of
+/// 200, one reader and everyone must not look the same. Telemost names the latest three only.
 fn time_tip_text(c: Ctx, msg: &Message) -> String {
     let full = time::full(msg.ts);
-    if read_status(c, msg).is_some_and(|r| r.is_read()) {
-        format!("{full} {}", tr().read_mark)
-    } else {
-        full
+    match read_status(c, msg) {
+        Some(receipts::ReadStatus::Read {
+            count,
+            recent,
+            everyone,
+        }) if count > 0 => {
+            let (others, names) = c.snap.with_untracked(|s| {
+                // The members besides the author; unknown while the chat has not said.
+                let others = s
+                    .chat(&msg.chat_id)
+                    .map(|ch| ch.member_count.saturating_sub(1))
+                    .filter(|n| *n > 0);
+                let names: Vec<String> = recent
+                    .iter()
+                    .filter(|u| **u != s.me)
+                    .filter_map(|u| s.user(u).filter(|u| u.has_name()).map(|u| u.display_name.clone()))
+                    .collect();
+                (others, names)
+            });
+            let mut tip = format!("{full}\n{}", tr().read_by(count, others, everyone));
+            if !names.is_empty() {
+                let more = count.saturating_sub(names.len() as u32);
+                tip.push('\n');
+                tip.push_str(&tr().readers(&names, more));
+            }
+            tip
+        }
+        Some(r) if r.is_read() => format!("{full} {}", tr().read_mark),
+        _ => full,
     }
 }
 
