@@ -874,11 +874,17 @@ fn chat_mutings(value: &Value) -> Vec<(ChatId, NotifyLevel)> {
         .collect()
 }
 
-/// A chat from a `get_chats_info` item: `{chat_id, name, description, is_public, members_count,
-/// organization_ids}`. Counters and times are left for the messages to fill in.
+/// A chat from a `get_chats_info` item: `{chat_id, name, description, public, members_count,
+/// organization_ids}`. Counters and times are left for the messages to fill in. The flag is
+/// `public` (seen 2026-11-20); reading `is_public` made every chat that came this way, such as a
+/// channel just created or one the user was added to, look private.
 pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
     let id = s(info, &["chat_id"])?;
-    let kind = chat_kind(id, me, info.get("is_public").and_then(Value::as_bool).unwrap_or(false));
+    let public = ["public", "is_public"]
+        .into_iter()
+        .find_map(|key| info.get(key).and_then(Value::as_bool))
+        .unwrap_or(false);
+    let kind = chat_kind(id, me, public);
     // Like the history, direct chats belong to no organization: they show in all of them.
     let organizations = match kind {
         ChatKind::Direct { .. } | ChatKind::Notes => vec![],
@@ -1349,7 +1355,7 @@ mod tests {
     #[test]
     fn chat_from_chats_info() {
         let me = UserId("aa".into());
-        let group = json!({"chat_id": "0/0/x", "name": "dev", "description": "", "is_public": true,
+        let group = json!({"chat_id": "0/0/x", "name": "dev", "description": "", "public": true,
             "members_count": 19, "organization_ids": [7]});
         let ch = chat_from_info(&group, Some(&me)).unwrap();
         assert_eq!(ch.kind, ChatKind::Group { public: true });
@@ -1368,6 +1374,11 @@ mod tests {
             }
         );
         assert!(ch.organizations.is_empty());
+        let private = json!({"chat_id": "0/0/y", "name": "ops", "public": false, "members_count": 3});
+        assert_eq!(
+            chat_from_info(&private, Some(&me)).unwrap().kind,
+            ChatKind::Group { public: false }
+        );
         assert_eq!(ch.home_section(), "dms");
         let meeting = json!({"chat_id": "0/22/m", "name": "Sync"});
         assert_eq!(chat_from_info(&meeting, Some(&me)).unwrap().home_section(), "meetings");
