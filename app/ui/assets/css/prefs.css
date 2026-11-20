@@ -1,6 +1,7 @@
 /* ── Preferences ────────────────────────────────────────────────── */
 
-.prefs-section { flex: 1; min-width: 0; }
+/* Room for the scroll bar: in WebKitGTK it is drawn over the content, over the keys at the right edge. */
+.prefs-section { flex: 1; min-width: 0; padding-right: 14px; }
 .prefs-section h3.pref-h { margin-top: 24px; }
 .pref-radio, .pref-check { display: flex; align-items: center; gap: 10px; margin-top: 10px; cursor: pointer; }
 .pref-radio input, .pref-check input { width: 16px; height: 16px; accent-color: var(--highlight); }
