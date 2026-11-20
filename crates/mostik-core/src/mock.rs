@@ -33,7 +33,7 @@ fn chat(id: &str, kind: ChatKind, name: &str, members: u32, unread: u32, mention
     }
 }
 
-fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
+pub(crate) fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
     Message {
         chat_id: cid(chat),
         ts,

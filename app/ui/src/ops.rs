@@ -184,6 +184,20 @@ mod tests {
     }
 
     #[test]
+    fn a_new_message_deleted_after_it_came_is_unread_no_more() {
+        let general = ChatId("general".into());
+        let mut s = snapshot(vec![message(700, "read")]);
+        assert!(add_new(&mut s, &message(1000, "@all news"), false, None));
+        assert!(add_new(&mut s, &message(1100, "more"), false, None));
+        assert_eq!(counters(&s), (2, 1));
+        // What `snapshot::remove` asks before taking a message out of the counts.
+        let unread = counters(&s).0;
+        assert!(s.among_unread(&general, None, 1000, unread));
+        assert!(s.among_unread(&general, None, 1100, unread));
+        assert!(!s.among_unread(&general, None, 700, unread));
+    }
+
+    #[test]
     fn an_edit_of_a_thread_reply_adds_no_reply() {
         let mut parent = message(700, "question");
         parent.thread = Some(ThreadSummary {

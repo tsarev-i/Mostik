@@ -569,6 +569,31 @@ impl Snapshot {
         }
     }
 
+    /// Whether message `ts` of `chat` (a reply in thread `parent`, or a feed message) is one of the
+    /// `unread` latest messages that others wrote after the user's own last one, as far as the
+    /// loaded messages tell: what an unread count covers. A deleted message leaves the count only
+    /// then, so a message deleted after it came does not stay unread with nothing to read.
+    pub fn among_unread(&self, chat: &ChatId, parent: Option<Timestamp>, ts: Timestamp, unread: u32) -> bool {
+        let here = |m: &&Message| &m.chat_id == chat && m.thread_parent == parent && !m.is_ringing();
+        let mine_last = self
+            .messages
+            .iter()
+            .filter(here)
+            .filter(|m| m.author == self.me)
+            .map(|m| m.ts)
+            .max()
+            .unwrap_or(0);
+        let mut others: Vec<Timestamp> = self
+            .messages
+            .iter()
+            .filter(here)
+            .filter(|m| m.author != self.me && m.ts > mine_last)
+            .map(|m| m.ts)
+            .collect();
+        others.sort_unstable_by(|a, b| b.cmp(a));
+        others.iter().take(unread as usize).any(|&t| t == ts)
+    }
+
     /// Whether `text` mentions the user: by id, by name, through a public chat or with `@all`.
     pub fn mentions_me(&self, text: &str) -> bool {
         let name = self.user(&self.me).map_or("", |u| u.display_name.as_str());
@@ -854,6 +879,34 @@ mod chat_icon_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_deleted_message_counts_as_unread_only_among_the_latest_of_others() {
+        let chat = ChatId("c".into());
+        let msg = |ts: Timestamp, author: &str, parent: Option<Timestamp>| Message {
+            thread_parent: parent,
+            ..crate::mock::msg("c", ts, author, "")
+        };
+        let mut s = snapshot(vec![]);
+        s.messages = vec![
+            msg(1, "anna", None),
+            msg(2, "me", None),
+            msg(3, "anna", None),
+            msg(4, "boris", None),
+            msg(5, "anna", None),
+            msg(6, "anna", Some(1)),
+        ];
+        // Two unread: 4 and 5.
+        assert!(s.among_unread(&chat, None, 5, 2));
+        assert!(s.among_unread(&chat, None, 4, 2));
+        assert!(!s.among_unread(&chat, None, 3, 2));
+        // Before the user's own message everything is read, whatever the count says.
+        assert!(!s.among_unread(&chat, None, 1, 5));
+        assert!(!s.among_unread(&chat, None, 5, 0));
+        // Replies count in their thread only.
+        assert!(!s.among_unread(&chat, None, 6, 5));
+        assert!(s.among_unread(&chat, Some(1), 6, 1));
+    }
 
     #[test]
     fn file_names_lose_their_bidi_controls() {
