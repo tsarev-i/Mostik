@@ -290,6 +290,22 @@ fn PrefMarkRead() -> impl IntoView {
 #[component]
 fn PrefUpdates() -> impl IntoView {
     let c = ctx();
+    view! {
+        <h3>{tr().p_updates}</h3>
+        {checkbox(c, tr().p_auto_update, |s| s.auto_update, |s, v| s.auto_update = v)}
+        <p class="pref-hint">{tr().p_auto_update_hint}</p>
+        <h3 class="pref-h">{tr().version(env!("CARGO_PKG_VERSION"))}</h3>
+        <UpdateActions/>
+    }
+}
+
+/// The update status with what can be done about it: "Check for updates", "Update" with the
+/// install progress. In Preferences → Updates and on the login screen (`login`), where it lets a
+/// user whose sign-in broke get a fixed version (#47); there a build that cannot update itself
+/// shows nothing. A manual check works with the background checks turned off.
+#[component]
+pub(super) fn UpdateActions(#[prop(optional)] login: bool) -> impl IntoView {
+    let c = ctx();
     // Result of the last manual check: `Some(Ok)` is "up to date", `Some(Err)` the error text.
     let checked: RwSignal<Option<Result<(), String>>> = RwSignal::new(None);
     let checking = RwSignal::new(false);
@@ -302,13 +318,14 @@ fn PrefUpdates() -> impl IntoView {
             checked.try_set(Some(result.map(|status| c.update.set(status))));
         });
     };
-    let status = move || {
+    move || {
         let status = if c.live {
             c.update.get()
         } else {
             bridge::UpdateStatus::Unsupported
         };
         match status {
+            bridge::UpdateStatus::Unsupported if login => ().into_any(),
             bridge::UpdateStatus::Unsupported => view! { <p class="pref-hint flush">{tr().update_unsupported}</p> }.into_any(),
             bridge::UpdateStatus::Available { version } => view! {
                 <p>{tr().update_available(&version)}</p>
@@ -337,13 +354,6 @@ fn PrefUpdates() -> impl IntoView {
             }
             .into_any(),
         }
-    };
-    view! {
-        <h3>{tr().p_updates}</h3>
-        {checkbox(c, tr().p_auto_update, |s| s.auto_update, |s, v| s.auto_update = v)}
-        <p class="pref-hint">{tr().p_auto_update_hint}</p>
-        <h3 class="pref-h">{tr().version(env!("CARGO_PKG_VERSION"))}</h3>
-        {status}
     }
 }
 

@@ -49,7 +49,7 @@ use feed::{ChannelHeader, MessageList, PinsView};
 use files::FilesView;
 use menus::ContextMenu;
 use org::ORG_KEY;
-use preferences::{AddEmojiDialog, PrefTab, PreferencesDialog};
+use preferences::{AddEmojiDialog, PrefTab, PreferencesDialog, UpdateActions};
 use profile::{ProfilePane, StatusDialog};
 use rail::Rail;
 use sidebar::{Sidebar, chat_drag_to, chat_drop};
@@ -590,6 +590,12 @@ fn LoginScreen(reason: Option<String>) -> impl IntoView {
                 <p class="login-note">
                     {tr().login_note_unofficial}
                 </p>
+                // Sign-in may break after a change on the Telemost side, while the fix is already
+                // out: the update does not need a session (#47).
+                <div class="login-update">
+                    <p>{tr().version(env!("CARGO_PKG_VERSION"))}</p>
+                    <UpdateActions login=true/>
+                </div>
             </div>
         </div>
     }
