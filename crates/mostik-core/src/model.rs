@@ -190,6 +190,10 @@ pub struct Chat {
     /// numbered above it is unread (see [`Snapshot::among_unread`]).
     #[serde(default)]
     pub seen_seq: u64,
+    /// Messages numbered above [`Chat::seen_seq`] that the unread count did not take in: they came
+    /// while the chat was in view, with "Mark as read on open" off. Kept for this session only.
+    #[serde(default, skip)]
+    pub uncounted: Vec<u64>,
 }
 
 /// User's organization: a "workspace" in Slack terms.
@@ -591,9 +595,10 @@ impl Snapshot {
     /// unread, so that deleting it lowers the `unread` count: a message deleted after it came must
     /// not leave the chat unread with nothing to read in it. Telemost counts unread messages by
     /// sequence numbers, so it is the message numbered above `seen_seq`, the user's read position
-    /// ([`Chat::seen_seq`], [`FollowedThread::seen_seq`]): neither a gap in the loaded history
-    /// (after a reconnection) nor earlier deletions change that. Own messages and ones without a
-    /// number never count.
+    /// ([`Chat::seen_seq`], [`FollowedThread::seen_seq`]), unless the count never took it in
+    /// (`uncounted`, see [`Chat::uncounted`]): neither a gap in the loaded history (after a
+    /// reconnection) nor earlier deletions change that. Own messages and ones without a number
+    /// never count.
     pub fn among_unread(
         &self,
         chat: &ChatId,
@@ -601,11 +606,12 @@ impl Snapshot {
         ts: Timestamp,
         unread: u32,
         seen_seq: u64,
+        uncounted: &[u64],
     ) -> bool {
         self.messages
             .iter()
             .find(|m| &m.chat_id == chat && m.thread_parent == parent && m.ts == ts)
-            .is_some_and(|m| unread > 0 && m.seq_no > seen_seq && m.author != self.me)
+            .is_some_and(|m| unread > 0 && m.seq_no > seen_seq && m.author != self.me && !uncounted.contains(&m.seq_no))
     }
 
     /// The user has read `chat` to its end: no unread messages or mentions, and the read position
@@ -622,6 +628,7 @@ impl Snapshot {
             ch.unread = 0;
             ch.mentions = 0;
             ch.seen_seq = ch.seen_seq.max(ch.last_seq).max(loaded);
+            ch.uncounted.clear();
         }
     }
 
@@ -808,6 +815,7 @@ impl Chat {
             peer_seen_ts: 0,
             last_seq: 0,
             seen_seq: 0,
+            uncounted: vec![],
         }
     }
 
@@ -936,26 +944,28 @@ mod tests {
             msg(600, 1, "anna", Some(100)),
         ];
         let seen = |s: &Snapshot| s.chats[0].seen_seq;
-        assert!(s.among_unread(&chat, None, 500, 2, seen(&s)));
-        assert!(s.among_unread(&chat, None, 400, 2, seen(&s)));
-        assert!(!s.among_unread(&chat, None, 300, 2, seen(&s)));
-        assert!(!s.among_unread(&chat, None, 500, 0, seen(&s)));
+        assert!(s.among_unread(&chat, None, 500, 2, seen(&s), &[]));
+        assert!(s.among_unread(&chat, None, 400, 2, seen(&s), &[]));
+        assert!(!s.among_unread(&chat, None, 300, 2, seen(&s), &[]));
+        assert!(!s.among_unread(&chat, None, 500, 0, seen(&s), &[]));
         // Own messages never count.
-        assert!(!s.among_unread(&chat, None, 200, 5, 0));
+        assert!(!s.among_unread(&chat, None, 200, 5, 0, &[]));
         // Deleting unread ones one by one, the newest first, keeps the others unread (the
         // count going down does not move the read position).
         s.messages.retain(|m| m.ts != 500);
-        assert!(s.among_unread(&chat, None, 400, 1, seen(&s)));
+        assert!(s.among_unread(&chat, None, 400, 1, seen(&s), &[]));
+        // One the count did not take in (it came while the chat was in view) is no unread one.
+        assert!(!s.among_unread(&chat, None, 400, 1, seen(&s), &[4]));
         // A gap after a reconnection does not matter either.
         s.messages.retain(|m| m.ts != 300);
-        assert!(!s.among_unread(&chat, None, 100, 1, seen(&s)));
+        assert!(!s.among_unread(&chat, None, 100, 1, seen(&s), &[]));
         // A thread reply counts against the thread's own position.
-        assert!(s.among_unread(&chat, Some(100), 600, 1, 0));
-        assert!(!s.among_unread(&chat, Some(100), 600, 1, 1));
+        assert!(s.among_unread(&chat, Some(100), 600, 1, 0, &[]));
+        assert!(!s.among_unread(&chat, Some(100), 600, 1, 1, &[]));
         // Read to the end: the position goes to the latest known number.
         s.read_chat(&chat);
         assert_eq!((s.chats[0].unread, s.chats[0].mentions, seen(&s)), (0, 0, 5));
-        assert!(!s.among_unread(&chat, None, 400, 1, seen(&s)));
+        assert!(!s.among_unread(&chat, None, 400, 1, seen(&s), &[]));
     }
 
     #[test]

@@ -479,6 +479,12 @@ pub fn mark_unread(c: Ctx, m: &Message) {
                 .count() as u32;
             if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == m.chat_id) {
                 ch.unread = n.max(1);
+                // The read position goes back to just before it, as Telemost's does.
+                if m.seq_no > 0 {
+                    ch.seen_seq = m.seq_no - 1;
+                }
+                // Every message from it on is counted now.
+                ch.uncounted.clear();
             }
         });
         // As in Slack: the chat stays unread until you come back to it.

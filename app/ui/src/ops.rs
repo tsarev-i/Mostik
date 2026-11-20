@@ -199,11 +199,22 @@ mod tests {
         assert_eq!(counters(&s), (2, 1));
         // What `snapshot::remove` asks before taking a message out of the counts.
         let unread = counters(&s).0;
-        let seen = s.chat(&general).map_or(0, |ch| ch.seen_seq);
-        assert!(s.among_unread(&general, None, 1000, unread, seen));
-        assert!(s.among_unread(&general, None, 1100, unread, seen));
-        assert!(!s.among_unread(&general, None, 700, unread, seen));
-        assert_eq!(s.chat(&general).map(|ch| ch.last_seq), Some(9));
+        let ch = |s: &Snapshot| s.chat(&general).cloned().unwrap();
+        let seen = ch(&s).seen_seq;
+        assert!(s.among_unread(&general, None, 1000, unread, seen, &[]));
+        assert!(s.among_unread(&general, None, 1100, unread, seen, &[]));
+        assert!(!s.among_unread(&general, None, 700, unread, seen, &[]));
+        assert_eq!(ch(&s).last_seq, 9);
+        // One that comes while the chat is in view is not counted and is no unread one to delete,
+        // and the two before it stay unread ones.
+        assert!(add_new(&mut s, &numbered(1200, 10, "seen"), true, None));
+        let (seen, uncounted) = (ch(&s).seen_seq, ch(&s).uncounted);
+        assert_eq!((counters(&s), seen, uncounted.as_slice()), ((2, 1), 7, &[10][..]));
+        assert!(!s.among_unread(&general, None, 1200, unread, seen, &uncounted));
+        assert!(s.among_unread(&general, None, 1000, unread, seen, &uncounted));
+        // Read to the end: nothing is held apart any more.
+        s.read_chat(&general);
+        assert_eq!((ch(&s).seen_seq, ch(&s).uncounted.len()), (10, 0));
     }
 
     #[test]

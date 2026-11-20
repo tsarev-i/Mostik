@@ -126,6 +126,21 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
     } else if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == m.chat_id) {
         ch.last_ts = ch.last_ts.max(m.ts);
         ch.last_seq = ch.last_seq.max(m.seq_no);
+        // Not counted, so no unread one to delete later (see `Snapshot::among_unread`): the user's
+        // own moves the read position past it, as Telemost does; one seen as it came in the open
+        // chat is noted apart, since unread ones from before may still be above the position.
+        if !m.edited && m.seq_no > 0 {
+            if mine {
+                ch.seen_seq = ch.seen_seq.max(m.seq_no);
+                let seen = ch.seen_seq;
+                ch.uncounted.retain(|n| *n > seen);
+            } else if viewing {
+                if ch.uncounted.len() >= 200 {
+                    ch.uncounted.remove(0);
+                }
+                ch.uncounted.push(m.seq_no);
+            }
+        }
         if counts {
             ch.unread = ch.unread.saturating_add(1);
             if mentioned {
@@ -227,8 +242,10 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
             match m.thread_parent {
                 None => {
                     let mentioned = s.mentions_me(&m.text);
-                    let (unread, seen) = s.chat(chat).map_or((0, 0), |ch| (ch.unread, ch.seen_seq));
-                    if s.among_unread(chat, None, ts, unread, seen)
+                    let (unread, seen, uncounted) = s
+                        .chat(chat)
+                        .map_or((0, 0, vec![]), |ch| (ch.unread, ch.seen_seq, ch.uncounted.clone()));
+                    if s.among_unread(chat, None, ts, unread, seen, &uncounted)
                         && let Some(ch) = s.chats.iter_mut().find(|ch| &ch.id == chat)
                     {
                         ch.unread = ch.unread.saturating_sub(1);
@@ -243,7 +260,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                             .find(|t| &t.parent.chat_id == chat && t.parent.ts == p)
                             .map_or((0, 0), |t| (t.unread, t.seen_seq))
                     });
-                    unread_reply = s.among_unread(chat, Some(p), ts, unread, seen);
+                    unread_reply = s.among_unread(chat, Some(p), ts, unread, seen, &[]);
                 }
             }
         }

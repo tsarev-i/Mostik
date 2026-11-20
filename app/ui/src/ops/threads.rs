@@ -123,7 +123,7 @@ pub(super) fn merge_threads(c: Ctx, fresh: Vec<FollowedThread>) {
             if let Some(old) = list.iter().find(|o| same(o, t))
                 && old.last_ts > t.last_ts
             {
-                (t.unread, t.last_ts, t.last_seq) = (old.unread, old.last_ts, old.last_seq);
+                (t.unread, t.last_ts, t.last_seq, t.seen_seq) = (old.unread, old.last_ts, old.last_seq, old.seen_seq);
             }
         }
         for old in list.iter() {
