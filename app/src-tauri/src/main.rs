@@ -15,6 +15,7 @@ mod ring;
 mod sound;
 mod update;
 mod webview;
+mod window_size;
 
 use mostik_app::store;
 use tauri::menu::{Menu, MenuItem};
@@ -172,7 +173,13 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main") else {
         return Ok(());
     };
-    let window = WebviewWindowBuilder::from_config(app, config)?
+    let min = (config.min_width.unwrap_or(0.0), config.min_height.unwrap_or(0.0));
+    let saved = window_size::load(app, min);
+    let mut builder = WebviewWindowBuilder::from_config(app, config)?;
+    if let Some(size) = saved {
+        builder = builder.inner_size(size.width, size.height);
+    }
+    let window = builder
         .on_navigation(|url| {
             let own = webview::is_app_url(url);
             if !own {
@@ -185,6 +192,15 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
         })
         .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()?;
+    // Maximized as it was closed, or when the saved size does not fit this screen any more.
+    let too_big = || {
+        let monitor = window.current_monitor().ok().flatten()?;
+        let screen: tauri::LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
+        saved.map(|s| s.width > screen.width || s.height > screen.height)
+    };
+    if saved.is_some_and(|s| s.maximized) || too_big().unwrap_or(false) {
+        let _ = window.maximize();
+    }
     webview::harden(&window);
     webview::forget_site_data(&window, webview::SiteData::Cookies);
     Ok(())
@@ -199,6 +215,7 @@ fn main() {
         .manage(call::CallState::default())
         .manage(ring::RingState::default())
         .manage(update::UpdateState::default())
+        .manage(window_size::WindowSize::default())
         .register_asynchronous_uri_scheme_protocol("mostikfile", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             // Attachments are the main window's: the call and sign-in windows show other sites.
@@ -246,6 +263,11 @@ fn main() {
                     let _ = window.hide();
                 }
                 return;
+            }
+            if let tauri::WindowEvent::Resized(_) = event
+                && window.label() == "main"
+            {
+                window_size::resized(window);
             }
             // Files dropped onto the chat, as in Slack, are attached to the message. The page
             // learns where the drag is, to highlight the chat and to decide where the files go.
@@ -377,6 +399,7 @@ fn main() {
             }
             // The call browser and its profile with the session cookies go with the app.
             if let tauri::RunEvent::Exit = event {
+                window_size::write(app);
                 call::shutdown(app);
                 #[cfg(target_os = "linux")]
                 if let Some(dir) = tray_dir(app) {
