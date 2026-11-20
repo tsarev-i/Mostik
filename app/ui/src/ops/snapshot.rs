@@ -134,10 +134,10 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
                 ch.seen_seq = ch.seen_seq.max(m.seq_no);
                 let seen = ch.seen_seq;
                 ch.uncounted.retain(|n| *n > seen);
-            } else if viewing {
-                if ch.uncounted.len() >= 200 {
-                    ch.uncounted.remove(0);
-                }
+            } else if viewing && !ch.uncounted.contains(&m.seq_no) {
+                // Not bounded: a number dropped early would make its message an unread one. The
+                // list empties when the chat is read and loses a number when its message is
+                // deleted.
                 ch.uncounted.push(m.seq_no);
             }
         }
@@ -245,13 +245,16 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                     let (unread, seen, uncounted) = s
                         .chat(chat)
                         .map_or((0, 0, vec![]), |ch| (ch.unread, ch.seen_seq, ch.uncounted.clone()));
-                    if s.among_unread(chat, None, ts, unread, seen, &uncounted)
-                        && let Some(ch) = s.chats.iter_mut().find(|ch| &ch.id == chat)
-                    {
-                        ch.unread = ch.unread.saturating_sub(1);
-                        if mentioned {
-                            ch.mentions = ch.mentions.saturating_sub(1);
+                    let counted = s.among_unread(chat, None, ts, unread, seen, &uncounted);
+                    let seq = m.seq_no;
+                    if let Some(ch) = s.chats.iter_mut().find(|ch| &ch.id == chat) {
+                        if counted {
+                            ch.unread = ch.unread.saturating_sub(1);
+                            if mentioned {
+                                ch.mentions = ch.mentions.saturating_sub(1);
+                            }
                         }
+                        ch.uncounted.retain(|n| *n != seq);
                     }
                 }
                 Some(p) => {
