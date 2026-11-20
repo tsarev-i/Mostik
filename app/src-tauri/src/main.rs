@@ -13,6 +13,8 @@ mod downloads;
 mod login;
 mod ring;
 mod sound;
+#[cfg(target_os = "linux")]
+mod spelling;
 mod update;
 mod webview;
 mod window_size;
@@ -207,6 +209,9 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    // Before Tauri starts any thread: it sets an environment variable for enchant.
+    #[cfg(target_os = "linux")]
+    spelling::install();
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())

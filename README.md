@@ -95,7 +95,8 @@ cookie) пишется в отладочной сборке, а в релизн�
 
 ## Лицензия
 
-[MIT](LICENSE)
+[MIT](LICENSE). Словари проверки орфографии для Linux (`app/src-tauri/dictionaries/`) распространяются
+под своими лицензиями, MIT и BSD; подробности в [их README](app/src-tauri/dictionaries/README.md).
 
 ---
 

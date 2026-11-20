@@ -69,8 +69,9 @@ pub fn forget_site_data<R: Runtime>(window: &WebviewWindow<R>, what: SiteData) {
 
 /// Turns spell checking of the window's text fields on or off (#50). Only WebKitGTK needs it: it
 /// checks nothing until its web context is given languages. They are Russian and English, the
-/// languages people write in Telemost, and the system's; dictionaries come from the system
-/// (enchant, hunspell), and a language without one is skipped. Elsewhere the fields' `spellcheck`
+/// languages people write in Telemost, and the system's. The Russian and English dictionaries come
+/// with Mostik (see `spelling.rs`), the others from the system (enchant, hunspell); a language
+/// without one is skipped. Elsewhere the fields' `spellcheck`
 /// attribute, which the UI sets from the same preference, is enough.
 pub fn spell_check<R: Runtime>(window: &WebviewWindow<R>, enabled: bool) {
     #[cfg(target_os = "linux")]
