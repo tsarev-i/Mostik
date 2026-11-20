@@ -14,7 +14,7 @@ use crate::settings::{
 use crate::{bridge, keys, ops};
 
 use super::org::current_org;
-use super::state::{Ctx, ctx, enter_sends};
+use super::state::{Ctx, ctx};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum PrefTab {
@@ -26,7 +26,6 @@ pub enum PrefTab {
     Home,
     Accessibility,
     Advanced,
-    Shortcuts,
     Updates,
     Emoji,
 }
@@ -45,7 +44,6 @@ pub(super) fn PreferencesDialog() -> impl IntoView {
         (PrefTab::MarkRead, I::Check, tr().p_mark_as_read),
         (PrefTab::Accessibility, I::Users, tr().p_accessibility),
         (PrefTab::Advanced, I::Kebab, tr().p_advanced),
-        (PrefTab::Shortcuts, I::Keyboard, tr().p_shortcuts),
         (PrefTab::Emoji, I::Smile, tr().custom_emoji),
         (PrefTab::Updates, I::Download, tr().p_updates),
     ];
@@ -75,7 +73,6 @@ pub(super) fn PreferencesDialog() -> impl IntoView {
                         PrefTab::MarkRead => view! { <PrefMarkRead/> }.into_any(),
                         PrefTab::Accessibility => view! { <PrefAccessibility/> }.into_any(),
                         PrefTab::Advanced => view! { <PrefAdvanced/> }.into_any(),
-                        PrefTab::Shortcuts => view! { <PrefShortcuts/> }.into_any(),
                         PrefTab::Updates => view! { <PrefUpdates/> }.into_any(),
                         PrefTab::Emoji => view! { <PrefEmoji/> }.into_any(),
                     }}
@@ -529,6 +526,8 @@ pub(super) fn AddEmojiDialog() -> impl IntoView {
     }
 }
 
+/// "Advanced": what Enter does in a message field, and the keyboard shortcuts of this platform,
+/// Cmd in place of Ctrl on macOS. The keys that send follow the Enter choice above them.
 #[component]
 fn PrefAdvanced() -> impl IntoView {
     let c = ctx();
@@ -538,17 +537,19 @@ fn PrefAdvanced() -> impl IntoView {
         <h3>{tr().p_enter_to}</h3>
         {radio(c, "enter", tr().p_enter_send, true, g, set)}
         {radio(c, "enter", tr().enter_newline(&keys::label("Ctrl+Enter")), false, g, set)}
+        <h3 class="pref-h">{tr().p_shortcuts}</h3>
+        <div class="shortcut-group">{tr().sc_general}</div>
+        {shortcut_list(general_shortcuts())}
+        <div class="shortcut-group">{tr().sc_message_field}</div>
+        {move || shortcut_list(field_shortcuts(c.settings.with(|s| s.enter_sends)))}
     }
 }
 
-/// "Keyboard shortcuts": the keys of this platform, Cmd in place of Ctrl on macOS, as Slack lists
-/// them. Sending follows "Advanced".
-#[component]
-fn PrefShortcuts() -> impl IntoView {
+/// Shortcuts that work anywhere in the window.
+fn general_shortcuts() -> Vec<(&'static str, String)> {
     let key = keys::label;
     let (back, forward) = keys::back_forward();
-    let (send, newline) = keys::send_and_newline(enter_sends());
-    let mut general = vec![
+    let mut rows = vec![
         (tr().sc_search, key("Ctrl+K")),
         (tr().back, back),
         (tr().forward, forward),
@@ -560,10 +561,17 @@ fn PrefShortcuts() -> impl IntoView {
     ];
     // The system's own, from the app menu of macOS.
     if on_mac() {
-        general.push((tr().sc_hide_window, key("Ctrl+W")));
-        general.push((tr().sc_quit, key("Ctrl+Q")));
+        rows.push((tr().sc_hide_window, key("Ctrl+W")));
+        rows.push((tr().sc_quit, key("Ctrl+Q")));
     }
-    let field = vec![
+    rows
+}
+
+/// Shortcuts of a message field; sending depends on what Enter does.
+fn field_shortcuts(enter_sends: bool) -> Vec<(&'static str, String)> {
+    let key = keys::label;
+    let (send, newline) = keys::send_and_newline(enter_sends);
+    vec![
         (tr().sc_send, send),
         (tr().sc_newline, newline),
         (tr().sc_edit_last, "↑".to_owned()),
@@ -571,13 +579,7 @@ fn PrefShortcuts() -> impl IntoView {
         (tr().fmt_italic, key("Ctrl+I")),
         (tr().fmt_strike, key("Ctrl+Shift+X")),
         (tr().fmt_link, keys::add_link()),
-    ];
-    view! {
-        <h3>{tr().sc_general}</h3>
-        {shortcut_list(general)}
-        <h3 class="pref-h">{tr().sc_message_field}</h3>
-        {shortcut_list(field)}
-    }
+    ]
 }
 
 /// Actions with their keys, one per row.
