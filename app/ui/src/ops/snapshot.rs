@@ -227,7 +227,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                 None => {
                     let mentioned = s.mentions_me(&m.text);
                     let unread = s.chat(chat).map_or(0, |ch| ch.unread);
-                    if s.among_unread(chat, None, ts, unread)
+                    if s.among_unread(chat, None, ts, unread, None)
                         && let Some(ch) = s.chats.iter_mut().find(|ch| &ch.id == chat)
                     {
                         ch.unread = ch.unread.saturating_sub(1);
@@ -237,12 +237,12 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                     }
                 }
                 Some(p) => {
-                    let unread = c.threads.with_untracked(|list| {
+                    let (unread, last_seq) = c.threads.with_untracked(|list| {
                         list.iter()
                             .find(|t| &t.parent.chat_id == chat && t.parent.ts == p)
-                            .map_or(0, |t| t.unread)
+                            .map_or((0, 0), |t| (t.unread, t.last_seq))
                     });
-                    unread_reply = s.among_unread(chat, Some(p), ts, unread);
+                    unread_reply = s.among_unread(chat, Some(p), ts, unread, Some(last_seq));
                 }
             }
         }

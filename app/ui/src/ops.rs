@@ -186,15 +186,23 @@ mod tests {
     #[test]
     fn a_new_message_deleted_after_it_came_is_unread_no_more() {
         let general = ChatId("general".into());
-        let mut s = snapshot(vec![message(700, "read")]);
-        assert!(add_new(&mut s, &message(1000, "@all news"), false, None));
-        assert!(add_new(&mut s, &message(1100, "more"), false, None));
+        let numbered = |ts, seq_no, text| Message {
+            seq_no,
+            ..message(ts, text)
+        };
+        let mut s = snapshot(vec![numbered(700, 7, "read")]);
+        // The chat's last message is the loaded one, not the demo's.
+        if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == general) {
+            ch.last_ts = 700;
+        }
+        assert!(add_new(&mut s, &numbered(1000, 8, "@all news"), false, None));
+        assert!(add_new(&mut s, &numbered(1100, 9, "more"), false, None));
         assert_eq!(counters(&s), (2, 1));
         // What `snapshot::remove` asks before taking a message out of the counts.
         let unread = counters(&s).0;
-        assert!(s.among_unread(&general, None, 1000, unread));
-        assert!(s.among_unread(&general, None, 1100, unread));
-        assert!(!s.among_unread(&general, None, 700, unread));
+        assert!(s.among_unread(&general, None, 1000, unread, None));
+        assert!(s.among_unread(&general, None, 1100, unread, None));
+        assert!(!s.among_unread(&general, None, 700, unread, None));
     }
 
     #[test]
