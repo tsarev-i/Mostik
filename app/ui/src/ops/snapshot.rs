@@ -131,8 +131,8 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
         // chat is noted apart, since unread ones from before may still be above the position.
         if !m.edited && m.seq_no > 0 {
             if mine {
-                ch.seen_seq = ch.seen_seq.max(m.seq_no);
-                let seen = ch.seen_seq;
+                let seen = ch.seen_seq.unwrap_or(0).max(m.seq_no);
+                ch.seen_seq = Some(seen);
                 ch.uncounted.retain(|n| *n > seen);
             } else if viewing && !ch.uncounted.contains(&m.seq_no) {
                 // Not bounded: a number dropped early would make its message an unread one. The
@@ -244,7 +244,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                     let mentioned = s.mentions_me(&m.text);
                     let (unread, seen, uncounted) = s
                         .chat(chat)
-                        .map_or((0, 0, vec![]), |ch| (ch.unread, ch.seen_seq, ch.uncounted.clone()));
+                        .map_or((0, None, vec![]), |ch| (ch.unread, ch.seen_seq, ch.uncounted.clone()));
                     let counted = s.among_unread(chat, None, ts, unread, seen, &uncounted);
                     let seq = m.seq_no;
                     if let Some(ch) = s.chats.iter_mut().find(|ch| &ch.id == chat) {
@@ -261,7 +261,7 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                     let (unread, seen) = c.threads.with_untracked(|list| {
                         list.iter()
                             .find(|t| &t.parent.chat_id == chat && t.parent.ts == p)
-                            .map_or((0, 0), |t| (t.unread, t.seen_seq))
+                            .map_or((0, None), |t| (t.unread, t.seen_seq))
                     });
                     unread_reply = s.among_unread(chat, Some(p), ts, unread, seen, &[]);
                 }

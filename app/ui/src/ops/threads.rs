@@ -93,7 +93,7 @@ pub fn load_threads(c: Ctx) {
                         unread: replies[mine + 1..].iter().filter(|r| r.author != s.me).count() as u32,
                         last_ts: replies.last().map_or(p.ts, |r| r.ts),
                         last_seq: 0,
-                        seen_seq: 0,
+                        seen_seq: None,
                     })
                 })
                 .collect()
@@ -167,7 +167,7 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
                     unread: 0,
                     last_ts: 0,
                     last_seq: 0,
-                    seen_seq: 0,
+                    seen_seq: None,
                 });
                 list.len() - 1
             }

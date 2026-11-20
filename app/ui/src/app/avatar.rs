@@ -59,7 +59,7 @@ pub(super) fn steady_chat(ch: &Chat) -> Chat {
         last_ts: 0,
         peer_seen_ts: 0,
         last_seq: 0,
-        seen_seq: 0,
+        seen_seq: None,
         uncounted: vec![],
         unread: ch.unread.min(1),
         ..ch.clone()

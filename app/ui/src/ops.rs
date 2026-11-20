@@ -193,7 +193,7 @@ mod tests {
         let mut s = snapshot(vec![numbered(700, 7, "read")]);
         // Read up to the loaded message.
         s.read_chat(&general);
-        assert_eq!(s.chat(&general).map(|ch| ch.seen_seq), Some(7));
+        assert_eq!(s.chat(&general).and_then(|ch| ch.seen_seq), Some(7));
         assert!(add_new(&mut s, &numbered(1000, 8, "@all news"), false, None));
         assert!(add_new(&mut s, &numbered(1100, 9, "more"), false, None));
         assert_eq!(counters(&s), (2, 1));
@@ -209,12 +209,12 @@ mod tests {
         // and the two before it stay unread ones.
         assert!(add_new(&mut s, &numbered(1200, 10, "seen"), true, None));
         let (seen, uncounted) = (ch(&s).seen_seq, ch(&s).uncounted);
-        assert_eq!((counters(&s), seen, uncounted.as_slice()), ((2, 1), 7, &[10][..]));
+        assert_eq!((counters(&s), seen, uncounted.as_slice()), ((2, 1), Some(7), &[10][..]));
         assert!(!s.among_unread(&general, None, 1200, unread, seen, &uncounted));
         assert!(s.among_unread(&general, None, 1000, unread, seen, &uncounted));
         // Read to the end: nothing is held apart any more.
         s.read_chat(&general);
-        assert_eq!((ch(&s).seen_seq, ch(&s).uncounted.len()), (10, 0));
+        assert_eq!((ch(&s).seen_seq, ch(&s).uncounted.len()), (Some(10), 0));
     }
 
     #[test]

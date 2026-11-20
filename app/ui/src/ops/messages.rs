@@ -481,7 +481,7 @@ pub fn mark_unread(c: Ctx, m: &Message) {
                 ch.unread = n.max(1);
                 // The read position goes back to just before it, as Telemost's does.
                 if m.seq_no > 0 {
-                    ch.seen_seq = m.seq_no - 1;
+                    ch.seen_seq = Some(m.seq_no - 1);
                 }
                 // Every message from it on is counted now.
                 ch.uncounted.clear();
