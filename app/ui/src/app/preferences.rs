@@ -7,11 +7,12 @@ use mostik_core::*;
 
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
+use crate::keys::{self, Action};
 use crate::modal::Modal;
 use crate::settings::{
     ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES, TrayIcon, on_mac,
 };
-use crate::{bridge, keys, ops};
+use crate::{bridge, ops};
 
 use super::org::current_org;
 use super::state::{Ctx, ctx};
@@ -227,7 +228,10 @@ fn PrefAccessibility() -> impl IntoView {
                 <option value=z.to_string() selected=move || c.settings.with(|s| s.zoom == z)>{format!("{z}%")}</option>
             }).collect_view()}
         </select>
-        <p class="pref-hint">{tr().zoom_hint(&keys::label("Ctrl+="), &keys::label("Ctrl+-"), &keys::label("Ctrl+0"))}</p>
+        <p class="pref-hint">{move || c.settings.with(|s| {
+            let key = |action| keys::shown(&s.shortcuts, action);
+            tr().zoom_hint(&key(Action::ZoomIn), &key(Action::ZoomOut), &key(Action::ZoomReset))
+        })}</p>
     }
 }
 
@@ -527,69 +531,169 @@ pub(super) fn AddEmojiDialog() -> impl IntoView {
 }
 
 /// "Advanced": what Enter does in a message field, and the keyboard shortcuts of this platform,
-/// Cmd in place of Ctrl on macOS. The keys that send follow the Enter choice above them.
+/// Cmd in place of Ctrl on macOS. The keys that send follow the Enter choice above them; those of
+/// the app's own actions can be changed.
 #[component]
 fn PrefAdvanced() -> impl IntoView {
     let c = ctx();
     let g = |s: &Settings| s.enter_sends;
     let set = |s: &mut Settings, v| s.enter_sends = v;
+    // The action whose new keys are awaited, and why the last ones were not taken.
+    let recording: RwSignal<Option<Action>> = RwSignal::new(None);
+    let refused: RwSignal<Option<(Action, String)>> = RwSignal::new(None);
+    let general = move || {
+        let mut rows = vec![
+            Row::Action(Action::Search),
+            Row::Action(Action::Back),
+            Row::Action(Action::Forward),
+            Row::Action(Action::Preferences),
+            Row::Fixed(tr().sc_close, "Esc".to_owned()),
+            Row::Action(Action::ZoomIn),
+            Row::Action(Action::ZoomOut),
+            Row::Action(Action::ZoomReset),
+        ];
+        // The system's own, from the app menu of macOS.
+        if on_mac() {
+            rows.push(Row::Fixed(tr().sc_hide_window, keys::label("Ctrl+W")));
+            rows.push(Row::Fixed(tr().sc_quit, keys::label("Ctrl+Q")));
+        }
+        rows
+    };
+    let field = move || {
+        let (send, newline) = keys::send_and_newline(c.settings.with(|s| s.enter_sends));
+        vec![
+            Row::Fixed(tr().sc_send, send),
+            Row::Fixed(tr().sc_newline, newline),
+            Row::Fixed(tr().sc_edit_last, "↑".to_owned()),
+            Row::Action(Action::Bold),
+            Row::Action(Action::Italic),
+            Row::Action(Action::Strike),
+            Row::Action(Action::Link),
+        ]
+    };
+    let any_own = move || c.settings.with(|s| !s.shortcuts.is_empty());
     view! {
         <h3>{tr().p_enter_to}</h3>
         {radio(c, "enter", tr().p_enter_send, true, g, set)}
         {radio(c, "enter", tr().enter_newline(&keys::label("Ctrl+Enter")), false, g, set)}
         <h3 class="pref-h">{tr().p_shortcuts}</h3>
+        <p class="pref-hint flush">{tr().sc_change_hint}</p>
         <div class="shortcut-group">{tr().sc_general}</div>
-        {shortcut_list(general_shortcuts())}
+        {shortcut_list(general(), recording, refused)}
         <div class="shortcut-group">{tr().sc_message_field}</div>
-        {move || shortcut_list(field_shortcuts(c.settings.with(|s| s.enter_sends)))}
+        {move || shortcut_list(field(), recording, refused)}
+        {move || any_own().then(|| view! {
+            <button class="link" on:click=move |_| {
+                recording.set(None);
+                refused.set(None);
+                c.settings.update(|s| s.shortcuts.clear());
+            }>{tr().sc_reset_all}</button>
+        })}
     }
 }
 
-/// Shortcuts that work anywhere in the window.
-fn general_shortcuts() -> Vec<(&'static str, String)> {
-    let key = keys::label;
-    let (back, forward) = keys::back_forward();
-    let mut rows = vec![
-        (tr().sc_search, key("Ctrl+K")),
-        (tr().back, back),
-        (tr().forward, forward),
-        (tr().preferences, key("Ctrl+,")),
-        (tr().sc_close, "Esc".to_owned()),
-        (tr().sc_zoom_in, key("Ctrl+=")),
-        (tr().sc_zoom_out, key("Ctrl+-")),
-        (tr().sc_zoom_reset, key("Ctrl+0")),
-    ];
-    // The system's own, from the app menu of macOS.
-    if on_mac() {
-        rows.push((tr().sc_hide_window, key("Ctrl+W")));
-        rows.push((tr().sc_quit, key("Ctrl+Q")));
-    }
-    rows
-}
-
-/// Shortcuts of a message field; sending depends on what Enter does.
-fn field_shortcuts(enter_sends: bool) -> Vec<(&'static str, String)> {
-    let key = keys::label;
-    let (send, newline) = keys::send_and_newline(enter_sends);
-    vec![
-        (tr().sc_send, send),
-        (tr().sc_newline, newline),
-        (tr().sc_edit_last, "↑".to_owned()),
-        (tr().fmt_bold, key("Ctrl+B")),
-        (tr().fmt_italic, key("Ctrl+I")),
-        (tr().fmt_strike, key("Ctrl+Shift+X")),
-        (tr().fmt_link, keys::add_link()),
-    ]
+/// A row of the shortcut list: an action whose keys can be changed, or fixed keys.
+enum Row {
+    Action(Action),
+    Fixed(&'static str, String),
 }
 
 /// Actions with their keys, one per row.
-fn shortcut_list(rows: Vec<(&'static str, String)>) -> impl IntoView {
+fn shortcut_list(
+    rows: Vec<Row>,
+    recording: RwSignal<Option<Action>>,
+    refused: RwSignal<Option<(Action, String)>>,
+) -> impl IntoView {
     view! {
         <dl class="shortcuts">
-            {rows.into_iter().map(|(action, keys)| view! {
-                <dt>{action}</dt>
-                <dd><kbd class="keycap">{keys}</kbd></dd>
+            {rows.into_iter().map(|row| match row {
+                Row::Action(action) => view! {
+                    <dt>{action.name()}</dt>
+                    <dd><ShortcutKeys action recording refused/></dd>
+                }.into_any(),
+                Row::Fixed(name, keys) => view! {
+                    <dt>{name}</dt>
+                    <dd><kbd class="keycap">{keys}</kbd></dd>
+                }.into_any(),
             }).collect_view()}
         </dl>
+    }
+}
+
+/// The keys of an action: a click waits for new keys, Esc or a click elsewhere cancels; keys taken
+/// by another action or the system are refused with the reason. "Restore default" goes back to the
+/// standard keys.
+#[component]
+fn ShortcutKeys(
+    action: Action,
+    recording: RwSignal<Option<Action>>,
+    refused: RwSignal<Option<(Action, String)>>,
+) -> impl IntoView {
+    let c = ctx();
+    let button = NodeRef::<leptos::html::Button>::new();
+    let waiting = move || recording.get() == Some(action);
+    let own = move || c.settings.with(|s| s.shortcuts.contains_key(action.id()));
+    // Also on `blur`, which a button focused when "Preferences" closes gets after the list is
+    // disposed: the signals may be gone then (as in #61).
+    let stop = move || {
+        if recording.try_get_untracked() == Some(Some(action)) {
+            recording.try_set(None);
+        }
+    };
+    // The keys go to this button only: the app's own shortcuts and Esc closing "Preferences" are
+    // listened to on the window, which they do not reach.
+    let on_key = move |e: ev::KeyboardEvent| {
+        if recording.get_untracked() != Some(action) {
+            return;
+        }
+        e.prevent_default();
+        e.stop_propagation();
+        let plain = !(e.ctrl_key() || e.alt_key() || e.shift_key() || e.meta_key());
+        if e.key() == "Escape" && plain {
+            refused.set(None);
+            return stop();
+        }
+        let Some(new) = keys::Shortcut::of(&e) else {
+            return;
+        };
+        match c.settings.with_untracked(|s| keys::check(&new, action, &s.shortcuts)) {
+            Ok(()) => {
+                refused.set(None);
+                recording.set(None);
+                c.settings.update(|s| keys::assign(&mut s.shortcuts, action, &new));
+            }
+            Err(why) => refused.set(Some((action, why.text()))),
+        }
+    };
+    view! {
+        <button class="keycap edit" class:waiting=waiting node_ref=button
+            title=move || if waiting() { tr().sc_press_title } else { tr().sc_change }
+            on:click=move |_| {
+                refused.set(None);
+                recording.set(Some(action));
+                // A click does not focus a button in WebKit on macOS.
+                if let Some(el) = button.get_untracked() {
+                    let _ = el.focus();
+                }
+            }
+            on:keydown=on_key
+            on:blur=move |_| stop()>
+            {move || if waiting() {
+                tr().sc_press.to_owned()
+            } else {
+                c.settings.with(|s| keys::shown(&s.shortcuts, action))
+            }}
+        </button>
+        {move || own().then(|| view! {
+            <button class="icon-btn shortcut-reset" title=tr().sc_reset on:click=move |_| {
+                refused.set(None);
+                c.settings.update(|s| {
+                    s.shortcuts.remove(action.id());
+                });
+            }><Icon icon=I::Reply size=14/></button>
+        })}
+        {move || refused.get().filter(|(a, _)| *a == action).map(|(_, why)| view! {
+            <div class="shortcut-refused">{why}</div>
+        })}
     }
 }

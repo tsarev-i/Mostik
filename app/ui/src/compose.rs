@@ -13,9 +13,10 @@ use wasm_bindgen::JsCast;
 use crate::app::{Ctx, place_caret, scoped_window_listener, selection, wrap_selection};
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::keys::{self, Action};
 use crate::modal::Modal;
 use crate::text_edit::{LinkTarget, insert_into, paste_link};
-use crate::{bridge, editor, keys};
+use crate::{bridge, editor};
 
 /// A message field as its toolbar, hotkeys and dialogs see it.
 #[derive(Clone, Copy)]
@@ -81,19 +82,20 @@ impl Field {
     }
 
     /// Formatting hotkeys, as in Slack: Ctrl+B bold, Ctrl+I italic, Ctrl+Shift+X strikethrough,
-    /// Ctrl+Shift+U a link, or Ctrl+Shift+K where that does not come (see [`keys::add_link`]); Cmd
-    /// in place of Ctrl on macOS, where Ctrl+B and Ctrl+I stay the field's. Keys are taken by their
-    /// place, so they work in any keyboard layout. Returns whether the key was one of them.
+    /// Ctrl+Shift+U or Ctrl+Shift+K a link; Cmd in place of Ctrl on macOS, where Ctrl+B and Ctrl+I
+    /// stay the field's. Or the keys the user gave them (see [`keys`]). Returns whether the key was
+    /// one of them.
     pub fn hotkey(self, e: &ev::KeyboardEvent) -> bool {
-        if !keys::command(e) || e.alt_key() {
+        if keys::pressed(e, Action::Bold) {
+            self.wrap("**", "**");
+        } else if keys::pressed(e, Action::Italic) {
+            self.wrap("__", "__");
+        } else if keys::pressed(e, Action::Strike) {
+            self.wrap("~~", "~~");
+        } else if keys::pressed(e, Action::Link) {
+            self.open_link();
+        } else {
             return false;
-        }
-        match (e.code().as_str(), e.shift_key()) {
-            ("KeyB", false) => self.wrap("**", "**"),
-            ("KeyI", false) => self.wrap("__", "__"),
-            ("KeyX", true) => self.wrap("~~", "~~"),
-            ("KeyU" | "KeyK", true) => self.open_link(),
-            _ => return false,
         }
         e.prevent_default();
         true
@@ -221,15 +223,18 @@ pub fn EmojiButton(field: Field, class: &'static str, size: u32) -> impl IntoVie
 #[component]
 pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
     let fmt = move |before: &'static str, after: &'static str| move |_| field.wrap(before, after);
-    let hint = |name: &str, shortcut: &str| format!("{name} ({})", keys::label(shortcut));
+    let c = expect_context::<Ctx>();
+    let hint = move |name: &'static str, action: Action| {
+        move || format!("{name} ({})", c.settings.with(|s| keys::shown(&s.shortcuts, action)))
+    };
     view! {
         <div class="composer-toolbar" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
-            <button class="fmt" title=hint(tr().fmt_bold, "Ctrl+B") on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
-            <button class="fmt" title=hint(tr().fmt_italic, "Ctrl+I") on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_bold, Action::Bold) on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_italic, Action::Italic) on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
             <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
-            <button class="fmt" title=hint(tr().fmt_strike, "Ctrl+Shift+X") on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_strike, Action::Strike) on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
             <span class="sep"></span>
-            <button class="fmt" title=format!("{} ({})", tr().fmt_link, keys::add_link()) on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_link, Action::Link) on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
             <span class="sep"></span>
             <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
             <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>

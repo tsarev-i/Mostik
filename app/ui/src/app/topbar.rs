@@ -10,8 +10,8 @@ use mostik_core::*;
 
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
-use crate::settings::on_mac;
-use crate::{bridge, keys, ops, time};
+use crate::keys::{self, Action};
+use crate::{bridge, ops, time};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon};
 use super::dialogs::profile_face;
@@ -27,14 +27,6 @@ enum Hit {
     Message(Box<Message>, String),
 }
 
-/// Whether the focus is in a text field: an input, a text area or an editable element.
-fn in_text_field() -> bool {
-    document().active_element().is_some_and(|el| {
-        matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA")
-            || wasm_bindgen::JsCast::dyn_ref::<web_sys::HtmlElement>(&el).is_some_and(|el| el.is_content_editable())
-    })
-}
-
 #[component]
 pub(super) fn TopBar() -> impl IntoView {
     let c = ctx();
@@ -44,13 +36,10 @@ pub(super) fn TopBar() -> impl IntoView {
     let selected = RwSignal::new(0usize);
     let hits: RwSignal<Vec<Hit>> = RwSignal::new(vec![]);
     let placeholder = move || tr().search_in(&org_name(c));
-    // Ctrl+K (Cmd+K on macOS) is the quick switcher, Alt+← / Alt+→ go back and forward, as in
-    // Slack. Ctrl+Shift+K is "Add link" in a message field. The physical key, so that Ctrl+K works
-    // in any layout (in Russian the key gives "л"). On macOS Ctrl+K in a text field deletes to the
-    // end of the line and stays the field's, and so do Option+arrows, which move the caret by
-    // word: Cmd+[ / Cmd+] go back and forward there, as in Slack for Mac.
+    // The quick switcher (Ctrl+K, Cmd+K on macOS), back and forward (Alt+← / Alt+→, Cmd+[ / Cmd+]
+    // on macOS), as in Slack, or the keys the user gave them (see [`keys`]).
     scoped_window_listener(ev::keydown, move |e| {
-        if keys::command(&e) && !e.shift_key() && !e.alt_key() && e.code() == "KeyK" {
+        if keys::pressed(&e, Action::Search) {
             e.prevent_default();
             if let Some(el) = input.get_untracked() {
                 let _ = el.focus();
@@ -58,16 +47,12 @@ pub(super) fn TopBar() -> impl IntoView {
             }
         } else if e.key() == "Escape" && history_open.get_untracked() {
             history_open.set(false);
-        } else if e.alt_key()
-            && !e.ctrl_key()
-            && (e.key() == "ArrowLeft" || e.key() == "ArrowRight")
-            && !(on_mac() && in_text_field())
-        {
+        } else if keys::pressed(&e, Action::Back) {
             e.prevent_default();
-            ops::navigate(c, e.key() == "ArrowLeft");
-        } else if e.meta_key() && !e.shift_key() && matches!(e.code().as_str(), "BracketLeft" | "BracketRight") {
+            ops::navigate(c, true);
+        } else if keys::pressed(&e, Action::Forward) {
             e.prevent_default();
-            ops::navigate(c, e.code() == "BracketLeft");
+            ops::navigate(c, false);
         }
     });
     // A click outside the search and history closes their drop-downs.
@@ -128,14 +113,16 @@ pub(super) fn TopBar() -> impl IntoView {
             _ => {}
         }
     };
-    let (back_keys, forward_keys) = keys::back_forward();
+    let hint = move |name: &'static str, action: Action| {
+        move || format!("{name} ({})", c.settings.with(|s| keys::shown(&s.shortcuts, action)))
+    };
     let can_back = move || c.nav_back.with(|v| !v.is_empty());
     let can_forward = move || c.nav_forward.with(|v| !v.is_empty());
     view! {
         <header class="topbar">
             <div class="topbar-nav">
-                <button class="tb-btn" title=format!("{} ({back_keys})", tr().back) disabled=move || !can_back() on:click=move |_| ops::navigate(c, true)><Icon icon=I::ArrowLeft/></button>
-                <button class="tb-btn" title=format!("{} ({forward_keys})", tr().forward) disabled=move || !can_forward() on:click=move |_| ops::navigate(c, false)><Icon icon=I::ArrowRight/></button>
+                <button class="tb-btn" title=hint(tr().back, Action::Back) disabled=move || !can_back() on:click=move |_| ops::navigate(c, true)><Icon icon=I::ArrowLeft/></button>
+                <button class="tb-btn" title=hint(tr().forward, Action::Forward) disabled=move || !can_forward() on:click=move |_| ops::navigate(c, false)><Icon icon=I::ArrowRight/></button>
                 <div class="history-wrap">
                     <button class="tb-btn" class:active=move || history_open.get() title=tr().history
                         on:click=move |_| history_open.update(|v| *v = !*v)><Icon icon=I::Clock/></button>
@@ -155,7 +142,7 @@ pub(super) fn TopBar() -> impl IntoView {
                         on:input=move |e| { c.search.set(event_target_value(&e)); selected.set(0); open.set(true); }
                         on:keydown=on_key
                     />
-                    <span class="kbd">{keys::label("Ctrl+K").replace('+', " ")}</span>
+                    <span class="kbd">{move || c.settings.with(|s| keys::shown(&s.shortcuts, Action::Search)).replace('+', " ")}</span>
                 </label>
                 <Show when=move || open.get()>
                     <SearchResults hits=hits selected=selected on_pick=Callback::new(activate)/>

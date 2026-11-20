@@ -381,23 +381,25 @@ pub fn App() -> impl IntoView {
         chat_drop(c);
     });
 
-    // Ctrl+= / Ctrl+- / Ctrl+0 zoom, Ctrl+, opens Preferences, as in Slack; Cmd on macOS.
+    // Ctrl+= / Ctrl+- / Ctrl+0 zoom, Ctrl+, opens Preferences, as in Slack; Cmd on macOS. Or the
+    // keys the user gave them (see [`crate::keys`]).
     scoped_window_listener(ev::keydown, move |e| {
-        if !crate::keys::command(&e) || e.alt_key() {
-            return;
-        }
-        if e.code() == "Comma" && !e.shift_key() {
+        use crate::keys::{Action, pressed};
+        if pressed(&e, Action::Preferences) {
             e.prevent_default();
             close_menus(c);
             c.me_menu.set(false);
             c.prefs.set(true);
             return;
         }
-        let next = match e.key().as_str() {
-            "=" | "+" => Some(true),
-            "-" | "_" => Some(false),
-            "0" => None,
-            _ => return,
+        let next = if pressed(&e, Action::ZoomIn) {
+            Some(true)
+        } else if pressed(&e, Action::ZoomOut) {
+            Some(false)
+        } else if pressed(&e, Action::ZoomReset) {
+            None
+        } else {
+            return;
         };
         e.prevent_default();
         c.settings

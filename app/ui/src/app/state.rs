@@ -324,6 +324,7 @@ pub(super) fn set_locale(lang: Lang, clock24: bool) {
 /// Language, time format, theme and colour mode go onto the document root.
 pub(super) fn apply_settings(st: &Settings) {
     set_locale(st.lang, st.clock24);
+    crate::keys::set_custom(&st.shortcuts);
     if let Some(root) = document().document_element() {
         let _ = root.set_attribute("lang", st.lang.code());
         let _ = root.set_attribute("data-mode", if st.dark() { "dark" } else { "light" });

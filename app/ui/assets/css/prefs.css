@@ -50,7 +50,7 @@
 .shortcut-group { margin-top: 16px; font-size: 13px; font-weight: 700; color: var(--text-muted); }
 .shortcuts { display: grid; grid-template-columns: 1fr auto; gap: 8px 24px; align-items: center; margin: 10px 0 0; }
 .shortcuts dt { min-width: 0; }
-.shortcuts dd { margin: 0; text-align: right; }
+.shortcuts dd { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; margin: 0; }
 .keycap {
   display: inline-block;
   min-width: 24px;
@@ -63,3 +63,9 @@
   text-align: center;
   white-space: nowrap;
 }
+/* A shortcut that can be changed: a click waits for new keys. */
+.keycap.edit { cursor: pointer; }
+.keycap.edit:hover { border-color: var(--accent-blue); }
+.keycap.edit.waiting { border-color: var(--highlight); box-shadow: 0 0 0 1px var(--highlight); color: var(--text-muted); }
+.shortcut-reset { width: 24px; height: 24px; }
+.shortcut-refused { flex-basis: 100%; text-align: right; font-size: 12px; color: var(--badge); }

@@ -381,6 +381,15 @@ pub struct Tr {
     pub sc_send: &'static str,
     pub sc_newline: &'static str,
     pub sc_edit_last: &'static str,
+    pub sc_change_hint: &'static str,
+    /// In place of the keys while new ones are being pressed.
+    pub sc_press: &'static str,
+    pub sc_press_title: &'static str,
+    pub sc_change: &'static str,
+    pub sc_reset: &'static str,
+    pub sc_reset_all: &'static str,
+    /// The keys are the system's or a text field's: copy, paste, undo, Enter.
+    pub sc_system: &'static str,
     pub theme_names: [&'static str; 7],
     // Profile
     pub profile: &'static str,
@@ -806,6 +815,13 @@ pub static RU: Tr = Tr {
     sc_send: "Отправить сообщение",
     sc_newline: "Новая строка",
     sc_edit_last: "Изменить своё последнее сообщение (в пустом поле)",
+    sc_change_hint: "Нажмите на сочетание, чтобы назначить другое",
+    sc_press: "Нажмите клавиши…",
+    sc_press_title: "Esc: отмена",
+    sc_change: "Назначить другое сочетание",
+    sc_reset: "Вернуть стандартное",
+    sc_reset_all: "Вернуть все стандартные",
+    sc_system: "Это сочетание занято системой",
     theme_names: ["Сумерки", "Мох", "Вечер", "Полночь", "Лес", "Океан", "Закат"],
     profile: "Профиль",
     message_button: "Сообщение",
@@ -1235,6 +1251,13 @@ pub static EN: Tr = Tr {
     sc_send: "Send the message",
     sc_newline: "New line",
     sc_edit_last: "Edit your last message (in an empty field)",
+    sc_change_hint: "Click a shortcut to change it",
+    sc_press: "Press keys…",
+    sc_press_title: "Esc to cancel",
+    sc_change: "Change the shortcut",
+    sc_reset: "Restore default",
+    sc_reset_all: "Restore all defaults",
+    sc_system: "This shortcut belongs to the system",
     theme_names: ["Dusk", "Moss", "Twilight", "Midnight", "Forest", "Ocean", "Sunset"],
     profile: "Profile",
     message_button: "Message",
@@ -1696,6 +1719,23 @@ impl Tr {
         match self.lang {
             Lang::Ru => format!("{zoom_in} увеличивает, {zoom_out} уменьшает, {reset} возвращает исходный размер"),
             Lang::En => format!("Use {zoom_in} to zoom in, {zoom_out} to zoom out and {reset} to reset"),
+        }
+    }
+
+    /// New keys for a shortcut that has none of Ctrl, Alt or Cmd: they would fire while typing.
+    pub fn sc_need_modifier(&self, mac: bool) -> String {
+        let keys = if mac { "⌘, ⌥ или ⌃" } else { "Ctrl или Alt" };
+        match self.lang {
+            Lang::Ru => format!("Добавьте к клавише {keys}"),
+            Lang::En => format!("Hold {} with the key", keys.replace("или", "or")),
+        }
+    }
+
+    /// New keys for a shortcut that are already another action's.
+    pub fn sc_taken(&self, action: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Уже назначено: «{action}»"),
+            Lang::En => format!("Already used for {action}"),
         }
     }
 

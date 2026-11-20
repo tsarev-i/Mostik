@@ -1,6 +1,8 @@
 //! Mostik preferences modelled on Slack's Preferences. Stored in `localStorage`,
 //! some of them (notifications, language) are passed to the backend.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::Lang;
@@ -84,6 +86,9 @@ pub struct Settings {
     pub auto_update: bool,
     /// The tray icon on Linux and Windows.
     pub tray_icon: TrayIcon,
+    /// The user's own keys of shortcuts, by [`crate::keys::Action::id`]; an action without an
+    /// entry has its standard keys.
+    pub shortcuts: BTreeMap<String, String>,
 }
 
 /// The tray icon from "Preferences → Appearance" on Linux and Windows; macOS always shows the white one,
@@ -152,6 +157,7 @@ impl Default for Settings {
             hide_muted: false,
             auto_update: true,
             tray_icon: TrayIcon::default(),
+            shortcuts: BTreeMap::new(),
         }
     }
 }
