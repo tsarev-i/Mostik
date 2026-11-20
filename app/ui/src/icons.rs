@@ -66,6 +66,7 @@ pub enum I {
     Phone,
     PhoneOff,
     Download,
+    Keyboard,
     /// Reply to a message: an arrow turning back.
     Reply,
 }
@@ -133,6 +134,9 @@ fn paths(i: I) -> &'static str {
         I::Video => r#"<path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/>"#,
         I::ChevronDown => r#"<path d="m6 9 6 6 6-6"/>"#,
         I::ChevronRight => r#"<path d="m9 18 6-6-6-6"/>"#,
+        I::Keyboard => {
+            r#"<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/><path d="M7 16h10"/>"#
+        }
         I::Kebab => r#"<circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/>"#,
         I::Users => {
             r#"<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>"#

@@ -54,8 +54,8 @@ use profile::{ProfilePane, StatusDialog};
 use rail::Rail;
 use sidebar::{Sidebar, chat_drag_to, chat_drop};
 use state::{
-    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, ctx, empty_snapshot, set_locale, store_width,
-    stored_width,
+    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, close_menus, ctx, empty_snapshot, set_locale,
+    store_width, stored_width,
 };
 use topbar::TopBar;
 use views::{DraftsView, ThreadPane, ThreadsView};
@@ -381,9 +381,16 @@ pub fn App() -> impl IntoView {
         chat_drop(c);
     });
 
-    // Ctrl+= / Ctrl+- / Ctrl+0 zoom, as in Slack.
+    // Ctrl+= / Ctrl+- / Ctrl+0 zoom, Ctrl+, opens Preferences, as in Slack; Cmd on macOS.
     scoped_window_listener(ev::keydown, move |e| {
-        if !(e.ctrl_key() || e.meta_key()) || e.alt_key() {
+        if !crate::keys::command(&e) || e.alt_key() {
+            return;
+        }
+        if e.code() == "Comma" && !e.shift_key() {
+            e.prevent_default();
+            close_menus(c);
+            c.me_menu.set(false);
+            c.prefs.set(true);
             return;
         }
         let next = match e.key().as_str() {

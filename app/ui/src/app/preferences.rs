@@ -11,10 +11,10 @@ use crate::modal::Modal;
 use crate::settings::{
     ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES, TrayIcon, on_mac,
 };
-use crate::{bridge, ops};
+use crate::{bridge, keys, ops};
 
 use super::org::current_org;
-use super::state::{Ctx, ctx};
+use super::state::{Ctx, ctx, enter_sends};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum PrefTab {
@@ -26,6 +26,7 @@ pub enum PrefTab {
     Home,
     Accessibility,
     Advanced,
+    Shortcuts,
     Updates,
     Emoji,
 }
@@ -44,6 +45,7 @@ pub(super) fn PreferencesDialog() -> impl IntoView {
         (PrefTab::MarkRead, I::Check, tr().p_mark_as_read),
         (PrefTab::Accessibility, I::Users, tr().p_accessibility),
         (PrefTab::Advanced, I::Kebab, tr().p_advanced),
+        (PrefTab::Shortcuts, I::Keyboard, tr().p_shortcuts),
         (PrefTab::Emoji, I::Smile, tr().custom_emoji),
         (PrefTab::Updates, I::Download, tr().p_updates),
     ];
@@ -73,6 +75,7 @@ pub(super) fn PreferencesDialog() -> impl IntoView {
                         PrefTab::MarkRead => view! { <PrefMarkRead/> }.into_any(),
                         PrefTab::Accessibility => view! { <PrefAccessibility/> }.into_any(),
                         PrefTab::Advanced => view! { <PrefAdvanced/> }.into_any(),
+                        PrefTab::Shortcuts => view! { <PrefShortcuts/> }.into_any(),
                         PrefTab::Updates => view! { <PrefUpdates/> }.into_any(),
                         PrefTab::Emoji => view! { <PrefEmoji/> }.into_any(),
                     }}
@@ -86,7 +89,7 @@ pub(super) fn PreferencesDialog() -> impl IntoView {
 fn radio<T: PartialEq + Copy + Send + Sync + 'static>(
     c: Ctx,
     name: &'static str,
-    label: &'static str,
+    label: impl Into<String>,
     value: T,
     get: fn(&Settings) -> T,
     set: fn(&mut Settings, T),
@@ -95,7 +98,7 @@ fn radio<T: PartialEq + Copy + Send + Sync + 'static>(
         <label class="pref-radio">
             <input type="radio" name=name prop:checked=move || c.settings.with(|s| get(s) == value)
                 on:change=move |_| c.settings.update(|s| set(s, value))/>
-            <span>{label}</span>
+            <span>{label.into()}</span>
         </label>
     }
 }
@@ -227,7 +230,7 @@ fn PrefAccessibility() -> impl IntoView {
                 <option value=z.to_string() selected=move || c.settings.with(|s| s.zoom == z)>{format!("{z}%")}</option>
             }).collect_view()}
         </select>
-        <p class="pref-hint">{tr().p_zoom_hint}</p>
+        <p class="pref-hint">{tr().zoom_hint(&keys::label("Ctrl+="), &keys::label("Ctrl+-"), &keys::label("Ctrl+0"))}</p>
     }
 }
 
@@ -534,6 +537,57 @@ fn PrefAdvanced() -> impl IntoView {
     view! {
         <h3>{tr().p_enter_to}</h3>
         {radio(c, "enter", tr().p_enter_send, true, g, set)}
-        {radio(c, "enter", tr().p_enter_newline, false, g, set)}
+        {radio(c, "enter", tr().enter_newline(&keys::label("Ctrl+Enter")), false, g, set)}
+    }
+}
+
+/// "Keyboard shortcuts": the keys of this platform, Cmd in place of Ctrl on macOS, as Slack lists
+/// them. Sending follows "Advanced".
+#[component]
+fn PrefShortcuts() -> impl IntoView {
+    let key = keys::label;
+    let (back, forward) = keys::back_forward();
+    let (send, newline) = keys::send_and_newline(enter_sends());
+    let mut general = vec![
+        (tr().sc_search, key("Ctrl+K")),
+        (tr().back, back),
+        (tr().forward, forward),
+        (tr().preferences, key("Ctrl+,")),
+        (tr().sc_close, "Esc".to_owned()),
+        (tr().sc_zoom_in, key("Ctrl+=")),
+        (tr().sc_zoom_out, key("Ctrl+-")),
+        (tr().sc_zoom_reset, key("Ctrl+0")),
+    ];
+    // The system's own, from the app menu of macOS.
+    if on_mac() {
+        general.push((tr().sc_hide_window, key("Ctrl+W")));
+        general.push((tr().sc_quit, key("Ctrl+Q")));
+    }
+    let field = vec![
+        (tr().sc_send, send),
+        (tr().sc_newline, newline),
+        (tr().sc_edit_last, "↑".to_owned()),
+        (tr().fmt_bold, key("Ctrl+B")),
+        (tr().fmt_italic, key("Ctrl+I")),
+        (tr().fmt_strike, key("Ctrl+Shift+X")),
+        (tr().fmt_link, keys::add_link()),
+    ];
+    view! {
+        <h3>{tr().sc_general}</h3>
+        {shortcut_list(general)}
+        <h3 class="pref-h">{tr().sc_message_field}</h3>
+        {shortcut_list(field)}
+    }
+}
+
+/// Actions with their keys, one per row.
+fn shortcut_list(rows: Vec<(&'static str, String)>) -> impl IntoView {
+    view! {
+        <dl class="shortcuts">
+            {rows.into_iter().map(|(action, keys)| view! {
+                <dt>{action}</dt>
+                <dd><kbd class="keycap">{keys}</kbd></dd>
+            }).collect_view()}
+        </dl>
     }
 }

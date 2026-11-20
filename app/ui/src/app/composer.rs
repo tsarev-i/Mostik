@@ -22,7 +22,7 @@ use super::message::{ReplyBar, human_size};
 use super::state::{ctx, enter_sends};
 
 /// In-place message editing, as in Slack: a text field, "Cancel" and "Save".
-/// Enter saves (or Ctrl+Enter, depending on the preference), Esc cancels.
+/// Enter saves (or Ctrl+Enter, Cmd+Enter on macOS, depending on the preference), Esc cancels.
 #[component]
 pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
     let c = ctx();
@@ -145,7 +145,7 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
                     }
                     on_key=move |e: ev::KeyboardEvent| match e.key().as_str() {
                         "Escape" => { e.prevent_default(); e.stop_propagation(); cancel_key(); }
-                        "Enter" if (enter_sends() && !e.shift_key() && !e.ctrl_key()) || (!enter_sends() && e.ctrl_key()) => {
+                        "Enter" if crate::keys::enter_sends_message(&e, enter_sends()) => {
                             e.prevent_default();
                             save_key();
                         }
@@ -418,7 +418,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             }
         }
         match ev.key().as_str() {
-            "Enter" if (enter_sends() && !ev.shift_key() && !ev.ctrl_key()) || (!enter_sends() && ev.ctrl_key()) => {
+            "Enter" if crate::keys::enter_sends_message(&ev, enter_sends()) => {
                 ev.prevent_default();
                 submit();
             }
@@ -570,7 +570,11 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     }><Icon icon=I::Plus size=16/></button>
                     <crate::compose::EmojiButton field class="cb" size=18/>
                     {move || sending.get().then(|| view! { <span class="composer-hint">{tr().uploading}</span> })}
-                    <span class="composer-hint">{if crate::app::enter_sends() { tr().hint_shift_enter } else { tr().hint_ctrl_enter }}</span>
+                    <span class="composer-hint">{
+                        let enter_sends = crate::app::enter_sends();
+                        let (send, newline) = crate::keys::send_and_newline(enter_sends);
+                        if enter_sends { tr().hint_newline(&newline) } else { tr().hint_send(&send) }
+                    }</span>
                     <div class="spacer"></div>
                     <div class=move || if (draft.with(|d| d.trim().is_empty()) && files().is_empty()) || sending.get() { "send-group empty" } else { "send-group" }>
                         <button class="send" title=tr().send on:click=move |_| submit()><Icon icon=I::Send size=16/></button>

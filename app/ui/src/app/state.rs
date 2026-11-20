@@ -342,7 +342,7 @@ pub(super) fn apply_settings(st: &Settings) {
     }
 }
 
-/// Enter sends the message (otherwise Ctrl+Enter), as in "Preferences → Advanced".
+/// Enter sends the message (otherwise Ctrl+Enter, Cmd+Enter on macOS), as in "Preferences → Advanced".
 pub fn enter_sends() -> bool {
     use_context::<Ctx>().is_none_or(|c| c.settings.with_untracked(|s| s.enter_sends))
 }

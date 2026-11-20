@@ -10,6 +10,7 @@ mod folders;
 mod hidden;
 mod i18n;
 mod icons;
+mod keys;
 mod modal;
 mod ops;
 mod order;

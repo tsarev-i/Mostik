@@ -46,3 +46,19 @@
 /* "Tray icon": the white one on a dark chip, the way a panel shows it. */
 .tray-preview { width: 28px; height: 28px; flex: none; border-radius: 6px; }
 .tray-preview.white { padding: 4px; box-sizing: border-box; background: #24262c; }
+/* "Keyboard shortcuts": the action on the left, its keys on the right. */
+.shortcuts { display: grid; grid-template-columns: 1fr auto; gap: 8px 24px; align-items: center; margin: 10px 0 0; }
+.shortcuts dt { min-width: 0; }
+.shortcuts dd { margin: 0; text-align: right; }
+.keycap {
+  display: inline-block;
+  min-width: 24px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-input);
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  white-space: nowrap;
+}

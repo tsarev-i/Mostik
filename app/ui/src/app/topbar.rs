@@ -10,7 +10,8 @@ use mostik_core::*;
 
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
-use crate::{bridge, ops, time};
+use crate::settings::on_mac;
+use crate::{bridge, keys, ops, time};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon};
 use super::dialogs::profile_face;
@@ -24,13 +25,6 @@ enum Hit {
     Chat(ChatId, String, Mark),
     Person(User),
     Message(Box<Message>, String),
-}
-
-/// Whether the app runs on macOS, where Option+arrows belong to text fields.
-fn on_mac() -> bool {
-    web_sys::window()
-        .and_then(|w| w.navigator().user_agent().ok())
-        .is_some_and(|ua| ua.contains("Mac OS"))
 }
 
 /// Whether the focus is in a text field: an input, a text area or an editable element.
@@ -50,12 +44,13 @@ pub(super) fn TopBar() -> impl IntoView {
     let selected = RwSignal::new(0usize);
     let hits: RwSignal<Vec<Hit>> = RwSignal::new(vec![]);
     let placeholder = move || tr().search_in(&org_name(c));
-    // Ctrl+K is the quick switcher, Alt+← / Alt+→ go back and forward, as in Slack. Ctrl+Shift+K
-    // is "Add link" in a message field. The physical key, so that Ctrl+K works in any layout (in
-    // Russian the key gives "л"). On macOS Option+arrows in a text field move the caret by word:
-    // there they stay the field's, and Cmd+[ / Cmd+] go back and forward, as in Slack for Mac.
+    // Ctrl+K (Cmd+K on macOS) is the quick switcher, Alt+← / Alt+→ go back and forward, as in
+    // Slack. Ctrl+Shift+K is "Add link" in a message field. The physical key, so that Ctrl+K works
+    // in any layout (in Russian the key gives "л"). On macOS Ctrl+K in a text field deletes to the
+    // end of the line and stays the field's, and so do Option+arrows, which move the caret by
+    // word: Cmd+[ / Cmd+] go back and forward there, as in Slack for Mac.
     scoped_window_listener(ev::keydown, move |e| {
-        if e.ctrl_key() && !e.shift_key() && e.code() == "KeyK" {
+        if keys::command(&e) && !e.shift_key() && !e.alt_key() && e.code() == "KeyK" {
             e.prevent_default();
             if let Some(el) = input.get_untracked() {
                 let _ = el.focus();
@@ -133,13 +128,14 @@ pub(super) fn TopBar() -> impl IntoView {
             _ => {}
         }
     };
+    let (back_keys, forward_keys) = keys::back_forward();
     let can_back = move || c.nav_back.with(|v| !v.is_empty());
     let can_forward = move || c.nav_forward.with(|v| !v.is_empty());
     view! {
         <header class="topbar">
             <div class="topbar-nav">
-                <button class="tb-btn" title=tr().back disabled=move || !can_back() on:click=move |_| ops::navigate(c, true)><Icon icon=I::ArrowLeft/></button>
-                <button class="tb-btn" title=tr().forward disabled=move || !can_forward() on:click=move |_| ops::navigate(c, false)><Icon icon=I::ArrowRight/></button>
+                <button class="tb-btn" title=format!("{} ({back_keys})", tr().back) disabled=move || !can_back() on:click=move |_| ops::navigate(c, true)><Icon icon=I::ArrowLeft/></button>
+                <button class="tb-btn" title=format!("{} ({forward_keys})", tr().forward) disabled=move || !can_forward() on:click=move |_| ops::navigate(c, false)><Icon icon=I::ArrowRight/></button>
                 <div class="history-wrap">
                     <button class="tb-btn" class:active=move || history_open.get() title=tr().history
                         on:click=move |_| history_open.update(|v| *v = !*v)><Icon icon=I::Clock/></button>
@@ -159,7 +155,7 @@ pub(super) fn TopBar() -> impl IntoView {
                         on:input=move |e| { c.search.set(event_target_value(&e)); selected.set(0); open.set(true); }
                         on:keydown=on_key
                     />
-                    <span class="kbd">"Ctrl K"</span>
+                    <span class="kbd">{keys::label("Ctrl+K").replace('+', " ")}</span>
                 </label>
                 <Show when=move || open.get()>
                     <SearchResults hits=hits selected=selected on_pick=Callback::new(activate)/>

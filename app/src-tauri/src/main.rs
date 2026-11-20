@@ -230,6 +230,23 @@ fn main() {
             });
         })
         .on_window_event(|window, event| {
+            // On macOS closing the main window (Cmd+W, the red button) hides it, as in Slack:
+            // Mostik stays in the Dock and keeps notifying; a click on its Dock icon shows the
+            // window again, Cmd+Q quits. Elsewhere closing it quits.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && cfg!(target_os = "macos")
+                && window.label() == "main"
+            {
+                api.prevent_close();
+                // A full-screen window hidden at once would leave its Space black: it leaves full
+                // screen first, and the next Cmd+W hides it.
+                if window.is_fullscreen().unwrap_or(false) {
+                    let _ = window.set_fullscreen(false);
+                } else {
+                    let _ = window.hide();
+                }
+                return;
+            }
             // Files dropped onto the chat, as in Slack, are attached to the message. The page
             // learns where the drag is, to highlight the chat and to decide where the files go.
             // The other windows (the call and sign-in windows) take no files.
@@ -348,6 +365,16 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("failed to start Mostik")
         .run(|app, event| {
+            // A click on the Dock icon brings back the main window hidden by Cmd+W, also while
+            // another window of Mostik (sign-in) is open.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = &event
+                && app
+                    .get_webview_window("main")
+                    .is_some_and(|w| !w.is_visible().unwrap_or(true))
+            {
+                show_main(app);
+            }
             // The call browser and its profile with the session cookies go with the app.
             if let tauri::RunEvent::Exit = event {
                 call::shutdown(app);

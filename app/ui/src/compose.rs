@@ -15,7 +15,7 @@ use crate::i18n::tr;
 use crate::icons::{I, Icon};
 use crate::modal::Modal;
 use crate::text_edit::{LinkTarget, insert_into, paste_link};
-use crate::{bridge, editor};
+use crate::{bridge, editor, keys};
 
 /// A message field as its toolbar, hotkeys and dialogs see it.
 #[derive(Clone, Copy)]
@@ -81,10 +81,11 @@ impl Field {
     }
 
     /// Formatting hotkeys, as in Slack: Ctrl+B bold, Ctrl+I italic, Ctrl+Shift+X strikethrough,
-    /// Ctrl+Shift+U a link, or Ctrl+Shift+K where that does not come (see [`link_keys`]). Keys are
-    /// taken by their place, so they work in any keyboard layout. Returns whether the key was one of them.
+    /// Ctrl+Shift+U a link, or Ctrl+Shift+K where that does not come (see [`keys::add_link`]); Cmd
+    /// in place of Ctrl on macOS, where Ctrl+B and Ctrl+I stay the field's. Keys are taken by their
+    /// place, so they work in any keyboard layout. Returns whether the key was one of them.
     pub fn hotkey(self, e: &ev::KeyboardEvent) -> bool {
-        if !(e.ctrl_key() || e.meta_key()) || e.alt_key() {
+        if !keys::command(e) || e.alt_key() {
             return false;
         }
         match (e.code().as_str(), e.shift_key()) {
@@ -172,16 +173,6 @@ pub fn FieldArea(
     }
 }
 
-/// The "Add link" hotkey that works here. On Linux Ctrl+Shift+U never reaches the page: GTK and
-/// IBus take it for typing a character by its Unicode code.
-fn link_keys() -> &'static str {
-    if crate::settings::on_linux() {
-        "Ctrl+Shift+K"
-    } else {
-        "Ctrl+Shift+U"
-    }
-}
-
 /// Where the emoji picker of a field opens, and the field's selection it inserts into: the
 /// picker's search takes the focus.
 type PickerAt = ((f64, f64), (Option<u32>, Option<u32>));
@@ -230,7 +221,7 @@ pub fn EmojiButton(field: Field, class: &'static str, size: u32) -> impl IntoVie
 #[component]
 pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
     let fmt = move |before: &'static str, after: &'static str| move |_| field.wrap(before, after);
-    let hint = |name: &str, keys: &str| format!("{name} ({keys})");
+    let hint = |name: &str, shortcut: &str| format!("{name} ({})", keys::label(shortcut));
     view! {
         <div class="composer-toolbar" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
             <button class="fmt" title=hint(tr().fmt_bold, "Ctrl+B") on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
@@ -238,7 +229,7 @@ pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
             <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
             <button class="fmt" title=hint(tr().fmt_strike, "Ctrl+Shift+X") on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
             <span class="sep"></span>
-            <button class="fmt" title=hint(tr().fmt_link, link_keys()) on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
+            <button class="fmt" title=format!("{} ({})", tr().fmt_link, keys::add_link()) on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
             <span class="sep"></span>
             <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
             <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>

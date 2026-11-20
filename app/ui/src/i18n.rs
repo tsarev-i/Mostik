@@ -234,8 +234,6 @@ pub struct Tr {
     pub link_text: &'static str,
     pub link_address: &'static str,
     pub link_remove: &'static str,
-    pub hint_shift_enter: &'static str,
-    pub hint_ctrl_enter: &'static str,
     pub send: &'static str,
     pub thread: &'static str,
     // Avatar menu
@@ -337,7 +335,6 @@ pub struct Tr {
     pub p_advanced: &'static str,
     pub p_accessibility: &'static str,
     pub p_zoom: &'static str,
-    pub p_zoom_hint: &'static str,
     pub p_notify_about: &'static str,
     pub p_notify_all: &'static str,
     pub p_notify_direct: &'static str,
@@ -369,7 +366,21 @@ pub struct Tr {
     pub p_show_read_receipts: &'static str,
     pub p_enter_to: &'static str,
     pub p_enter_send: &'static str,
-    pub p_enter_newline: &'static str,
+    // Preferences → Keyboard shortcuts
+    pub p_shortcuts: &'static str,
+    pub sc_general: &'static str,
+    pub sc_message_field: &'static str,
+    pub sc_search: &'static str,
+    pub sc_close: &'static str,
+    pub sc_zoom_in: &'static str,
+    pub sc_zoom_out: &'static str,
+    pub sc_zoom_reset: &'static str,
+    /// macOS only: Cmd+W hides the main window.
+    pub sc_hide_window: &'static str,
+    pub sc_quit: &'static str,
+    pub sc_send: &'static str,
+    pub sc_newline: &'static str,
+    pub sc_edit_last: &'static str,
     pub theme_names: [&'static str; 7],
     // Profile
     pub profile: &'static str,
@@ -656,8 +667,6 @@ pub static RU: Tr = Tr {
     link_text: "Текст",
     link_address: "Ссылка",
     link_remove: "Убрать ссылку",
-    hint_shift_enter: "Shift+Enter: новая строка",
-    hint_ctrl_enter: "Ctrl+Enter: отправить",
     send: "Отправить",
     thread: "Тред",
     active: "В сети",
@@ -755,7 +764,6 @@ pub static RU: Tr = Tr {
     p_advanced: "Дополнительно",
     p_accessibility: "Специальные возможности",
     p_zoom: "Масштаб",
-    p_zoom_hint: "Ctrl+= увеличивает, Ctrl+- уменьшает, Ctrl+0 возвращает исходный размер.",
     p_notify_about: "Уведомлять меня о…",
     p_notify_all: "Всех новых сообщениях",
     p_notify_direct: "Личных сообщениях и упоминаниях",
@@ -785,7 +793,19 @@ pub static RU: Tr = Tr {
     p_show_read_receipts: "Показывать отметки о прочтении",
     p_enter_to: "При наборе сообщения Enter…",
     p_enter_send: "Отправляет сообщение",
-    p_enter_newline: "Начинает новую строку (отправка по Ctrl+Enter)",
+    p_shortcuts: "Горячие клавиши",
+    sc_general: "Общие",
+    sc_message_field: "Поле сообщения",
+    sc_search: "Поиск и переход к беседе",
+    sc_close: "Закрыть меню или окно",
+    sc_zoom_in: "Увеличить масштаб",
+    sc_zoom_out: "Уменьшить масштаб",
+    sc_zoom_reset: "Исходный масштаб",
+    sc_hide_window: "Скрыть окно, Мостик остаётся в Dock",
+    sc_quit: "Выйти из Мостика",
+    sc_send: "Отправить сообщение",
+    sc_newline: "Новая строка",
+    sc_edit_last: "Изменить своё последнее сообщение (в пустом поле)",
     theme_names: ["Сумерки", "Мох", "Вечер", "Полночь", "Лес", "Океан", "Закат"],
     profile: "Профиль",
     message_button: "Сообщение",
@@ -1076,8 +1096,6 @@ pub static EN: Tr = Tr {
     link_text: "Text",
     link_address: "Link",
     link_remove: "Remove link",
-    hint_shift_enter: "Shift+Enter to add a new line",
-    hint_ctrl_enter: "Ctrl+Enter to send",
     send: "Send now",
     thread: "Thread",
     active: "Active",
@@ -1175,7 +1193,6 @@ pub static EN: Tr = Tr {
     p_advanced: "Advanced",
     p_accessibility: "Accessibility",
     p_zoom: "Zoom",
-    p_zoom_hint: "Use Ctrl+= to zoom in, Ctrl+- to zoom out and Ctrl+0 to reset.",
     p_notify_about: "Notify me about…",
     p_notify_all: "All new messages",
     p_notify_direct: "Direct messages and mentions",
@@ -1205,7 +1222,19 @@ pub static EN: Tr = Tr {
     p_show_read_receipts: "Show read receipts",
     p_enter_to: "When writing a message, press Enter to…",
     p_enter_send: "Send the message",
-    p_enter_newline: "Start a new line (use Ctrl+Enter to send)",
+    p_shortcuts: "Keyboard shortcuts",
+    sc_general: "General",
+    sc_message_field: "Message field",
+    sc_search: "Search and jump to a conversation",
+    sc_close: "Close a menu or dialog",
+    sc_zoom_in: "Zoom in",
+    sc_zoom_out: "Zoom out",
+    sc_zoom_reset: "Actual size",
+    sc_hide_window: "Hide the window, Mostik stays in the Dock",
+    sc_quit: "Quit Mostik",
+    sc_send: "Send the message",
+    sc_newline: "New line",
+    sc_edit_last: "Edit your last message (in an empty field)",
     theme_names: ["Dusk", "Moss", "Twilight", "Midnight", "Forest", "Ocean", "Sunset"],
     profile: "Profile",
     message_button: "Message",
@@ -1646,7 +1675,38 @@ impl Tr {
         }
     }
 
-    /// The "Update" button tooltip and the line above it in Preferences.
+    /// The hint under a message field when Enter sends: the keys that start a new line.
+    pub fn hint_newline(&self, keys: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{keys}: новая строка"),
+            Lang::En => format!("{keys} to add a new line"),
+        }
+    }
+
+    /// The hint under a message field when Enter starts a new line: the keys that send.
+    pub fn hint_send(&self, keys: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{keys}: отправить"),
+            Lang::En => format!("{keys} to send"),
+        }
+    }
+
+    /// Preferences → Accessibility: the zoom keys.
+    pub fn zoom_hint(&self, zoom_in: &str, zoom_out: &str, reset: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{zoom_in} увеличивает, {zoom_out} уменьшает, {reset} возвращает исходный размер"),
+            Lang::En => format!("Use {zoom_in} to zoom in, {zoom_out} to zoom out and {reset} to reset"),
+        }
+    }
+
+    /// Preferences → Advanced: Enter starts a new line, and these keys send.
+    pub fn enter_newline(&self, send: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Начинает новую строку (отправка по {send})"),
+            Lang::En => format!("Start a new line (use {send} to send)"),
+        }
+    }
+
     /// "Delete :name:?" in the emoji picker.
     pub fn emoji_delete_ask(&self, name: &str) -> String {
         match self.lang {
@@ -1655,6 +1715,7 @@ impl Tr {
         }
     }
 
+    /// The "Update" button tooltip and the line above it in Preferences.
     pub fn update_available(&self, v: &str) -> String {
         match self.lang {
             Lang::Ru => format!("Доступна новая версия {v}. Мостик установит её и перезапустится."),
