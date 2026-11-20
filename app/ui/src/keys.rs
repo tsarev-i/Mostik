@@ -454,6 +454,27 @@ fn check_on(
     }
 }
 
+/// Whether the standard keys of `action` can come back: none of them is now the user's keys of
+/// another action, which would leave `action` shown with keys that do nothing.
+pub fn check_restore(action: Action, custom: &BTreeMap<String, String>) -> Result<(), Refusal> {
+    check_restore_on(action, custom, on_mac(), on_linux())
+}
+
+fn check_restore_on(action: Action, custom: &BTreeMap<String, String>, mac: bool, linux: bool) -> Result<(), Refusal> {
+    let standard = action.standard(mac, linux);
+    let taken = |other: Action| {
+        other != action
+            && custom
+                .get(other.id())
+                .and_then(|spec| Shortcut::parse(spec))
+                .is_some_and(|own| standard.contains(&own))
+    };
+    match Action::ALL.into_iter().find(|&other| taken(other)) {
+        Some(other) => Err(Refusal::Taken(other)),
+        None => Ok(()),
+    }
+}
+
 /// Makes `new` the keys of `action`; one of its standard keys brings the standard ones back.
 pub fn assign(custom: &mut BTreeMap<String, String>, action: Action, new: &Shortcut) {
     assign_on(custom, action, new, on_mac(), on_linux());
@@ -495,6 +516,22 @@ pub fn pressed(e: &KeyboardEvent, action: Action) -> bool {
             }
         }
     })
+}
+
+/// The keys are one of the window's shortcuts (search, back and forward, Preferences, zoom). A
+/// message field leaves them alone: `Ctrl+↑` given to zoom must not also edit the last message.
+pub fn window_shortcut(e: &KeyboardEvent) -> bool {
+    [
+        Action::Search,
+        Action::Back,
+        Action::Forward,
+        Action::Preferences,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::ZoomReset,
+    ]
+    .into_iter()
+    .any(|action| pressed(e, action))
 }
 
 #[cfg(test)]
@@ -611,6 +648,27 @@ mod tests {
         assert_eq!(
             linux("Ctrl+KeyJ", Action::Italic, &custom),
             Err(Refusal::Taken(Action::Bold))
+        );
+    }
+
+    #[test]
+    fn standard_keys_come_back_only_when_free() {
+        let mut custom = BTreeMap::new();
+        assign_on(&mut custom, Action::Search, &keys("Ctrl+KeyJ"), false, true);
+        assign_on(&mut custom, Action::Bold, &keys("Ctrl+KeyK"), false, true);
+        assert_eq!(
+            check_restore_on(Action::Search, &custom, false, true),
+            Err(Refusal::Taken(Action::Bold))
+        );
+        assert_eq!(check_restore_on(Action::Bold, &custom, false, true), Ok(()));
+        custom.remove(Action::Bold.id());
+        assert_eq!(check_restore_on(Action::Search, &custom, false, true), Ok(()));
+        // The other keys an action takes count too: Ctrl+Shift+U is "Add link" on Linux as well.
+        assign_on(&mut custom, Action::Strike, &keys("Ctrl+Shift+KeyU"), false, true);
+        assign_on(&mut custom, Action::Link, &keys("Ctrl+KeyL"), false, true);
+        assert_eq!(
+            check_restore_on(Action::Link, &custom, false, true),
+            Err(Refusal::Taken(Action::Strike))
         );
     }
 

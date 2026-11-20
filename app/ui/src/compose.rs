@@ -154,8 +154,10 @@ pub fn FieldArea(
                     editor::before_input(&el, &e, &crate::custom::lookup(c));
                 }
             }
+            // The window's shortcuts are not the field's: given keys like Ctrl+↑, zoom would also
+            // edit the last message.
             on:keydown=move |e: ev::KeyboardEvent| {
-                if !e.is_composing() && !field.hotkey(&e) {
+                if !e.is_composing() && !field.hotkey(&e) && !keys::window_shortcut(&e) {
                     on_key.run(e);
                 }
             }

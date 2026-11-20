@@ -431,8 +431,11 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     set_draft.set(text);
                 }
             }
-            // ↑ in an empty field edits your last message, as in Slack.
-            "ArrowUp" if draft.with_untracked(String::is_empty) => {
+            // ↑ in an empty field edits your last message, as in Slack; not with a modifier.
+            "ArrowUp"
+                if draft.with_untracked(String::is_empty)
+                    && !(ev.ctrl_key() || ev.alt_key() || ev.meta_key() || ev.shift_key()) =>
+            {
                 let chat = c.current.get_untracked();
                 let tp = parent();
                 let last = c.snap.with_untracked(|s| {

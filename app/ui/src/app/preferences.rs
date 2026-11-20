@@ -35,6 +35,17 @@ pub enum PrefTab {
 #[component]
 pub(super) fn PreferencesDialog() -> impl IntoView {
     let c = ctx();
+    // Opened by Ctrl+, while writing, the message field would keep the keys behind the dialog,
+    // and Enter would send. The caret goes too: text can still be put where it stays.
+    if let Some(field) = document()
+        .active_element()
+        .and_then(|el| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(el).ok())
+    {
+        let _ = field.blur();
+    }
+    if let Ok(Some(selection)) = window().get_selection() {
+        let _ = selection.remove_all_ranges();
+    }
     let tab = c.pref_tab;
     let tabs = [
         (PrefTab::Notifications, I::Bell, tr().p_notifications),
@@ -696,10 +707,17 @@ fn ShortcutKeys(
         </button>
         {move || own().then(|| view! {
             <button class="icon-btn shortcut-reset" title=tr().sc_reset on:click=move |_| {
-                refused.set(None);
-                c.settings.update(|s| {
-                    s.shortcuts.remove(action.id());
-                });
+                recording.set(None);
+                // Not while another action has the standard keys now: they would do nothing here.
+                match c.settings.with_untracked(|s| keys::check_restore(action, &s.shortcuts)) {
+                    Ok(()) => {
+                        refused.set(None);
+                        c.settings.update(|s| {
+                            s.shortcuts.remove(action.id());
+                        });
+                    }
+                    Err(why) => refused.set(Some((action, why.text()))),
+                }
             }><Icon icon=I::Reply size=14/></button>
         })}
         {move || refused.get().filter(|(a, _)| *a == action).map(|(_, why)| view! {
