@@ -103,6 +103,10 @@
 @media (prefers-reduced-motion: reduce) {
   .sb-typing i { animation: none; opacity: 0.8; }
 }
+/* A muted chat with unread messages: a grey dot in place of the count it does not get. */
+.sb-dot { margin-left: auto; width: 7px; height: 7px; flex: none; border-radius: 50%; background: currentColor; opacity: 0.8; }
+.sb-call ~ .sb-dot, .sb-pencil ~ .sb-dot, .sb-typing ~ .sb-dot { margin-left: 6px; }
+.sb-dot ~ .sb-close { margin-left: 4px; }
 .sb-row:hover .sb-close { display: grid; }
 .window.chat-dragging .sb-close { display: none; }
 .sb-close:hover { opacity: 1; background: rgba(var(--chrome-ink), 0.16); }
