@@ -1,10 +1,12 @@
 //! Spelling dictionaries Mostik carries on Linux (#50). WebKitGTK checks spelling through enchant,
 //! which finds hunspell dictionaries only where the system has put them, and many systems have none
 //! for Russian or English. The Linux binary holds `ru_RU` and `en_US` (see `dictionaries/README.md`),
-//! writes them to the app data folder at start and points enchant there with `ENCHANT_CONFIG_DIR`:
-//! enchant reads `<dir>/hunspell`, and the system's dictionaries as well. Words added with "Learn
-//! Spelling" are kept in that folder too.
+//! writes them to the app data folder at start and adds that folder in front of `XDG_DATA_DIRS`:
+//! enchant looks for dictionaries in `<dir>/hunspell` of each of those, the system's included.
+//! The user's own enchant folder (`~/.config/enchant`, with the words learned with "Learn
+//! Spelling" and any dictionaries put there) stays in use: `ENCHANT_CONFIG_DIR` would replace it.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -33,38 +35,51 @@ const FILES: [(&str, &[u8]); 7] = [
 /// when the dictionaries are written.
 const IDENTIFIER: &str = "dev.mostik.client";
 
-const ENV: &str = "ENCHANT_CONFIG_DIR";
+const ENV: &str = "XDG_DATA_DIRS";
 
-/// The enchant folder in the app data folder, where Tauri keeps it: `$XDG_DATA_HOME` or
+/// The dictionaries' folder in the app data folder, where Tauri keeps it: `$XDG_DATA_HOME` or
 /// `~/.local/share`.
-fn enchant_dir() -> Option<PathBuf> {
+fn spelling_dir() -> Option<PathBuf> {
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
-    Some(data.join(IDENTIFIER).join("enchant"))
+    Some(data.join(IDENTIFIER).join("spelling"))
 }
 
-/// Writes the dictionaries and points enchant at them. To be called first in `main`, while the
-/// process has one thread: it sets an environment variable. A folder the user has set for enchant
-/// is left as it is.
+/// Writes the dictionaries and shows them to enchant. To be called first in `main`, while the
+/// process has one thread: it sets an environment variable, before GLib reads it once for good.
 pub fn install() {
-    if std::env::var_os(ENV).is_some() {
-        return;
-    }
-    let Some(dir) = enchant_dir() else {
+    let Some(dir) = spelling_dir() else {
         return;
     };
     if let Err(e) = write_files(&dir) {
         eprintln!("spelling dictionaries not written to {}: {e}", dir.display());
         return;
     }
+    let dirs = data_dirs(&dir, std::env::var_os(ENV).as_deref());
     // SAFETY: `main` calls this before it starts Tauri, so no other thread reads the environment.
-    unsafe { std::env::set_var(ENV, &dir) };
+    unsafe { std::env::set_var(ENV, dirs) };
+}
+
+/// `XDG_DATA_DIRS` with `ours` in front; unset or empty, it means `/usr/local/share:/usr/share`.
+/// Already there (an AppImage restarted after an update inherits it), it stays as it is.
+fn data_dirs(ours: &Path, current: Option<&OsStr>) -> OsString {
+    let current = current
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| OsStr::new("/usr/local/share:/usr/share"));
+    if std::env::split_paths(current).any(|dir| dir == ours) {
+        return current.to_owned();
+    }
+    let mut dirs = ours.as_os_str().to_owned();
+    dirs.push(":");
+    dirs.push(current);
+    dirs
 }
 
 /// Writes each file that is missing or differs from the one Mostik carries, through a temporary
-/// file, so a copy cut short never stays.
+/// file of this process's own, so neither a copy cut short nor two Mostiks starting at once leave
+/// a broken file.
 fn write_files(dir: &Path) -> io::Result<()> {
     for (name, bytes) in FILES {
         let path = dir.join(name);
@@ -76,7 +91,8 @@ fn write_files(dir: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let part = path.with_extension("part");
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
+        let part = path.with_file_name(format!("{file}.{}.part", std::process::id()));
         std::fs::write(&part, bytes)?;
         std::fs::rename(&part, &path)?;
     }
@@ -91,6 +107,21 @@ mod tests {
     fn the_data_folder_is_tauris() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(conf["identifier"], IDENTIFIER);
+    }
+
+    #[test]
+    fn the_dictionaries_go_in_front_of_the_data_dirs() {
+        let ours = Path::new("/home/u/.local/share/dev.mostik.client/spelling");
+        let dirs = |current: Option<&str>| data_dirs(ours, current.map(OsStr::new)).into_string().unwrap();
+        let mine = "/home/u/.local/share/dev.mostik.client/spelling";
+        assert_eq!(dirs(None), format!("{mine}:/usr/local/share:/usr/share"));
+        assert_eq!(dirs(Some("")), format!("{mine}:/usr/local/share:/usr/share"));
+        assert_eq!(
+            dirs(Some("/opt/share:/usr/share")),
+            format!("{mine}:/opt/share:/usr/share")
+        );
+        let already = format!("/tmp/.mount_x/usr/share:{mine}:/usr/share");
+        assert_eq!(dirs(Some(&already)), already);
     }
 
     #[test]
@@ -112,7 +143,11 @@ mod tests {
         write_files(&dir).unwrap();
         assert_eq!(std::fs::read(&aff).unwrap(), FILES[3].1);
         assert_eq!(std::fs::metadata(&dic).unwrap().modified().unwrap(), before);
-        assert!(!dir.join("hunspell/ru_RU.part").exists());
+        let leftovers = std::fs::read_dir(dir.join("hunspell"))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".part"))
+            .count();
+        assert_eq!(leftovers, 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

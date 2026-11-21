@@ -2,7 +2,8 @@
 
 Hunspell dictionaries that Mostik carries on Linux, where WebKitGTK checks spelling through enchant
 and many systems have no dictionary for Russian or English. They are built into the Linux binary and
-written to the app data folder at start (`src/spelling.rs`); the system's dictionaries are used too.
+written to the app data folder at start (`src/spelling.rs`), which goes in front of `XDG_DATA_DIRS`;
+the system's dictionaries and the user's own enchant folder are used too.
 
 Taken from [wooorm/dictionaries](https://github.com/wooorm/dictionaries) at commit
 `8cfea406b505e4d7df52d5a19bce525df98c54ab`, unchanged except for the file names (`index.aff` and
