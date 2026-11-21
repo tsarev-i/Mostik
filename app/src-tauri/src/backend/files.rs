@@ -111,6 +111,79 @@ impl KnownFiles {
     }
 }
 
+/// Where the attachments saved to "Downloads" went, kept over restarts: a second click on a file
+/// shows the copy saved before instead of downloading another one. For one account; the latest
+/// [`SAVED_FILES_KEPT`] saves.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SavedFiles {
+    owner: String,
+    files: Vec<SavedFile>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedFile {
+    id: String,
+    name: String,
+    path: std::path::PathBuf,
+}
+
+/// The file in the app data dir that holds [`SavedFiles`].
+pub(super) const SAVED_FILES: &str = "saved-files.json";
+
+const SAVED_FILES_KEPT: usize = 200;
+
+impl SavedFiles {
+    fn load(app: &AppHandle) -> Self {
+        let Ok(dir) = app.path().app_data_dir() else {
+            return Self::default();
+        };
+        std::fs::read(dir.join(SAVED_FILES))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn store(&self, app: &AppHandle) {
+        if let Ok(dir) = app.path().app_data_dir()
+            && let Ok(json) = serde_json::to_vec(self)
+        {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join(SAVED_FILES), json);
+        }
+    }
+
+    /// Where account `me` saved file `id` named `name`, if that file is still there.
+    fn find(&self, me: &UserId, id: &str, name: &str) -> Option<std::path::PathBuf> {
+        if self.owner != me.0 {
+            return None;
+        }
+        self.files
+            .iter()
+            .rev()
+            .find(|f| f.id == id && f.name == name)
+            .map(|f| f.path.clone())
+            .filter(|p| p.is_file())
+    }
+
+    /// Account `me` has saved file `id` named `name` at `path`.
+    fn add(&mut self, me: &UserId, id: &str, name: &str, path: std::path::PathBuf) {
+        if self.owner != me.0 {
+            *self = Self {
+                owner: me.0.clone(),
+                files: Vec::new(),
+            };
+        }
+        self.files.retain(|f| !(f.id == id && f.name == name));
+        self.files.push(SavedFile {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            path,
+        });
+        let extra = self.files.len().saturating_sub(SAVED_FILES_KEPT);
+        self.files.drain(..extra);
+    }
+}
+
 /// Records the attachments of messages of account `me` handed to the UI: see [`KnownFiles`].
 pub(super) fn note_files<'a>(state: &AppState, me: &UserId, messages: impl IntoIterator<Item = &'a Message>) {
     if let Ok(mut known) = state.known_files.lock() {
@@ -300,7 +373,11 @@ pub async fn save_file(
         .ok()
         .and_then(|known| known.rule(&live.me, &file_id, &name))
         .ok_or("not a file from a message")?;
-    let path = match rule.saved.filter(|p| p.is_file()) {
+    let before = rule
+        .saved
+        .filter(|p| p.is_file())
+        .or_else(|| SavedFiles::load(&app).find(&live.me, &file_id, &name));
+    let path = match before {
         Some(path) => path,
         None => {
             let _saving = Saving::start(&state.saving).ok_or_else(|| {
@@ -320,6 +397,9 @@ pub async fn save_file(
             if let Ok(mut known) = state.known_files.lock() {
                 known.saved(&file_id, &name, path.clone());
             }
+            let mut saved = SavedFiles::load(&app);
+            saved.add(&live.me, &file_id, &name, path.clone());
+            saved.store(&app);
             path
         }
     };
@@ -905,6 +985,35 @@ mod tests {
     use mostik_core::{Attachment, AttachmentKind, Forwarded, UserId};
 
     use super::*;
+
+    /// A file saved before a restart is found again while it is in its place, for its account
+    /// only; saving it again keeps one entry, and the oldest go past the limit.
+    #[test]
+    fn a_saved_file_is_found_after_a_restart() {
+        let dir = std::env::temp_dir().join(format!("mostik-saved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Cargo.toml");
+        std::fs::write(&path, "x").unwrap();
+        let (me, other) = (UserId("u1".into()), UserId("u2".into()));
+        let mut saved = SavedFiles::default();
+        saved.add(&me, "file/1", "Cargo.toml", path.clone());
+        let again: SavedFiles = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(again.find(&me, "file/1", "Cargo.toml"), Some(path.clone()));
+        assert_eq!(again.find(&me, "file/1", "other.toml"), None);
+        assert_eq!(again.find(&other, "file/1", "Cargo.toml"), None);
+        saved.add(&me, "file/1", "Cargo.toml", path.clone());
+        assert_eq!(saved.files.len(), 1);
+        for i in 0..SAVED_FILES_KEPT {
+            saved.add(&me, &format!("file/x{i}"), "a", dir.join("a"));
+        }
+        assert_eq!(saved.files.len(), SAVED_FILES_KEPT);
+        assert_eq!(saved.find(&me, "file/1", "Cargo.toml"), None);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(again.find(&me, "file/1", "Cargo.toml"), None);
+        saved.add(&other, "file/2", "b", dir.join("b"));
+        assert_eq!((saved.owner.as_str(), saved.files.len()), ("u2", 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn file(id: &str, name: &str, size: u64) -> Attachment {
         Attachment {

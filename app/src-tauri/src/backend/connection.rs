@@ -178,14 +178,16 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
 }
 
 /// Removes what the signed-out account left on this computer: the diagnostic probes (they name
-/// its cookies and chats), the custom emoji cache, the files allowed for sending and saving, and
-/// the cookies and caches of the main window. The UI clears its own `localStorage` keys.
+/// its cookies and chats), the custom emoji cache, the files allowed for sending and saving, the
+/// list of where its attachments were saved, and the cookies and caches of the main window. The
+/// UI clears its own `localStorage` keys.
 async fn forget_local_data(app: &AppHandle, state: &AppState) {
     if let Ok(dir) = app.path().app_data_dir()
         && let Ok(entries) = std::fs::read_dir(dir)
     {
         for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with("probe") {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("probe") || name == super::files::SAVED_FILES {
                 let _ = std::fs::remove_file(e.path());
             }
         }
