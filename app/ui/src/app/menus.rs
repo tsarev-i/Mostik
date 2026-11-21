@@ -22,6 +22,28 @@ use super::state::{Ctx, CtxMenu, CtxTarget, DetailsTab, FolderEdit, NewChannel, 
 /// How much room a submenu needs to the right of its menu; with less it opens to the left.
 const SUBMENU_ROOM: f64 = 240.0;
 
+/// A `node_ref` for the items of a submenu: opened low in the window, they move up to stay inside
+/// it, as a filter or "Move to…" list hanging below the bottom edge could not be picked from.
+pub(super) fn fitted_submenu() -> NodeRef<html::Div> {
+    let node = NodeRef::<html::Div>::new();
+    Effect::new(move |_| {
+        let Some(el) = node.get() else { return };
+        let vh = window()
+            .inner_height()
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(f64::MAX);
+        let rect = el.get_bounding_client_rect();
+        let over = rect.bottom() - (vh - 4.0);
+        if over > 0.0 {
+            let shift = over.min((rect.top() - 4.0).max(0.0));
+            let top = format!("{}px", f64::from(el.offset_top()) - shift);
+            let _ = web_sys::HtmlElement::style(&el).set_property("top", &top);
+        }
+    });
+    node
+}
+
 /// Right-click menu. Opens at the cursor and never leaves the window.
 #[component]
 pub(super) fn ContextMenu(menu: CtxMenu) -> impl IntoView {
@@ -226,7 +248,7 @@ fn choice_submenu(
                 <span class="menu-value">{value}<Icon icon=I::ChevronRight size=14/></span>
             </button>
             <Show when=move || open.get()>
-                <div class="me-submenu">{items()}</div>
+                <div class="me-submenu" node_ref=fitted_submenu()>{items()}</div>
             </Show>
         </div>
     }
@@ -398,7 +420,7 @@ fn sidebar_menu_items(c: Ctx) -> impl IntoView {
                 <span>{tr().filter_and_sort}</span><Icon icon=I::ChevronRight size=14/>
             </button>
             <Show when=move || sub_open.get()>
-                <div class="me-submenu">
+                <div class="me-submenu" node_ref=fitted_submenu()>
                     <div class="menu-label">{tr().filter_by}</div>
                     {filter_items(c)}
                     <div class="menu-sep"></div>
@@ -551,7 +573,7 @@ fn submenu(label: &'static str, items: impl Fn() -> AnyView + Clone + Send + Syn
                 <span>{label}</span><Icon icon=I::ChevronRight size=14/>
             </button>
             <Show when=move || open.get()>
-                <div class="me-submenu">{items.clone()}</div>
+                <div class="me-submenu" node_ref=fitted_submenu()>{items.clone()}</div>
             </Show>
         </div>
     }
@@ -641,7 +663,7 @@ fn move_to_section_items(c: Ctx, id: ChatId, label: &'static str) -> impl IntoVi
                 <span>{label}</span><Icon icon=I::ChevronRight size=14/>
             </button>
             <Show when=move || sub_open.get()>
-                <div class="me-submenu">
+                <div class="me-submenu" node_ref=fitted_submenu()>
                     <div class="menu-label">{tr().move_to}</div>
                     {items.clone()}
                     <div class="menu-sep"></div>
