@@ -472,7 +472,8 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                                 <span class="pending-file">
                                     <span class="file-icon small">{if f.image { "🖼" } else { "📄" }}</span>
                                     <span class="file-meta">
-                                        <span class="file-name">{f.name.clone()}</span>
+                                        // As the sent message will show it: a bidi control would turn the name round (#42).
+                                        <span class="file-name">{mostik_core::plain_file_name(&f.name)}</span>
                                         <span class="file-size">{human_size(f.size)}</span>
                                     </span>
                                     <button class="pf-remove" title=tr().remove_file

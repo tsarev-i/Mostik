@@ -959,7 +959,7 @@ fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
                 <div class="file-card out-file" class:cancelled=f.cancelled>
                     <span class="file-icon">{if f.file.image { "🖼" } else { "📄" }}</span>
                     <span class="file-meta">
-                        <span class="file-name">{f.file.name.clone()}</span>
+                        <span class="file-name">{mostik_core::plain_file_name(&f.file.name)}</span>
                         <span class="file-size">{if f.cancelled { tr().upload_cancelled.to_owned() } else { human_size(f.file.size) }}</span>
                     </span>
                     {if can_cancel {
