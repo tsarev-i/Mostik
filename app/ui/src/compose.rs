@@ -141,17 +141,34 @@ pub fn FieldArea(
 ) -> impl IntoView {
     let c = expect_context::<Ctx>();
     let area = field.area;
+    // A line too long to check in time turns the spell checking off until it is gone (#18). Set
+    // on the element at once too: the attribute follows the signal only after the event.
+    let spellable = RwSignal::new(true);
+    let set_spellable = move |el: &web_sys::HtmlElement, on: bool| {
+        if on != spellable.get_untracked() {
+            spellable.set(on);
+        }
+        if !on {
+            let _ = el.set_attribute("spellcheck", "false");
+        }
+    };
     view! {
         <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
-            spellcheck=move || if c.settings.with(|s| s.spell_check) { "true" } else { "false" }
+            spellcheck=move || if c.settings.with(|s| s.spell_check) && spellable.get() { "true" } else { "false" }
             aria-placeholder=move || placeholder.get()
             on:input=move |_| {
                 if let Some(el) = area.get_untracked() {
-                    on_input.run(editor::tidy(&el, &crate::custom::lookup(c)));
+                    let text = editor::tidy(&el, &crate::custom::lookup(c));
+                    set_spellable(&el, editor::spellable(&text));
+                    on_input.run(text);
                 }
             }
             on:beforeinput=move |e: ev::InputEvent| {
                 if let Some(el) = area.get_untracked() {
+                    // Before the browser puts the text in and checks the line it went into.
+                    if spellable.get_untracked() && !editor::spellable_after(&el, &e) {
+                        set_spellable(&el, false);
+                    }
                     editor::before_input(&el, &e, &crate::custom::lookup(c));
                 }
             }
