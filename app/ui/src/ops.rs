@@ -46,7 +46,16 @@ fn report(c: Ctx, e: String) {
 
 /// Shows "`what`: `e`" in the error bar and the console: the action `what` failed with `e`.
 pub fn failed(c: Ctx, what: &str, e: impl std::fmt::Display) {
-    report(c, format!("{what}: {e}"));
+    report(c, format!("{what}: {}", in_own_words(&e.to_string())));
+}
+
+/// A failure the backend names with a known phrase (see `mostik_ipc::cmd`), in the words of the
+/// interface; any other as it came.
+pub fn in_own_words(why: &str) -> String {
+    if why == mostik_ipc::cmd::MESSAGE_TOO_LONG {
+        return crate::i18n::tr().message_too_long.to_owned();
+    }
+    why.to_owned()
 }
 
 /// Now, in the microseconds of message times.

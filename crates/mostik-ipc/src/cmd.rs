@@ -202,6 +202,10 @@ pub const MAX_UPLOAD: u64 = 50 * 1024 * 1024;
 /// uploaded. The UI shows it in its own words.
 pub const FILE_TOO_LARGE: &str = "the file is larger than 50 MB";
 
+/// How sending or editing a message fails when Telemost refuses its text as too big
+/// (`message too big`). The UI shows it in its own words.
+pub const MESSAGE_TOO_LONG: &str = "the message is too long";
+
 /// One file of a sending going on: [`CancelUpload`] stops its upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

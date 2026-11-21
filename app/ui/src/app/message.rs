@@ -915,7 +915,7 @@ fn failure_reason(why: &str) -> String {
             let name = why.strip_suffix(theirs)?.strip_suffix(": ")?;
             Some(format!("{name}: {ours}"))
         })
-        .unwrap_or_else(|| why.to_owned())
+        .unwrap_or_else(|| ops::in_own_words(why))
 }
 
 /// One [`ops::Outgoing`] message.

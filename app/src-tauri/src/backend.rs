@@ -277,10 +277,29 @@ async fn push(live: &Live, client_message: Value) -> Result<Value, String> {
         .ok_or("Telemost has not issued a subscription yet, try again in a couple of seconds")?;
     let req = PushRequest::new(&sub, &live.user_agent, client_message).with_origin(live.service_id.as_deref());
     let resp = live.xiva.call("push", &req, 20).await.map_err(|e| e.to_string())?;
-    if resp.get("MessageInfo").is_none() && resp.get("Status").and_then(Value::as_u64).unwrap_or(0) != 0 {
-        return Err(format!("Telemost rejected the request: {}", shape(&resp)));
+    rejection(&resp).map_or(Ok(resp), Err)
+}
+
+/// Why Telemost refused a push, from its answer: an error status with no message info, or with an
+/// empty one, as for a text too big (`{"Status":13,"Details":"message too big: …","MessageInfo":{}}`).
+fn rejection(resp: &Value) -> Option<String> {
+    let status = resp.get("Status").and_then(Value::as_u64).unwrap_or(0);
+    let info = resp.get("MessageInfo");
+    let empty = info.and_then(Value::as_object).is_some_and(serde_json::Map::is_empty);
+    let refused = (info.is_none() && status != 0) || (empty && status > 1);
+    if !refused {
+        return None;
     }
-    Ok(resp)
+    let details = resp.get("Details").and_then(Value::as_str).unwrap_or_default();
+    if details.starts_with("message too big") {
+        return Some(mostik_ipc::cmd::MESSAGE_TOO_LONG.to_owned());
+    }
+    let why = if details.is_empty() {
+        shape(resp).to_string()
+    } else {
+        details.to_owned()
+    };
+    Some(format!("Telemost rejected the request: {why}"))
 }
 
 /// Sends a client message over the current connection.
@@ -366,6 +385,22 @@ fn rpc_ok(v: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A text too big comes back with an error status and an empty message info: the send fails
+    /// with the known phrase, not with a missing message time. A sent message passes.
+    #[test]
+    fn a_push_refused_as_too_big_fails() {
+        let too_big = json!({"Status": 13, "Details": "message too big: 100476", "MessageInfo": {}});
+        assert_eq!(rejection(&too_big).as_deref(), Some(mostik_ipc::cmd::MESSAGE_TOO_LONG));
+        let other = json!({"Status": 13, "Details": "no rights", "MessageInfo": {}});
+        assert_eq!(
+            rejection(&other).as_deref(),
+            Some("Telemost rejected the request: no rights")
+        );
+        let sent = json!({"Status": 1, "MessageInfo": {"TimestampMcs": 1, "SeqNo": 2}});
+        assert_eq!(rejection(&sent), None);
+        assert!(rejection(&json!({"Status": 13})).is_some());
+    }
 
     /// Two fetches of a new direct chat may end in any order: a later one that did not learn the
     /// name leaves the name the other one recorded.
