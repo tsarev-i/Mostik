@@ -574,11 +574,12 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     }><Icon icon=I::Plus size=16/></button>
                     <crate::compose::EmojiButton field class="cb" size=18/>
                     {move || sending.get().then(|| view! { <span class="composer-hint">{tr().uploading}</span> })}
-                    <span class="composer-hint">{
-                        let enter_sends = crate::app::enter_sends();
+                    // Follows the Enter choice in Preferences at once, not only in a field made after it.
+                    <span class="composer-hint">{move || {
+                        let enter_sends = c.settings.with(|s| s.enter_sends);
                         let (send, newline) = crate::keys::send_and_newline(enter_sends);
                         if enter_sends { tr().hint_newline(&newline) } else { tr().hint_send(&send) }
-                    }</span>
+                    }}</span>
                     <div class="spacer"></div>
                     <div class=move || if (draft.with(|d| d.trim().is_empty()) && files().is_empty()) || sending.get() { "send-group empty" } else { "send-group" }>
                         <button class="send" title=tr().send on:click=move |_| submit()><Icon icon=I::Send size=16/></button>
