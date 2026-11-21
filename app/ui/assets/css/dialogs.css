@@ -159,7 +159,9 @@
 .sr-empty { padding: 12px 16px; color: var(--text-muted); }
 .sr-icon { display: grid; place-items: center; width: 18px; }
 
-.loading-older { min-height: 24px; display: grid; place-items: center; padding: 8px 0; }
+/* As tall empty as with its spinner (18px and the padding): the spinner comes and goes between
+   the pages, and the feed under it must not move. */
+.loading-older { min-height: 34px; display: grid; place-items: center; padding: 8px 0; }
 .spinner.small { width: 18px; height: 18px; border-width: 2px; }
 
 .msg.active .msg-actions, .msg.active { background: var(--bg-hover); }
