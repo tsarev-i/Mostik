@@ -33,8 +33,8 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-/// A click on a message notification shows the main window on that message. On Wayland the
-/// window cannot take the focus by itself: it asks for attention instead.
+/// A click on a message notification shows the main window on that message (see
+/// [`webview::raise`] for how it gets in front, or asks for attention where it cannot).
 fn open_from_notification(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.notification().on_action(move |performed| {
@@ -47,11 +47,6 @@ fn open_from_notification(app: &AppHandle) {
         let app = handle.clone();
         let _ = handle.run_on_main_thread(move || {
             show_main(&app);
-            if let Some(w) = app.get_webview_window("main")
-                && !w.is_focused().unwrap_or(false)
-            {
-                let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
-            }
             let _ = app.emit(backend::OPEN_EVENT, &target);
         });
     });

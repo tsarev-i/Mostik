@@ -29,11 +29,62 @@ pub fn harden<R: Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
-/// Brings a window to the front: shown, unminimized and focused.
+/// Brings a window to the front: shown, unminimized and focused ("Open Mostik" in the tray, a
+/// click on a notification, the Dock icon).
+///
+/// tao asks for the focus only for a window it knows as shown and not minimized, and the unminimize
+/// sent just before has not changed that yet, so the focus is asked for once more a moment later.
+/// On Linux that is not enough under Wayland: GTK cannot unminimize a window there, and the
+/// compositor brings a window forward only with an activation token from the user's click, which
+/// the tray (libayatana) never gets; "Open Mostik" did nothing. Under KDE Plasma KWin is then
+/// asked to activate the window by a script of its own (see `imp::kwin_activate`), which its focus
+/// stealing prevention does not stop; elsewhere the window asks for attention (its taskbar button
+/// lights up).
 pub fn raise<R: Runtime>(window: &WebviewWindow<R>) {
+    let in_front = window.is_visible().unwrap_or(false)
+        && window.is_focused().unwrap_or(false)
+        && !window.is_minimized().unwrap_or(false);
+    if in_front {
+        return;
+    }
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        // Once in front, it is done: what the user does next (another window, minimizing) is not
+        // undone by a retry.
+        if got_focus(&window).await {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let title = window.title().unwrap_or_default();
+            match tauri::async_runtime::spawn_blocking(move || imp::kwin_activate(&title)).await {
+                Ok(Ok(())) => {
+                    if got_focus(&window).await {
+                        return;
+                    }
+                }
+                Ok(Err(e)) => eprintln!("window not raised by KWin: {e}"),
+                Err(e) => eprintln!("window not raised by KWin: {e}"),
+            }
+            let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = window.set_focus();
+    });
+}
+
+/// Whether the window gets the focus within a moment, checked every 50 ms.
+async fn got_focus<R: Runtime>(window: &WebviewWindow<R>) -> bool {
+    for _ in 0..8 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if window.is_focused().unwrap_or(true) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether `url` is a page of the app itself: `tauri://localhost` on Linux and macOS,
@@ -105,6 +156,23 @@ fn spelling_languages(locale: &str) -> Vec<String> {
         languages.push(system.to_owned());
     }
     languages
+}
+
+/// The KWin script that unminimizes and activates the window of process `pid` titled `title`
+/// (KWin may add ` <2>` to a title another window has too). KWin 5 names things otherwise.
+#[cfg(any(target_os = "linux", test))]
+fn kwin_script(pid: u32, title: &str) -> String {
+    let title = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".to_owned());
+    format!(
+        r#"const title = {title};
+const windows = workspace.windowList ? workspace.windowList() : workspace.clientList();
+for (const w of windows) {{
+    if (w.pid !== {pid} || !(w.caption === title || w.caption.startsWith(title + " <"))) continue;
+    w.minimized = false;
+    if ("activeWindow" in workspace) workspace.activeWindow = w; else workspace.activeClient = w;
+}}
+"#
+    )
 }
 
 /// Separators to remove from a menu whose items are separators (`true`) or not: those at either
@@ -195,6 +263,94 @@ mod imp {
             context.set_spell_checking_languages(&languages);
         }
         context.set_spell_checking_enabled(enabled);
+    }
+
+    /// Asks KWin to unminimize and activate this process's window titled `title`, by loading a
+    /// script into it over D-Bus (`org.kde.kwin.Scripting`), as `kdotool` does: a script runs
+    /// inside KWin, so focus stealing prevention, which refuses a window that asks by itself
+    /// without the user's activation token, does not apply. Only under KDE Plasma; an error
+    /// elsewhere or when KWin does not answer.
+    pub fn kwin_activate(title: &str) -> Result<(), String> {
+        use webkit2gtk::gio::{self, BusType, DBusCallFlags};
+        use webkit2gtk::glib::{ToVariant, Variant, VariantTy};
+
+        let kde = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d == "KDE"));
+        if !kde {
+            return Err("not KDE Plasma".into());
+        }
+        // One at a time: clicks in a row would share the script's name and file, and one would
+        // unload or delete the other's.
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let pid = std::process::id();
+        // The user's own folder only: in a shared one, such as `/tmp`, another user could put a
+        // script of theirs at the name. Plasma always has one.
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .filter(|d| d.is_absolute())
+            .ok_or("no XDG_RUNTIME_DIR")?;
+        let path = dir.join(format!("mostik-raise-{pid}.js"));
+        // A file of an earlier raise that went wrong; then a new one, open to the user only.
+        let _ = std::fs::remove_file(&path);
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| e.to_string())?;
+            file.write_all(super::kwin_script(pid, title).as_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        let path_text = path.to_string_lossy().into_owned();
+        let name = format!("mostik-raise-{pid}");
+        let bus = gio::bus_get_sync(BusType::Session, None::<&gio::Cancellable>).map_err(|e| e.to_string())?;
+        let call = |object: &str, method: &str, args: Option<&Variant>, reply: Option<&VariantTy>| {
+            let interface = if object == "/Scripting" {
+                "org.kde.kwin.Scripting"
+            } else {
+                "org.kde.kwin.Script"
+            };
+            bus.call_sync(
+                Some("org.kde.KWin"),
+                object,
+                interface,
+                method,
+                args,
+                reply,
+                DBusCallFlags::NO_AUTO_START,
+                2000,
+                None::<&gio::Cancellable>,
+            )
+            .map_err(|e| e.to_string())
+        };
+        let unload = || call("/Scripting", "unloadScript", Some(&(name.as_str(),).to_variant()), None);
+        // One left by an earlier raise that failed halfway.
+        let _ = unload();
+        let reply = VariantTy::new("(i)").map_err(|e| e.to_string())?;
+        let loaded = call(
+            "/Scripting",
+            "loadScript",
+            Some(&(path_text.as_str(), name.as_str()).to_variant()),
+            Some(reply),
+        );
+        // KWin reads the file when the script runs, and in the background: the file and the
+        // script stay a moment longer.
+        let ran = loaded.and_then(|loaded| {
+            let (id,): (i32,) = loaded.get().ok_or("KWin gave no script id")?;
+            if id < 0 {
+                return Err("KWin did not load the script".to_owned());
+            }
+            // KWin 6 puts a script at `/Scripting/Script<id>`, KWin 5 at `/<id>`.
+            call(&format!("/Scripting/Script{id}"), "run", None, None)
+                .or_else(|_| call(&format!("/{id}"), "run", None, None))
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let _ = unload();
+        let _ = std::fs::remove_file(&path);
+        ran.map(drop)
     }
 
     pub fn forget_site_data(pw: &PlatformWebview, what: super::SiteData) {
@@ -378,6 +534,17 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kwin_script_finds_the_window_by_process_and_title() {
+        let script = kwin_script(42, "(3) Мостик | \"x\"");
+        assert!(
+            script.starts_with("const title = \"(3) Мостик | \\\"x\\\"\";\n"),
+            "{script}"
+        );
+        assert!(script.contains("w.pid !== 42"));
+        assert!(script.contains("workspace.activeWindow = w"));
+    }
 
     #[test]
     fn spelling_is_checked_in_russian_english_and_the_system_language() {
