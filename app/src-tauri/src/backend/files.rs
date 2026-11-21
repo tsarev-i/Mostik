@@ -8,7 +8,7 @@ use mostik_core::{ChatId, Message, Timestamp, UserId};
 use mostik_ipc::cmd::{self, Args, FileArgs, Out, PathArgs, SendFilesArgs, UploadFileArgs, UrlArgs};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::id_pattern;
-use mostik_yandex::web::{WebClient, percent_decode};
+use mostik_yandex::web::{DiskFile, WebClient, WebError, percent_decode};
 use mostik_yandex::wire::{self, request_id};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
@@ -127,10 +127,40 @@ struct SavedFile {
     path: std::path::PathBuf,
 }
 
-/// The file in the app data dir that holds [`SavedFiles`].
+/// The file in the app data dir that holds [`SavedFiles`]. A copy being written is named after
+/// it too, so the sign-out removes both by this prefix.
 pub(super) const SAVED_FILES: &str = "saved-files.json";
 
 const SAVED_FILES_KEPT: usize = 200;
+
+/// Held while [`SAVED_FILES`] is changed or removed: two downloads ending at once keep both
+/// entries, and a download that outlived the sign-out does not write the file back after it.
+static SAVED_FILES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Taken by the sign-out while it removes [`SAVED_FILES`]: see [`SAVED_FILES_LOCK`].
+pub(super) fn lock_saved_files() -> std::sync::MutexGuard<'static, ()> {
+    SAVED_FILES_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Account `me` of session `generation` has saved file `id` named `name` at `path`. Not kept
+/// once the session has ended: the sign-out has removed the list or is about to.
+fn remember_saved(
+    app: &AppHandle,
+    state: &AppState,
+    generation: u64,
+    me: &UserId,
+    id: &str,
+    name: &str,
+    path: std::path::PathBuf,
+) {
+    let _one = lock_saved_files();
+    if !state.session.is_current(generation) {
+        return;
+    }
+    let mut saved = SavedFiles::load(app);
+    saved.add(me, id, name, path);
+    saved.store(app);
+}
 
 impl SavedFiles {
     fn load(app: &AppHandle) -> Self {
@@ -143,12 +173,17 @@ impl SavedFiles {
             .unwrap_or_default()
     }
 
+    /// Replaces the file at once, through a copy of this process's own: a reader never sees it
+    /// half-written, nor does another Mostik writing it at the same time.
     fn store(&self, app: &AppHandle) {
         if let Ok(dir) = app.path().app_data_dir()
             && let Ok(json) = serde_json::to_vec(self)
         {
             let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(dir.join(SAVED_FILES), json);
+            let part = dir.join(format!("{SAVED_FILES}.{}.part", std::process::id()));
+            if std::fs::write(&part, json).is_err() || std::fs::rename(&part, dir.join(SAVED_FILES)).is_err() {
+                let _ = std::fs::remove_file(&part);
+            }
         }
     }
 
@@ -366,6 +401,8 @@ pub async fn save_file(
     if !mostik_yandex::web::valid_file_id(&file_id) {
         return Err("bad file identifier".into());
     }
+    // Read before the connection: a sign-out taking it away has renewed the session first.
+    let generation = state.session.current();
     let live = live(&state).await?;
     let rule = state
         .known_files
@@ -397,9 +434,7 @@ pub async fn save_file(
             if let Ok(mut known) = state.known_files.lock() {
                 known.saved(&file_id, &name, path.clone());
             }
-            let mut saved = SavedFiles::load(&app);
-            saved.add(&live.me, &file_id, &name, path.clone());
-            saved.store(&app);
+            remember_saved(&app, &state, generation, &live.me, &file_id, &name, path.clone());
             path
         }
     };
@@ -699,19 +734,6 @@ pub async fn send_files(
         let all = state.kept_files.lock().map_err(|e| e.to_string())?;
         to_send.iter().map(|p| all.get(*p).cloned()).collect()
     };
-    // Telemost refuses a file over its limit only once all of it has gone: none goes then.
-    for (path, kept) in to_send.iter().zip(&kept) {
-        let size = match kept {
-            Some(bytes) => bytes.len() as u64,
-            None => tokio::fs::metadata(path)
-                .await
-                .map_err(|e| format!("{path}: {e}"))?
-                .len(),
-        };
-        if size > cmd::MAX_UPLOAD {
-            return Err(format!("{}: {}", file_name(path), cmd::FILE_TOO_LARGE));
-        }
-    }
     // Files are read and uploaded a few at a time, the first failure stops the rest at once; the
     // gallery keeps their order.
     let uploads: Vec<_> = to_send
@@ -861,9 +883,9 @@ async fn upload_tracked(app: AppHandle, upload: Option<String>, file: Upload) ->
         let (app, key, progress) = (app.clone(), key.clone(), progress.clone());
         move |sent: u64, total: u64| {
             let Ok(mut p) = progress.lock() else { return };
-            if sent != p.sent || total != p.total {
-                (p.sent, p.total, p.moved) = (sent, total, std::time::Instant::now());
-            }
+            // Every call is a sign of life: bytes have gone, or Yandex Disk said it is still
+            // taking the file in.
+            (p.sent, p.total, p.moved) = (sent, total, std::time::Instant::now());
             let due = sent >= total || p.reported.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY);
             if let Some((upload, path)) = &key
                 && due
@@ -915,7 +937,8 @@ fn file_name(path: &str) -> String {
 }
 
 /// Reads a file without blocking the runtime (unless its contents are `kept` in memory) and
-/// uploads it to the Messenger storage, telling `progress` how many of how many bytes have gone.
+/// uploads it to the Messenger storage, or one over [`cmd::MAX_UPLOAD`] to Yandex Disk, telling
+/// `progress` how many of how many bytes have gone.
 async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>) -> Result<Uploaded, String> {
     let Upload {
         mut web,
@@ -926,12 +949,24 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
     } = file;
     let path = path.as_str();
     let p = std::path::Path::new(path);
+    let name = file_name(path);
+    let mime = mime_guess::from_path(p).first_or_octet_stream();
+    let on_disk = match &kept {
+        Some(bytes) => bytes.len() as u64,
+        None => tokio::fs::metadata(p).await.map_err(|e| format!("{path}: {e}"))?.len(),
+    };
+    if on_disk > cmd::MAX_UPLOAD {
+        let file = match kept {
+            Some(bytes) => DiskFile::Memory(bytes),
+            None => DiskFile::Path(p.to_owned()),
+        };
+        let video = mime.type_() == "video";
+        return upload_to_disk(&mut web, &target, &name, video, file, on_disk, progress).await;
+    }
     let bytes = match kept {
         Some(bytes) => bytes,
         None => tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?.into(),
     };
-    let name = file_name(path);
-    let mime = mime_guess::from_path(p).first_or_octet_stream();
     let size = bytes.len();
     progress(0, size as u64);
     let dims = (mime.type_() == "image")
@@ -955,6 +990,33 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
         Some(d) => Uploaded::Image(wire::gallery_image(d.width as u64, d.height as u64, info)),
         None => Uploaded::File(payload, info),
     })
+}
+
+/// Uploads a file over [`cmd::MAX_UPLOAD`] through the user's Yandex Disk, as the web client
+/// does: Telemost gives an address on the Disk, the file goes there as it is read, then it is
+/// added to chat `target`. It is sent as a file, an image too.
+async fn upload_to_disk(
+    web: &mut WebClient,
+    target: &str,
+    name: &str,
+    video: bool,
+    file: DiskFile,
+    size: u64,
+    progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
+) -> Result<Uploaded, String> {
+    let failed = |e: WebError| match e {
+        WebError::DiskFull => format!("{name}: {}", cmd::DISK_FULL),
+        WebError::DiskTooLarge => format!("{name}: {}", cmd::DISK_FILE_TOO_LARGE),
+        e => format!("{name}: {e}"),
+    };
+    progress(0, size);
+    let url = web.disk_upload_url(target, name, size, video).await.map_err(&failed)?;
+    let location = web
+        .disk_put(&url, &file, size, Arc::new(move |sent| progress(sent, size)))
+        .await
+        .map_err(&failed)?;
+    let id = web.add_disk_file(target, &location).await.map_err(&failed)?;
+    Ok(Uploaded::File(request_id(), wire::disk_file_info(&id, name, size)))
 }
 
 /// Sends a ready `ClientMessage` and returns the feed message (with its attachments).

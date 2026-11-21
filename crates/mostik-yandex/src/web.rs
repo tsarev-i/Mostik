@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::StatusCode;
-use reqwest::header::{COOKIE, HeaderMap, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE, USER_AGENT};
+use reqwest::header::{
+    CONTENT_LENGTH, CONTENT_RANGE, COOKIE, HeaderMap, HeaderValue, LOCATION, ORIGIN, REFERER, SET_COOKIE, USER_AGENT,
+};
 use serde_json::Value;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -39,6 +41,15 @@ pub enum WebError {
     Stalled,
     #[error("could not write the file: {0}")]
     Write(#[from] std::io::Error),
+    #[error("could not read the file: {0}")]
+    Read(std::io::Error),
+    /// Yandex Disk has no room left for a file sent through it (`507`, and `403` as the web
+    /// client takes it).
+    #[error("there is no room left on Yandex Disk")]
+    DiskFull,
+    /// The file is larger than Yandex Disk takes (`413`).
+    #[error("the file is larger than Yandex Disk takes")]
+    DiskTooLarge,
     /// Not a file id that [`valid_file_id`] lets into an address.
     #[error("bad file identifier")]
     BadFileId,
@@ -78,6 +89,24 @@ const MAX_TRANSFER_TIME: Duration = Duration::from_secs(2 * 3600);
 pub fn transfer_timeout(bytes: u64) -> Duration {
     Duration::from_secs(60 + bytes / SLOWEST_TRANSFER).min(MAX_TRANSFER_TIME)
 }
+
+/// How long Mostik waits for Yandex Disk to take in a file it has got whole, how often it asks,
+/// and how long it pauses before an upload broken off goes on: as the web client does.
+#[derive(Debug, Clone, Copy)]
+struct DiskTiming {
+    processing: Duration,
+    poll: Duration,
+    resume_pause: Duration,
+}
+
+const DISK_TIMING: DiskTiming = DiskTiming {
+    processing: Duration::from_secs(20 * 60),
+    poll: Duration::from_secs(5),
+    resume_pause: Duration::from_secs(2),
+};
+
+/// How many times an upload to Yandex Disk broken off goes on from where the Disk got to.
+const DISK_RESUMES: usize = 3;
 
 /// Pauses before the repeats of a reading call that failed for a transient reason.
 const READ_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
@@ -458,6 +487,226 @@ impl WebClient {
             .ok_or_else(|| WebError::BadResponse("Telemost did not return file_id".into()))
     }
 
+    /// Where on the user's Yandex Disk a file goes that is too large for the Messenger storage
+    /// (`upload_to_disk`, as the web client does it): an address that takes the file without
+    /// cookies. `name` and `size` are the file's, `chat_id` is the chat it is sent to; a `video`
+    /// gets a preview from its first frame.
+    pub async fn disk_upload_url(
+        &mut self,
+        chat_id: &str,
+        name: &str,
+        size: u64,
+        video: bool,
+    ) -> Result<String, WebError> {
+        let mut file = serde_json::json!({
+            "name": name, "upload_id": crate::wire::request_id(), "size": size, "chat_id": chat_id
+        });
+        if video {
+            file["preview_timecode"] = 0.into();
+        }
+        let v = self
+            .rpc("upload_to_disk", serde_json::json!({ "files": [file] }))
+            .await?;
+        if let Some(refused) = disk_refusal(&v) {
+            return Err(refused);
+        }
+        v.pointer("/data/files/0/upload_url")
+            .and_then(Value::as_str)
+            .filter(|url| url.starts_with("https://"))
+            .map(str::to_owned)
+            .ok_or_else(|| WebError::BadResponse(format!("upload_to_disk: no upload address {}", error_code(&v))))
+    }
+
+    /// Puts a file of `size` bytes to `url` from [`WebClient::disk_upload_url`], telling
+    /// `progress` how many bytes the Disk has, and waits while Yandex Disk takes it in. An upload
+    /// broken off goes on from where the Disk got to, a few times. Returns the file's place on the
+    /// Disk (`Location`) for [`WebClient::add_disk_file`].
+    pub async fn disk_put(
+        &self,
+        url: &str,
+        file: &DiskFile,
+        size: u64,
+        progress: Arc<dyn Fn(u64) + Send + Sync>,
+    ) -> Result<String, WebError> {
+        self.disk_put_timed(url, file, size, progress, DISK_TIMING).await
+    }
+
+    async fn disk_put_timed(
+        &self,
+        url: &str,
+        file: &DiskFile,
+        size: u64,
+        progress: Arc<dyn Fn(u64) + Send + Sync>,
+        timing: DiskTiming,
+    ) -> Result<String, WebError> {
+        if size == 0 {
+            return Err(WebError::BadResponse("disk upload: the file is empty".into()));
+        }
+        // `None`: how much the Disk has is to be asked before going on.
+        let mut from = Some(0);
+        let mut failures = 0;
+        loop {
+            let step = match from {
+                None => self.disk_offset(url).await.map(|got| {
+                    let got = got.min(size);
+                    progress(got);
+                    from = Some(got);
+                    None
+                }),
+                Some(at) if at < size => self
+                    .disk_put_part(url, file, size, at, progress.clone())
+                    .await
+                    .map(Some),
+                Some(_) => Ok(Some(DiskAnswer::Processing)),
+            };
+            match step {
+                Ok(None) => {}
+                Ok(Some(DiskAnswer::Done(location))) => return Ok(location),
+                Ok(Some(DiskAnswer::Processing)) => return self.disk_wait(url, size, &progress, timing).await,
+                Err(e) if failures < DISK_RESUMES && disk_retry(&e) => {
+                    failures += 1;
+                    from = None;
+                    tokio::time::sleep(timing.resume_pause).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// One `PUT` of the file from byte `from` to its end, with its `Content-Range`.
+    async fn disk_put_part(
+        &self,
+        url: &str,
+        file: &DiskFile,
+        size: u64,
+        from: u64,
+        progress: Arc<dyn Fn(u64) + Send + Sync>,
+    ) -> Result<DiskAnswer, WebError> {
+        let body = match file {
+            DiskFile::Memory(bytes) => {
+                if bytes.len() as u64 != size {
+                    return Err(WebError::BadResponse("disk upload: the file changed".into()));
+                }
+                let progress = progress.clone();
+                reqwest::Body::wrap(UploadBody {
+                    bytes: bytes.slice(from as usize..),
+                    sent: 0,
+                    progress: Arc::new(move |sent| progress(from + sent)),
+                })
+            }
+            DiskFile::Path(path) => {
+                use tokio::io::AsyncSeekExt;
+                let mut f = tokio::fs::File::open(path).await.map_err(WebError::Read)?;
+                f.seek(std::io::SeekFrom::Start(from)).await.map_err(WebError::Read)?;
+                reqwest::Body::wrap(FileBody {
+                    file: f,
+                    left: size - from,
+                    sent: from,
+                    buf: vec![0; UPLOAD_CHUNK],
+                    progress,
+                })
+            }
+        };
+        let mut headers = self.disk_headers();
+        if let Ok(range) = HeaderValue::from_str(&format!("bytes {from}-{}/{size}", size - 1)) {
+            headers.insert(CONTENT_RANGE, range);
+        }
+        let resp = self
+            .http
+            .put(url)
+            .headers(headers)
+            .body(body)
+            .timeout(transfer_timeout(size - from))
+            .send()
+            .await?;
+        disk_logged(resp.status(), "put");
+        disk_answer(resp.status(), resp.headers())
+    }
+
+    /// How many bytes of the file Yandex Disk has got: `Content-Length` of a `HEAD`.
+    async fn disk_offset(&self, url: &str) -> Result<u64, WebError> {
+        let resp = self.http.head(url).headers(self.disk_headers()).send().await?;
+        let status = resp.status();
+        disk_logged(status, "head");
+        if !status.is_success() {
+            return Err(disk_error(status));
+        }
+        Ok(resp
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// Asks with an empty `PUT` until Yandex Disk has taken in the whole file (`201`), every
+    /// `timing.poll`, for `timing.processing` at most. Each ask tells `progress` that the upload
+    /// is alive.
+    async fn disk_wait(
+        &self,
+        url: &str,
+        size: u64,
+        progress: &Arc<dyn Fn(u64) + Send + Sync>,
+        timing: DiskTiming,
+    ) -> Result<String, WebError> {
+        let deadline = tokio::time::Instant::now() + timing.processing;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return Err(WebError::BadResponse(
+                    "Yandex Disk did not take in the file in time".into(),
+                ));
+            }
+            let asked = self
+                .http
+                .put(url)
+                .headers(self.disk_headers())
+                .body(Vec::new())
+                .timeout(left.min(RPC_TIMEOUT))
+                .send()
+                .await
+                .map_err(WebError::from)
+                .and_then(|resp| {
+                    disk_logged(resp.status(), "wait");
+                    disk_answer(resp.status(), resp.headers())
+                });
+            match asked {
+                Ok(DiskAnswer::Done(location)) => return Ok(location),
+                Ok(DiskAnswer::Processing) => {}
+                Err(e) if disk_retry(&e) => {}
+                Err(e) => return Err(e),
+            }
+            progress(size);
+            tokio::time::sleep(timing.poll.min(left)).await;
+        }
+    }
+
+    /// Headers for Yandex Disk: no cookies, the upload address itself lets the file in.
+    fn disk_headers(&self) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Ok(v) = HeaderValue::from_str(&self.user_agent) {
+            h.insert(USER_AGENT, v);
+        }
+        h.insert(ORIGIN, HeaderValue::from_static(WEB_ORIGIN));
+        h.insert(REFERER, HeaderValue::from_static("https://telemost.360.yandex.ru/"));
+        h
+    }
+
+    /// Adds a file put on Yandex Disk (`Location` from [`WebClient::disk_put`]) to chat `chat_id`
+    /// (`add_files`). Returns its `file_id` for the message, as [`WebClient::upload_file`] does.
+    pub async fn add_disk_file(&mut self, chat_id: &str, location: &str) -> Result<String, WebError> {
+        let v = self
+            .rpc(
+                "add_files",
+                serde_json::json!({ "chat_id": chat_id, "files": [{ "location": location }] }),
+            )
+            .await?;
+        v.pointer("/data/files/0/id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| WebError::BadResponse(format!("add_files: no file {}", error_code(&v))))
+    }
+
     /// All the synced settings (`get_buckets` from version 0); [`crate::convert::bucket`] finds
     /// one of them.
     pub async fn buckets(&mut self) -> Result<Value, WebError> {
@@ -662,6 +911,145 @@ impl http_body::Body for UploadBody {
     }
 }
 
+/// What a file sent through Yandex Disk is read from: memory (a pasted file) or its place on the
+/// disk, read as it goes.
+pub enum DiskFile {
+    Memory(bytes::Bytes),
+    Path(std::path::PathBuf),
+}
+
+/// How Yandex Disk answered a `PUT`.
+enum DiskAnswer {
+    /// It has the whole file: its place for `add_files`.
+    Done(String),
+    /// It has the whole file and is taking it in (`202`): ask again later.
+    Processing,
+}
+
+/// A `PUT` answer: `202` is [`DiskAnswer::Processing`], another 2xx has the file's place in
+/// `Location`.
+fn disk_answer(status: StatusCode, headers: &HeaderMap) -> Result<DiskAnswer, WebError> {
+    if status == StatusCode::ACCEPTED {
+        return Ok(DiskAnswer::Processing);
+    }
+    if !status.is_success() {
+        return Err(disk_error(status));
+    }
+    headers
+        .get(LOCATION)
+        .and_then(|l| l.to_str().ok())
+        .filter(|l| !l.is_empty())
+        .map(|l| DiskAnswer::Done(l.to_owned()))
+        .ok_or_else(|| WebError::BadResponse(format!("disk upload: HTTP {status} without Location")))
+}
+
+/// The error of a failed answer of Yandex Disk.
+fn disk_error(status: StatusCode) -> WebError {
+    disk_status(u64::from(status.as_u16())).unwrap_or_else(|| {
+        if status.is_server_error() {
+            WebError::Unavailable {
+                method: "disk upload".into(),
+                status: status.as_u16(),
+            }
+        } else {
+            WebError::BadResponse(format!("disk upload: HTTP {status}"))
+        }
+    })
+}
+
+/// The refusals of Yandex Disk the user can do something about, by their HTTP status.
+fn disk_status(status: u64) -> Option<WebError> {
+    match status {
+        403 | 507 => Some(WebError::DiskFull),
+        413 => Some(WebError::DiskTooLarge),
+        _ => None,
+    }
+}
+
+/// A refusal of Yandex Disk passed on by an RPC answer: `data.source` is `disk`, `data.code` its
+/// HTTP status.
+fn disk_refusal(v: &Value) -> Option<WebError> {
+    if v.pointer("/data/source").and_then(Value::as_str) != Some("disk") {
+        return None;
+    }
+    let code = v.pointer("/data/code")?;
+    let code = code.as_u64().or_else(|| code.as_str()?.parse().ok())?;
+    disk_status(code)
+}
+
+/// Whether an upload to Yandex Disk may go on after `e`: the connection broke or the Disk
+/// answered 5xx.
+fn disk_retry(e: &WebError) -> bool {
+    matches!(e, WebError::Http(_) | WebError::Unavailable { .. })
+}
+
+/// `data.code` of an RPC answer, for an error message.
+fn error_code(v: &Value) -> String {
+    v.pointer("/data/code").map(|c| format!("({c})")).unwrap_or_default()
+}
+
+/// Writes the status of an answer of Yandex Disk to the traffic log, without the address: it lets
+/// anyone in.
+fn disk_logged(status: StatusCode, step: &str) {
+    if crate::diag::traffic_logging() {
+        crate::diag::traffic_log(serde_json::json!({
+            "dir": "in", "via": "http", "disk": step, "status": status.as_u16()
+        }));
+    }
+}
+
+/// The body of an upload read from a file as it goes, from where `sent` says on, `left` bytes;
+/// each piece tells `progress` how many bytes of the file have gone. A file shorter than that
+/// fails the upload.
+struct FileBody {
+    file: tokio::fs::File,
+    left: u64,
+    sent: u64,
+    buf: Vec<u8>,
+    progress: Arc<dyn Fn(u64) + Send + Sync>,
+}
+
+impl http_body::Body for FileBody {
+    type Data = bytes::Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+        use std::task::Poll;
+        use tokio::io::AsyncRead;
+        let this = self.get_mut();
+        if this.left == 0 {
+            return Poll::Ready(None);
+        }
+        let want = this.buf.len().min(usize::try_from(this.left).unwrap_or(usize::MAX));
+        let mut read = tokio::io::ReadBuf::new(&mut this.buf[..want]);
+        match std::pin::Pin::new(&mut this.file).poll_read(cx, &mut read) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Ok(())) => {
+                let piece = bytes::Bytes::copy_from_slice(read.filled());
+                if piece.is_empty() {
+                    return Poll::Ready(Some(Err(std::io::ErrorKind::UnexpectedEof.into())));
+                }
+                this.left -= piece.len() as u64;
+                this.sent += piece.len() as u64;
+                (this.progress)(this.sent);
+                Poll::Ready(Some(Ok(http_body::Frame::data(piece))))
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.left == 0
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.left)
+    }
+}
+
 /// Whether a response says the CSRF token was not accepted.
 fn csrf_rejected(status: StatusCode, body: Option<&Value>) -> bool {
     status == StatusCode::FORBIDDEN
@@ -846,6 +1234,185 @@ mod tests {
             client().fetch(url.parse().unwrap(), 100, short).await,
             Err(WebError::Stalled)
         ));
+    }
+
+    #[test]
+    fn disk_refusals_are_told_apart() {
+        use serde_json::json;
+        let refusal = |v: Value| disk_refusal(&v);
+        assert!(matches!(
+            refusal(json!({"data": {"source": "disk", "code": "507"}})),
+            Some(WebError::DiskFull)
+        ));
+        assert!(matches!(
+            refusal(json!({"data": {"source": "disk", "code": 403}})),
+            Some(WebError::DiskFull)
+        ));
+        assert!(matches!(
+            refusal(json!({"data": {"source": "disk", "code": "413"}})),
+            Some(WebError::DiskTooLarge)
+        ));
+        assert!(refusal(json!({"data": {"source": "disk", "code": "500"}})).is_none());
+        assert!(refusal(json!({"data": {"code": "507"}})).is_none());
+        assert!(matches!(
+            disk_error(StatusCode::INSUFFICIENT_STORAGE),
+            WebError::DiskFull
+        ));
+        assert!(matches!(
+            disk_error(StatusCode::PAYLOAD_TOO_LARGE),
+            WebError::DiskTooLarge
+        ));
+        assert!(disk_retry(&disk_error(StatusCode::BAD_GATEWAY)));
+        assert!(!disk_retry(&disk_error(StatusCode::NOT_FOUND)));
+        assert!(!disk_retry(&WebError::DiskFull));
+    }
+
+    /// What the fake Yandex Disk got: the method, `Content-Range` and the body bytes it read.
+    type DiskLog = Arc<Mutex<Vec<(String, Option<String>, Vec<u8>)>>>;
+
+    /// One answer of the fake Yandex Disk.
+    enum DiskStep {
+        /// Read the whole request, then answer this.
+        Reply(&'static str),
+        /// Read this many bytes of the body, then drop the connection.
+        Cut(usize),
+    }
+
+    /// A fake Yandex Disk on a local port: each request comes on its own connection and gets
+    /// the next of `steps`.
+    async fn fake_disk(steps: Vec<DiskStep>) -> (String, DiskLog) {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/upload-target/x", listener.local_addr().unwrap());
+        let log = DiskLog::default();
+        let seen = log.clone();
+        tokio::spawn(async move {
+            for step in steps {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut data = Vec::new();
+                let mut buf = vec![0; 65536];
+                let head_end = loop {
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    data.extend_from_slice(&buf[..n]);
+                    if let Some(i) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&data[..head_end]).into_owned();
+                let header = |name: &str| {
+                    head.lines().find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case(name).then(|| v.trim().to_owned())
+                    })
+                };
+                let length: usize = header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let wanted = match step {
+                    DiskStep::Cut(n) => n.min(length),
+                    DiskStep::Reply(_) => length,
+                };
+                let mut body = data[head_end..].to_vec();
+                while body.len() < wanted {
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&buf[..n]);
+                }
+                body.truncate(length);
+                let method = head.split(' ').next().unwrap_or_default().to_owned();
+                seen.lock().unwrap().push((method, header("content-range"), body));
+                if let DiskStep::Reply(answer) = step {
+                    let _ = s.write_all(answer.as_bytes()).await;
+                }
+            }
+        });
+        (url, log)
+    }
+
+    const FAST_DISK: DiskTiming = DiskTiming {
+        processing: Duration::from_secs(5),
+        poll: Duration::from_millis(10),
+        resume_pause: Duration::from_millis(10),
+    };
+
+    const ACCEPTED: &str = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const CREATED: &str =
+        "HTTP/1.1 201 Created\r\nLocation: disk:/x.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+    /// The file goes whole with its range, then empty `PUT`s ask until the Disk has taken it in.
+    #[tokio::test]
+    async fn a_file_goes_to_yandex_disk_and_is_waited_for() {
+        let size = UPLOAD_CHUNK * 3 + 5;
+        let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let (url, log) = fake_disk(vec![
+            DiskStep::Reply(ACCEPTED),
+            DiskStep::Reply(ACCEPTED),
+            DiskStep::Reply(CREATED),
+        ])
+        .await;
+        let last = Arc::new(Mutex::new(0));
+        let seen = last.clone();
+        let file = DiskFile::Memory(bytes.clone().into());
+        let progress = Arc::new(move |n| *seen.lock().unwrap() = n);
+        let location = client()
+            .disk_put_timed(&url, &file, size as u64, progress, FAST_DISK)
+            .await
+            .unwrap();
+        assert_eq!(location, "disk:/x.bin");
+        assert_eq!(*last.lock().unwrap(), size as u64);
+        let log = log.lock().unwrap();
+        let range = format!("bytes 0-{}/{size}", size - 1);
+        assert_eq!((log[0].0.as_str(), log[0].1.as_deref()), ("PUT", Some(range.as_str())));
+        assert_eq!(log[0].2, bytes);
+        for ask in &log[1..] {
+            assert_eq!((ask.0.as_str(), ask.1.as_deref(), ask.2.len()), ("PUT", None, 0));
+        }
+        assert_eq!(log.len(), 3);
+    }
+
+    /// A broken upload asks the Disk how much it has and sends the rest of the file from there.
+    #[tokio::test]
+    async fn a_broken_upload_to_yandex_disk_goes_on() {
+        let size = 300_000;
+        let bytes: Vec<u8> = (0..size).map(|i| (i % 253) as u8).collect();
+        let path = std::env::temp_dir().join(format!("mostik-disk-{}.bin", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let (url, log) = fake_disk(vec![
+            DiskStep::Cut(1000),
+            DiskStep::Reply("HTTP/1.1 200 OK\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n"),
+            DiskStep::Reply(CREATED),
+        ])
+        .await;
+        let file = DiskFile::Path(path.clone());
+        let location = client()
+            .disk_put_timed(&url, &file, size as u64, Arc::new(|_| {}), FAST_DISK)
+            .await
+            .unwrap();
+        assert_eq!(location, "disk:/x.bin");
+        let log = log.lock().unwrap();
+        assert_eq!(log[1].0, "HEAD");
+        let range = format!("bytes 100000-{}/{size}", size - 1);
+        assert_eq!((log[2].0.as_str(), log[2].1.as_deref()), ("PUT", Some(range.as_str())));
+        assert_eq!(log[2].2, bytes[100_000..]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A full Disk is told at once, without going on.
+    #[tokio::test]
+    async fn a_full_yandex_disk_stops_the_upload() {
+        let (url, log) = fake_disk(vec![DiskStep::Reply(
+            "HTTP/1.1 507 Insufficient Storage\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )])
+        .await;
+        let file = DiskFile::Memory(vec![1; 10].into());
+        let result = client()
+            .disk_put_timed(&url, &file, 10, Arc::new(|_| {}), FAST_DISK)
+            .await;
+        assert!(matches!(result, Err(WebError::DiskFull)));
+        assert_eq!(log.lock().unwrap().len(), 1);
     }
 
     #[test]

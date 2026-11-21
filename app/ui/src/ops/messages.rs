@@ -285,17 +285,8 @@ pub fn upload_progress(c: Ctx, p: bridge::UploadProgress) {
 }
 
 /// Attaches `files` to the message being written in `chat`, or in its thread of `thread`; a file
-/// already there is not added again. A file over the limit of Telemost is not attached: the user
-/// is told at once, not after its upload is refused.
+/// already there is not added again.
 pub fn attach_files(c: Ctx, chat: ChatId, thread: Option<Timestamp>, files: Vec<bridge::PendingFile>) {
-    let (files, large): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| f.size <= mostik_ipc::cmd::MAX_UPLOAD);
-    if !large.is_empty() {
-        let names: Vec<&str> = large.iter().map(|f| f.name.as_str()).collect();
-        super::report(c, format!("{}: {}", names.join(", "), tr().file_too_large));
-        for f in large {
-            forget_pasted(c, f.path);
-        }
-    }
     if files.is_empty() {
         return;
     }

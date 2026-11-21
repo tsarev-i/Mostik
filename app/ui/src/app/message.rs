@@ -907,7 +907,8 @@ pub(super) fn Outbox(#[prop(optional)] in_thread: bool) -> impl IntoView {
 fn failure_reason(why: &str) -> String {
     let known = [
         (mostik_ipc::cmd::UPLOAD_STALLED, tr().upload_stalled),
-        (mostik_ipc::cmd::FILE_TOO_LARGE, tr().file_too_large),
+        (mostik_ipc::cmd::DISK_FULL, tr().disk_full),
+        (mostik_ipc::cmd::DISK_FILE_TOO_LARGE, tr().disk_file_too_large),
     ];
     known
         .into_iter()

@@ -44,11 +44,11 @@ pub(super) struct Session {
 }
 
 impl Session {
-    fn current(&self) -> u64 {
+    pub(super) fn current(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
 
-    fn is_current(&self, generation: u64) -> bool {
+    pub(super) fn is_current(&self, generation: u64) -> bool {
         self.current() == generation
     }
 
@@ -185,9 +185,11 @@ async fn forget_local_data(app: &AppHandle, state: &AppState) {
     if let Ok(dir) = app.path().app_data_dir()
         && let Ok(entries) = std::fs::read_dir(dir)
     {
+        // The session is renewed already: a download ending now does not write the list again.
+        let _saved = super::files::lock_saved_files();
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with("probe") || name == super::files::SAVED_FILES {
+            if name.starts_with("probe") || name.starts_with(super::files::SAVED_FILES) {
                 let _ = std::fs::remove_file(e.path());
             }
         }

@@ -183,6 +183,11 @@ pub fn file_info(file_id: &str, name: &str, size: usize) -> Value {
     json!({ "Id2": file_id, "Name": name, "Size": size })
 }
 
+/// [`file_info`] of a file sent through Yandex Disk: `Source` 1, the web client's `FileSource.DISK`.
+pub fn disk_file_info(file_id: &str, name: &str, size: u64) -> Value {
+    json!({ "Id2": file_id, "Name": name, "Size": size, "Source": 1 })
+}
+
 /// Gallery item: an uploaded image of `width` × `height` pixels with its [`file_info`].
 pub fn gallery_image(width: u64, height: u64, info: Value) -> Value {
     json!({ "Image": { "Width": width, "Height": height, "FileInfo": info } })

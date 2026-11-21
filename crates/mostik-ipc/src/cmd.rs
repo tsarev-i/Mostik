@@ -194,13 +194,17 @@ pub struct SendFilesArgs {
 /// in its own words.
 pub const UPLOAD_STALLED: &str = "the upload stopped, check the connection";
 
-/// The largest file Telemost takes in a message: a larger one is refused with `HTTP 400 bad_file`
-/// after the whole of it has gone. (Its own client sends those through Yandex Disk.)
+/// The largest file the Messenger storage takes: a larger one is refused with `HTTP 400 bad_file`
+/// after the whole of it has gone, so it goes through the user's Yandex Disk, as in the web client.
 pub const MAX_UPLOAD: u64 = 50 * 1024 * 1024;
 
-/// How [`SendFiles`] fails for a file over [`MAX_UPLOAD`], after `<file name>: `, before anything is
-/// uploaded. The UI shows it in its own words.
-pub const FILE_TOO_LARGE: &str = "the file is larger than 50 MB";
+/// How [`SendFiles`] fails, after `<file name>: `, when Yandex Disk has no room for a file over
+/// [`MAX_UPLOAD`]. The UI shows it in its own words.
+pub const DISK_FULL: &str = "there is no room left on Yandex Disk";
+
+/// How [`SendFiles`] fails, after `<file name>: `, when a file is larger than Yandex Disk takes.
+/// The UI shows it in its own words.
+pub const DISK_FILE_TOO_LARGE: &str = "the file is larger than Yandex Disk takes";
 
 /// How sending or editing a message fails when Telemost refuses its text as too big
 /// (`message too big`). The UI shows it in its own words.
