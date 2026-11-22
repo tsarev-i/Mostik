@@ -1,7 +1,9 @@
 //! Chats and people: profiles, direct chats, search, channels and their members, the synced chat
 //! settings (notifications, folders, stars), browsing and joining public channels.
 
-use mostik_core::{Chat, ChatId, ChatKind, NotifyLevel, User, UserId};
+use std::collections::{BTreeMap, BTreeSet};
+
+use mostik_core::{Chat, ChatId, ChatKind, Message, NotifyLevel, Timestamp, User, UserId};
 use mostik_ipc::cmd::{
     self, Args, ChatArgs, CreateChannelArgs, DirectorySearchArgs, FoldersArgs, GuidArgs, MembersArgs,
     MessageSearchArgs, NotifyLevelArgs, Out, PeopleSearchArgs, SearchFilter, StarArgs, UpdateChatArgs,
@@ -9,6 +11,7 @@ use mostik_ipc::cmd::{
 use mostik_ipc::{ChatDetails, DirectoryHits, FoundMessages};
 use mostik_yandex::clock;
 use mostik_yandex::convert;
+use mostik_yandex::wire::HistoryRequest;
 use serde_json::{Value, json};
 use tauri::AppHandle;
 
@@ -199,8 +202,69 @@ pub async fn search_messages(
             }
         }
     }
+    if query.trim().is_empty() {
+        drop_deleted(&live, &mut messages).await;
+    }
     note_files(&state, &live.me, &messages);
     Ok(FoundMessages { messages, users })
+}
+
+/// How many messages of a chat are asked for to check what a search found in it.
+const CHECKED_PAGE: u32 = 50;
+
+/// Leaves out the messages that are deleted. Asked for a filter alone ("mine", "important" with no
+/// words), Telemost still lists deleted messages (seen on 2026-11-22; words find none of them), so
+/// each chat's history is asked for the messages up to the newest one found there. One older
+/// than that page, or in a chat whose history did not come, stays.
+async fn drop_deleted(live: &Live, messages: &mut Vec<Message>) {
+    let mut newest: BTreeMap<String, Timestamp> = BTreeMap::new();
+    for m in messages.iter() {
+        if let Ok(chat) = super::target_chat(&m.chat_id.0, m.thread_parent) {
+            let ts = newest.entry(chat).or_default();
+            *ts = (*ts).max(m.ts);
+        }
+    }
+    let pages = newest.into_iter().map(|(chat, ts)| async move {
+        let page = live
+            .xiva
+            .call(
+                "history",
+                &HistoryRequest::page(&chat, CHECKED_PAGE, Some(ts + 1)),
+                super::messages::HISTORY_TIMEOUT_S,
+            )
+            .await
+            .ok()
+            .filter(|body| body.get("Chats").is_some())?;
+        let records = page
+            .pointer("/Chats/0/Messages")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        // A page shorter than asked for goes back to the start of the chat.
+        let from = match records >= CHECKED_PAGE as usize {
+            true => convert::oldest_record(&page).unwrap_or(Timestamp::MAX),
+            false => 0,
+        };
+        let kept: BTreeSet<Timestamp> = convert::from_history(&page, Some(&live.me))
+            .messages
+            .iter()
+            .map(|m| m.ts)
+            .collect();
+        Some((chat, (from, kept)))
+    });
+    let checked: BTreeMap<String, (Timestamp, BTreeSet<Timestamp>)> = futures_util::future::join_all(pages)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    messages.retain(|m| {
+        let Ok(chat) = super::target_chat(&m.chat_id.0, m.thread_parent) else {
+            return true;
+        };
+        match checked.get(&chat) {
+            Some((from, kept)) if m.ts >= *from => kept.contains(&m.ts),
+            _ => true,
+        }
+    });
 }
 
 /// The web client's `messages_filter`: `{sender: guid, is_important: true}`, or nothing.

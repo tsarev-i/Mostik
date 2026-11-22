@@ -27,7 +27,7 @@ const FIRST_PAGE: u32 = 20;
 const OLDER_PAGE: u32 = 40;
 const THREAD_PAGE: u32 = 50;
 /// Seconds a history page may take: twice that with the repeat, about what one wait used to be.
-const HISTORY_TIMEOUT_S: u64 = 12;
+pub(super) const HISTORY_TIMEOUT_S: u64 = 12;
 
 /// History page: the latest messages before `before` (exclusive). The page comes back at once;
 /// directory profiles of its new authors follow as [`LiveEvent::Users`].
