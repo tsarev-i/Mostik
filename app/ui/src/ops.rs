@@ -55,19 +55,7 @@ pub fn in_own_words(why: &str) -> String {
     if why == mostik_ipc::cmd::MESSAGE_TOO_LONG {
         return crate::i18n::tr().message_too_long.to_owned();
     }
-    if let Some((went, all, cause)) = partly_sent(why) {
-        return crate::i18n::tr().partly_sent(went, all, &in_own_words(cause));
-    }
     why.to_owned()
-}
-
-/// A long text that went only in part: how many parts went, of how many, and why the next did
-/// not (`PARTLY_SENT<went>/<all>: <why>`).
-pub fn partly_sent(why: &str) -> Option<(usize, usize, &str)> {
-    let rest = why.strip_prefix(mostik_ipc::cmd::PARTLY_SENT)?;
-    let (counts, cause) = rest.split_once(": ")?;
-    let (went, all) = counts.split_once('/')?;
-    Some((went.parse().ok()?, all.parse().ok()?, cause))
 }
 
 /// Now, in the microseconds of message times.

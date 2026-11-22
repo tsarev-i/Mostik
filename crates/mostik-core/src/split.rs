@@ -1,7 +1,9 @@
 //! A text too long for one message, cut into parts that each go as a message of their own, the
 //! way the web client sends it (`enableLongMessageChunking`): a part ends where the text breaks
-//! (a blank line, a line, a sentence, a word) and keeps mentions, links and inline code whole; a
-//! code block cut in two is closed in one part and opened again in the next.
+//! (a blank line, a line, a sentence, a word) and keeps mentions, links and inline code whole; code
+//! cut in two is closed in one part and opened again in the next.
+
+use crate::markup::Mentionable;
 
 /// Length as a web page counts it: UTF-16 code units.
 pub fn utf16_len(s: &str) -> usize {
@@ -53,28 +55,35 @@ fn fences(text: &str) -> Vec<Fence> {
     out
 }
 
-/// What a cut must not go through, outside code blocks: `@<guid>` mentions, `[caption](address)`
-/// links, bare addresses and `` `code` ``. Byte ranges, in order.
-fn kept_whole(text: &str, fences: &[Fence]) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
+/// Byte ranges of the text, `start..end`.
+type Ranges = Vec<(usize, usize)>;
+
+/// What a cut must not go through, outside code blocks: mentions of people and chats (as `who`
+/// knows them, or `@<guid>`), `[caption](address)` links, bare addresses, and `` `code` ``, which
+/// may span lines, as in [`crate::markup`]. Byte ranges, in order, and those of the code apart.
+fn kept_whole(text: &str, fences: &[Fence], who: &Mentionable) -> (Ranges, Ranges) {
+    let (mut out, mut code) = (Vec::new(), Vec::new());
     let mut fence = fences.iter().peekable();
     let mut i = 0;
+    let mut prev = '\0';
     while i < text.len() {
         if let Some(f) = fence.peek()
             && i >= f.open
         {
             i = f.end;
+            prev = '`';
             fence.next();
             continue;
         }
         let rest = &text[i..];
-        let len = if rest.starts_with('@') && crate::markup::guid_at(&rest[1..]).is_some() {
-            Some(1 + crate::markup::GUID_LEN)
+        let len = if rest.starts_with('@') && !prev.is_alphanumeric() {
+            who.find(&rest[1..]).map(|(_, len)| 1 + len)
         } else if rest.starts_with('`') && !rest.starts_with("```") {
-            rest[1..]
-                .find(['`', '\n'])
-                .filter(|&j| rest[1 + j..].starts_with('`'))
-                .map(|j| j + 2)
+            let len = rest[1..].find('`').map(|j| j + 2);
+            if let Some(n) = len {
+                code.push((i, i + n));
+            }
+            len
         } else if rest.starts_with('[') {
             link_len(rest)
         } else if ["http://", "https://"].iter().any(|p| rest.starts_with(p)) {
@@ -85,12 +94,16 @@ fn kept_whole(text: &str, fences: &[Fence]) -> Vec<(usize, usize)> {
         match len {
             Some(n) if n > 1 => {
                 out.push((i, i + n));
+                prev = rest[..n].chars().next_back().unwrap_or('\0');
                 i += n;
             }
-            _ => i += rest.chars().next().map_or(1, char::len_utf8),
+            _ => {
+                prev = rest.chars().next().unwrap_or('\0');
+                i += prev.len_utf8();
+            }
         }
     }
-    out
+    (out, code)
 }
 
 /// Length of `[caption](address)` at the start of `s`, on one line.
@@ -161,14 +174,14 @@ fn whole_char_cut(text: &str, pos: usize, mut cut: usize) -> usize {
 /// code; with none of these it is cut at the limit, between whole characters. The break itself
 /// goes. A code block cut in two ends the part with a closing fence and starts the next with its
 /// opening line again, so both show as code.
-pub fn split_long(text: &str, limit: usize) -> Vec<String> {
+pub fn split_long(text: &str, limit: usize, who: &Mentionable) -> Vec<String> {
     if utf16_len(text) <= limit {
         return if text.is_empty() { vec![] } else { vec![text.to_owned()] };
     }
     // Room for a code block's fences, and some text besides.
     let limit = limit.max(32);
     let fences = fences(text);
-    let kept = kept_whole(text, &fences);
+    let (kept, code) = kept_whole(text, &fences, who);
     // Whether a part may end at `at`: not in a kept range, a fence's opening line or its closing fence.
     let can_end = |at: usize| {
         let inside = |(a, b): (usize, usize)| a < at && at < b;
@@ -237,8 +250,15 @@ pub fn split_long(text: &str, limit: usize) -> Vec<String> {
             next = cut;
         }
         let fence = fences.iter().find(|f| f.body <= cut && cut <= f.close);
+        // Inline code too long for a part: cut, it is closed and opened again, as a code block is.
+        let in_code = code.iter().any(|&(a, b)| a < cut && cut < b);
         let mut part = String::from(prefix);
         match fence {
+            None if in_code => {
+                part.push_str(&text[pos..cut]);
+                part.push('`');
+                reopen = Some("`");
+            }
             Some(f) => {
                 part.push_str(&text[pos..cut]);
                 if !part.ends_with('\n') {
@@ -276,6 +296,10 @@ pub fn split_long(text: &str, limit: usize) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn split(text: &str, limit: usize) -> Vec<String> {
+        split_long(text, limit, &Mentionable::default())
+    }
+
     const GUID: &str = "aaaa0001-0000-4000-8000-000000000001";
 
     fn fits(parts: &[String], limit: usize) {
@@ -286,10 +310,10 @@ mod tests {
 
     #[test]
     fn a_text_that_fits_is_one_part() {
-        assert_eq!(split_long("hello", 4096), ["hello"]);
-        assert!(split_long("", 4096).is_empty());
+        assert_eq!(split("hello", 4096), ["hello"]);
+        assert!(split("", 4096).is_empty());
         let exact = "a".repeat(4096);
-        assert_eq!(split_long(&exact, 4096), [exact]);
+        assert_eq!(split(&exact, 4096), [exact]);
     }
 
     #[test]
@@ -302,13 +326,13 @@ mod tests {
             "c".repeat(5),
             "d".repeat(40)
         );
-        let parts = split_long(&text, 64);
+        let parts = split(&text, 64);
         fits(&parts, 64);
         assert_eq!(parts[0], "a".repeat(30));
         assert!(parts[1].starts_with('b'));
         // A line break in the first half is not taken: a sentence end later is.
         let text = format!("{}\n{}. {}", "a".repeat(5), "b".repeat(40), "c".repeat(40));
-        let parts = split_long(&text, 64);
+        let parts = split(&text, 64);
         assert_eq!(parts[0], format!("{}\n{}.", "a".repeat(5), "b".repeat(40)));
         assert_eq!(parts[1], "c".repeat(40));
     }
@@ -316,12 +340,12 @@ mod tests {
     #[test]
     fn words_stay_whole_and_a_long_word_is_cut() {
         let text = "word ".repeat(40);
-        let parts = split_long(text.trim_end(), 64);
+        let parts = split(text.trim_end(), 64);
         fits(&parts, 64);
         assert!(parts.iter().all(|p| p.split(' ').all(|w| w == "word")));
         assert_eq!(parts.join(" "), text.trim_end());
         let long = "x".repeat(150);
-        let parts = split_long(&long, 64);
+        let parts = split(&long, 64);
         fits(&parts, 64);
         assert_eq!(parts.concat(), long);
     }
@@ -330,7 +354,7 @@ mod tests {
     fn the_limit_counts_utf16_and_keeps_emoji_whole() {
         // Each 👍🏽 is four UTF-16 units: a part of 64 holds sixteen of them.
         let text = "👍🏽".repeat(40);
-        let parts = split_long(&text, 64);
+        let parts = split(&text, 64);
         fits(&parts, 64);
         assert_eq!(parts.concat(), text);
         assert!(parts.iter().all(|p| p.chars().count() % 2 == 0));
@@ -341,10 +365,53 @@ mod tests {
     #[test]
     fn a_blank_first_line_of_code_does_not_split_the_fence() {
         let text = format!("{}\n```\n\n{}\n```", "word ".repeat(600), "code\n".repeat(400));
-        let parts = split_long(&text, 4096);
+        let parts = split(&text, 4096);
         fits(&parts, 4096);
         for p in &parts {
             assert_eq!(p.matches("```").count() % 2, 0, "{p:?}");
+        }
+    }
+
+    /// Inline code spans lines; one too long for a part is closed and opened again, so what it
+    /// quotes stays code: an id in it does not become a mention.
+    #[test]
+    fn inline_code_cut_in_two_stays_code() {
+        let text = format!("{} `@{GUID}\n{}`", "x".repeat(3000), "y".repeat(2000));
+        let parts = split(&text, 4096);
+        fits(&parts, 4096);
+        for p in &parts {
+            assert_eq!(p.matches('`').count() % 2, 0, "{p:?}");
+            assert!(crate::markup::mentioned_ids(p).is_empty(), "{p:?}");
+        }
+        let long = format!("`{}`", "code ".repeat(300));
+        let parts = split(&long, 400);
+        fits(&parts, 400);
+        assert!(parts.len() > 3);
+        assert!(
+            parts.iter().all(|p| p.starts_with('`') && p.ends_with('`')),
+            "{parts:?}"
+        );
+    }
+
+    /// A mention by name (a person, a chat) may have spaces: it is not cut either.
+    #[test]
+    fn mentions_by_name_are_not_cut() {
+        let who = Mentionable {
+            people: &["Anna Smirnova"],
+            channels: &["Design Team"],
+            ids: &[],
+        };
+        for pad in 4060..4096 {
+            let text = format!(
+                "{} @Design Team and @Anna Smirnova {}",
+                "x".repeat(pad),
+                "z ".repeat(40)
+            );
+            let parts = split_long(&text, 4096, &who);
+            fits(&parts, 4096);
+            let all = parts.join("|");
+            assert!(all.contains("@Design Team"), "{pad}: {all:?}");
+            assert!(all.contains("@Anna Smirnova"), "{pad}: {all:?}");
         }
     }
 
@@ -352,7 +419,7 @@ mod tests {
     #[test]
     fn flags_are_cut_between_them() {
         let text = "🇷🇺".repeat(1500);
-        let parts = split_long(&text, 4096);
+        let parts = split(&text, 4096);
         fits(&parts, 4096);
         assert_eq!(parts.len(), 2);
         assert_eq!(parts.concat(), text);
@@ -360,7 +427,7 @@ mod tests {
         // The letters pair from the start of the run, whatever they spell: every part but the last
         // holds whole pairs.
         let text = format!("🇷{}", "🇷🇺".repeat(40));
-        let parts = split_long(&text, 64);
+        let parts = split(&text, 64);
         fits(&parts, 64);
         assert_eq!(parts.concat(), text);
         let (_, whole) = parts.split_last().unwrap();
@@ -371,7 +438,7 @@ mod tests {
     #[test]
     fn a_run_of_accents_does_not_shrink_the_parts() {
         let text = format!("a{}", "\u{0301}".repeat(5000));
-        let parts = split_long(&text, 4096);
+        let parts = split(&text, 4096);
         fits(&parts, 4096);
         assert!(parts.len() <= 3, "{}", parts.len());
     }
@@ -382,7 +449,7 @@ mod tests {
         let text = format!("{} @{GUID} {link} `a b c` {}", "a ".repeat(10), "z ".repeat(30));
         // From a limit where each of them fits in a part with the room for a closing fence.
         for limit in 48..90 {
-            let parts = split_long(&text, limit);
+            let parts = split(&text, limit);
             fits(&parts, limit);
             let all = parts.join(" ");
             assert!(all.contains(&format!("@{GUID}")), "{limit}: {parts:?}");
@@ -395,7 +462,7 @@ mod tests {
     fn a_code_block_cut_in_two_is_closed_and_opened_again() {
         let code: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
         let text = format!("Log:\n```rust\n{}\n```\nDone", code.join("\n"));
-        let parts = split_long(&text, 80);
+        let parts = split(&text, 80);
         fits(&parts, 80);
         assert!(parts.len() > 2);
         for p in &parts {
@@ -451,7 +518,7 @@ mod tests {
         for _ in 0..400 {
             let text: String = (0..next() % 300).map(|_| pieces[next() % pieces.len()]).collect();
             let limit = 32 + next() % 120;
-            let parts = split_long(&text, limit);
+            let parts = split(&text, limit);
             fits(&parts, limit);
             assert!(parts.iter().all(|p| !p.trim().is_empty()), "{parts:?}");
             // Nothing is lost: what the text shows besides spaces and fences is all in the parts, in
@@ -472,7 +539,7 @@ mod tests {
     #[test]
     fn an_unclosed_fence_is_text() {
         let text = format!("```{}", "word ".repeat(30));
-        let parts = split_long(&text, 64);
+        let parts = split(&text, 64);
         fits(&parts, 64);
         assert!(parts.iter().skip(1).all(|p| !p.contains("```")));
     }

@@ -108,6 +108,23 @@ pub struct UploadProgress {
     pub total: u64,
 }
 
+/// What [`cmd::SendMessage`] sent: its messages, in order, and when a long text went only in part,
+/// what did not go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentText {
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub unsent: Option<Unsent>,
+}
+
+/// The parts of a long text that did not go, as one text to send again, and why the first of them
+/// did not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unsent {
+    pub text: String,
+    pub why: String,
+}
+
 /// Files dropped onto the chat window and where, in logical pixels of the window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Dropped {

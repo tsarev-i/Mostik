@@ -1629,12 +1629,12 @@ impl Tr {
         }
     }
 
-    /// A long message sent in parts, of which only the first `went` of `all` went: why the next
-    /// did not.
-    pub fn partly_sent(&self, went: usize, all: usize, why: &str) -> String {
+    /// A long message of which only the first parts went: the rest is back in the field, and why it
+    /// did not go.
+    pub fn partly_sent(&self, why: &str) -> String {
         match self.lang {
-            Lang::Ru => format!("отправлено частей: {went} из {all}, остальные не ушли ({why})"),
-            Lang::En => format!("{went} of {all} parts went, the rest did not ({why})"),
+            Lang::Ru => format!("ушло не всё, остаток в поле ({why})"),
+            Lang::En => format!("not all of it went, the rest is in the field ({why})"),
         }
     }
 

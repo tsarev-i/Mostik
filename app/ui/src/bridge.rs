@@ -159,7 +159,7 @@ pub async fn send_message(
     thread: Option<Timestamp>,
     reply: Option<ReplyRef>,
     options: cmd::SendOptions,
-) -> Result<Vec<Message>, String> {
+) -> Result<mostik_ipc::SentText, String> {
     let args = cmd::SendArgs {
         chat_id: ChatId(chat_id.into()),
         text: text.into(),

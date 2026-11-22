@@ -13,7 +13,7 @@ use tauri_plugin_notification::NotificationExt;
 use super::{AppState, NotifyMode, Shared, text};
 
 /// Runs `f` with the people, public chats and ids `@` can point at.
-fn with_names<R>(sh: &Shared, f: impl FnOnce(&mostik_core::markup::Mentionable) -> R) -> R {
+pub(super) fn with_names<R>(sh: &Shared, f: impl FnOnce(&mostik_core::markup::Mentionable) -> R) -> R {
     let people: Vec<&str> = sh.names.values().map(String::as_str).collect();
     let channels: Vec<&str> = sh.channels.iter().map(String::as_str).collect();
     let ids: Vec<(&str, &str)> = sh.names.iter().map(|(i, n)| (i.as_str(), n.as_str())).collect();

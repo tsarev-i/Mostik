@@ -89,20 +89,17 @@ pub async fn send(
         ts: r.msg.ts,
         quote: r.quote.clone(),
     });
+    let mut unsent = None;
     let mut messages = if c.live {
-        match bridge::send_message(&chat.0, &text, thread, reply_ref, options).await {
-            Ok(sent) => sent,
-            Err(e) => {
-                keep_unsent(c, &chat, thread, &text, reply.as_ref(), &e);
-                return Err(e);
-            }
-        }
+        let sent = bridge::send_message(&chat.0, &text, thread, reply_ref, options).await?;
+        unsent = sent.unsent;
+        sent.messages
     } else {
         vec![Message {
-            chat_id: chat,
+            chat_id: chat.clone(),
             ts: now_mcs(),
             author: me,
-            text,
+            text: text.clone(),
             thread_parent: thread,
             edited: false,
             important: options.important,
@@ -122,26 +119,27 @@ pub async fn send(
     for message in messages {
         upsert(c, message, None);
     }
-    Ok(())
+    match unsent {
+        Some(rest) => {
+            keep_unsent(c, &chat, thread, &text, reply.as_ref(), &rest.text);
+            Err(tr().partly_sent(&super::in_own_words(&rest.why)))
+        }
+        None => Ok(()),
+    }
 }
 
 /// After a long text went only in part, its field keeps only the parts that did not go, and not the
 /// reply the first part carried: sending again does not repeat what went. Not if the user has
 /// changed the text meanwhile; a reply they picked meanwhile stays.
-fn keep_unsent(c: Ctx, chat: &ChatId, thread: Option<Timestamp>, sent: &str, reply: Option<&ReplyTarget>, why: &str) {
-    let Some((went, ..)) = super::partly_sent(why) else {
-        return;
-    };
+fn keep_unsent(c: Ctx, chat: &ChatId, thread: Option<Timestamp>, sent: &str, reply: Option<&ReplyTarget>, rest: &str) {
     let key = crate::app::drafts::DraftKey::field(chat.clone(), thread);
     let draft = crate::app::drafts::get(c, &key);
     if with_mention_ids(c, draft.text.trim()) != sent {
         return;
     }
-    let parts = mostik_core::split::split_long(sent, mostik_core::split::MESSAGE_LIMIT);
-    let rest = parts.get(went..).unwrap_or_default().join("\n");
     let (rest, named) = c.snap.with_untracked(|s| {
         s.mention_names()
-            .with(|who| mostik_core::markup::ids_to_names(&rest, who))
+            .with(|who| mostik_core::markup::ids_to_names(rest, who))
     });
     c.picked.update(|p| {
         for (name, id) in named {

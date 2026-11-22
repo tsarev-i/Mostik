@@ -788,7 +788,7 @@ pub async fn send_files(
         }
     }
     let mut sent = Vec::new();
-    let parts = mostik_core::split::split_long(text.trim(), wire::MESSAGE_LIMIT);
+    let parts = super::messages::split_text(&live, text.trim());
     // The next part of the text to go: an earlier try may have sent some.
     let mut next = done.texts;
     // Only the first message of the sending goes as the user chose (see `sending_options`).

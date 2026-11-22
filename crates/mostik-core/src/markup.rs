@@ -60,7 +60,7 @@ impl Mentionable<'_> {
 
     /// Mention at the start of `after` (the text right after `@`): the span and its length in bytes.
     /// The mention must end at a word boundary; the longest name wins, a person over a chat of the same name.
-    fn find(&self, after: &str) -> Option<(Inline, usize)> {
+    pub(crate) fn find(&self, after: &str) -> Option<(Inline, usize)> {
         if let Some(id) = guid_at(after) {
             let name = self.name_of(id).map(str::to_owned);
             return Some((

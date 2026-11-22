@@ -9,7 +9,7 @@ use mostik_ipc::cmd::{
     self, Args, ChatArgs, EditArgs, ForwardArgs, HistoryArgs, ImportantArgs, MsgArgs, Out, PinArgs, ReactionArgs,
     SendArgs, UnreadArgs,
 };
-use mostik_ipc::{HistoryPage, Sent};
+use mostik_ipc::{HistoryPage, Sent, SentText, Unsent};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::wire::{self, HistoryRequest, request_id};
@@ -176,6 +176,7 @@ pub async fn mark_read(
 /// Sends a text message; with `reply`, a reply to a message of the same chat or thread. A text
 /// longer than [`wire::MESSAGE_LIMIT`] goes as several messages, one after another, as the web
 /// client sends it (see [`super::sending_options`]): the reply and the options go with the first.
+/// When a later part does not go, the ones that went are returned with the rest.
 #[tauri::command]
 pub async fn send_message(
     state: tauri::State<'_, AppState>,
@@ -193,13 +194,12 @@ pub async fn send_message(
     }
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    let parts = mostik_core::split::split_long(&text, wire::MESSAGE_LIMIT);
-    let total = parts.len();
-    let mut sent_parts = Vec::with_capacity(total);
-    for (i, part) in parts.into_iter().enumerate() {
+    let parts = split_text(&live, &text);
+    let mut messages = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
         let msg = match (&reply, i) {
-            (Some(r), 0) => wire::reply(&target, &request_id(), &part, &target, r.ts, r.quote.as_deref()),
-            _ => wire::plain_text(&target, &request_id(), &part),
+            (Some(r), 0) => wire::reply(&target, &request_id(), part, &target, r.ts, r.quote.as_deref()),
+            _ => wire::plain_text(&target, &request_id(), part),
         };
         let (notify, important) = sending_options(options, i == 0);
         let sent = match push(&live, wire::with_options(msg, notify, important))
@@ -207,15 +207,24 @@ pub async fn send_message(
             .and_then(|r| sent_from_reply(&r))
         {
             Ok(sent) => sent,
-            // What has gone stays: the feed has it from the pushes, and the error says what did not.
-            Err(e) if i > 0 => return Err(format!("{}{i}/{total}: {e}", cmd::PARTLY_SENT)),
+            // What has gone stays: the feed has it from the pushes.
+            Err(why) if i > 0 => {
+                let unsent = Unsent {
+                    text: parts[i..].join("\n"),
+                    why,
+                };
+                return Ok(SentText {
+                    messages,
+                    unsent: Some(unsent),
+                });
+            }
             Err(e) => return Err(e),
         };
-        sent_parts.push(Message {
+        messages.push(Message {
             chat_id: ChatId(chat_id.clone()),
             ts: sent.ts,
             author: live.me.clone(),
-            text: part,
+            text: part.clone(),
             thread_parent: thread,
             edited: false,
             important,
@@ -229,7 +238,17 @@ pub async fn send_message(
             reads: None,
         });
     }
-    Ok(sent_parts)
+    Ok(SentText { messages, unsent: None })
+}
+
+/// `text` in the parts it goes in (see [`mostik_core::split::split_long`]), keeping whole the
+/// mentions of the people and chats known by name.
+pub(super) fn split_text(live: &Live, text: &str) -> Vec<String> {
+    let split = |who: &mostik_core::markup::Mentionable| mostik_core::split::split_long(text, wire::MESSAGE_LIMIT, who);
+    match live.shared.lock() {
+        Ok(sh) => super::notify::with_names(&sh, split),
+        Err(_) => split(&mostik_core::markup::Mentionable::default()),
+    }
 }
 
 /// Edits the text of a message. `whole`: the message has images, files or forwarded messages,

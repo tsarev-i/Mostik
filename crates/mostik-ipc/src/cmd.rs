@@ -232,10 +232,6 @@ pub const DISK_FILE_TOO_LARGE: &str = "the file is larger than Yandex Disk takes
 /// (`message too big`). The UI shows it in its own words.
 pub const MESSAGE_TOO_LONG: &str = "the message is too long";
 
-/// How [`SendMessage`] fails when a long text went in parts and a later part did not go, before
-/// `<parts sent>/<parts>: <why>`: the parts that went stay. The UI shows it in its own words.
-pub const PARTLY_SENT: &str = "only some parts of the message went: ";
-
 /// One file of a sending going on: [`CancelUpload`] stops its upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -535,7 +531,7 @@ commands! {
     MarkThreadRead = "mark_thread_read", ThreadReadArgs => ();
 
     // Messages.
-    SendMessage = "send_message", SendArgs => Vec<Message>;
+    SendMessage = "send_message", SendArgs => crate::SentText;
     EditMessage = "edit_message", EditArgs => ();
     DeleteMessage = "delete_message", MsgArgs => ();
     SetReaction = "set_reaction", ReactionArgs => ();
