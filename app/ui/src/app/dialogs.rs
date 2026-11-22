@@ -892,6 +892,9 @@ pub(super) fn AudienceDialog(msg: Message) -> impl IntoView {
                     }
                 }}
             </div>
+            <div class="modal-actions">
+                <button class="btn" on:click=move |_| close()>{tr().close}</button>
+            </div>
         </Modal>
     }
 }
