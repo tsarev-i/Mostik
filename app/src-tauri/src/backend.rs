@@ -34,6 +34,7 @@ pub mod prefs;
 pub mod presence;
 pub mod service;
 pub mod threads;
+pub mod voice;
 
 pub(crate) use calls::open_call;
 pub(crate) use connection::{probing, write_probe};

@@ -1132,10 +1132,12 @@ mod tests {
                 text: String::new(),
                 attachments: forwarded,
                 quote: None,
+                media: None,
                 reply: false,
             }],
             call: None,
             system: None,
+            media: None,
             reads: None,
         }
     }

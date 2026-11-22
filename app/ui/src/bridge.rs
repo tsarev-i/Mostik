@@ -6,7 +6,7 @@ use mostik_ipc::cmd::{self, Command};
 pub use mostik_ipc::cmd::{ReplyRef, SendOptions};
 pub use mostik_ipc::{
     Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent, Threads,
-    UpdateStatus, UploadProgress,
+    UpdateStatus, UploadProgress, VoiceEnded,
 };
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
@@ -261,6 +261,24 @@ pub async fn set_preferences(s: &crate::settings::Settings) -> Result<(), String
         spell_check: s.spell_check,
     };
     call::<cmd::SetPreferences>(args).await
+}
+
+/// A voice message played to its end, or that could not play: [`VoiceEnded`].
+pub const VOICE_EVENT: &str = "mostik://voice";
+
+/// Plays voice message `file_id` from `from_ms`, stopping the one playing; returns its length in
+/// milliseconds.
+pub async fn play_voice(file_id: &str, from_ms: u64) -> Result<u64, String> {
+    call::<cmd::PlayVoice>(cmd::VoiceArgs {
+        file_id: file_id.into(),
+        from_ms,
+    })
+    .await
+}
+
+/// Stops the voice message playing; returns where it stopped, in milliseconds.
+pub async fn stop_voice() -> Result<Option<u64>, String> {
+    call::<cmd::StopVoice>(()).await
 }
 
 /// Plays a notification sound (the backend plays them).

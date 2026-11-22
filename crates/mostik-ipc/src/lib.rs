@@ -125,6 +125,12 @@ pub struct Unsent {
     pub why: String,
 }
 
+/// A voice message played to its end, or that could not play (`mostik://voice`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceEnded {
+    pub file_id: String,
+}
+
 /// Files dropped onto the chat window and where, in logical pixels of the window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Dropped {

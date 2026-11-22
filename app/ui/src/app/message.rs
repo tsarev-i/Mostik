@@ -68,6 +68,7 @@ pub(super) fn MessageRow(
         })
     });
     let attachments = Memo::new(move |_| msg.with(|m| m.attachments.clone()));
+    let media = Memo::new(move |_| msg.with(|m| m.media.clone()));
     let reactions = Memo::new(move |_| msg.with(|m| m.reactions.clone()));
     let thread = Memo::new(move |_| msg.with(|m| m.thread.clone().filter(|t| !in_thread && t.reply_count > 0)));
     let mentions_me = {
@@ -328,6 +329,7 @@ pub(super) fn MessageRow(
                     } else {
                         body.clone().into_any()
                     }}
+                    {move || media.get().map(|m| view! { <MediaView media=m/> })}
                     {forwarded_blocks}
                     {move || view! { <Attachments list=attachments.get()/> }}
                     {reactions_view}
@@ -501,18 +503,35 @@ pub(super) fn ForwardedBlock(f: Forwarded) -> impl IntoView {
                 <Avatar user=face size=20/><b>{name}</b>
             </button>
             {text.map(|text| view! { <div class="msg-text">{text}</div> })}
+            {f.media.clone().map(|m| view! { <MediaView media=m/> })}
             <Attachments list=f.attachments.clone()/>
             {footer}
         </div>
     }
 }
 
-/// A message in one line of a list: its text without markup, else the text of the message it
-/// forwards (`↪ …`), else 📎 for attachments alone.
+/// What a message is besides text and attachments, in the feed: a voice message.
+#[component]
+fn MediaView(media: Media) -> impl IntoView {
+    match media {
+        Media::Voice(v) => view! { <super::voice::VoiceCard voice=v/> },
+    }
+}
+
+/// [`Media`] in one line of a list.
+fn media_line(media: &Media) -> String {
+    match media {
+        Media::Voice(v) => super::voice::voice_line(v),
+    }
+}
+
+/// A message in one line of a list: its text without markup, else what it is (a voice message),
+/// else the text of the message it forwards (`↪ …`), else 📎 for attachments alone.
 pub(super) fn message_preview(s: &Snapshot, m: &Message) -> String {
     let text = s.plain(&m.text);
     match m.forwarded.first() {
         _ if !text.is_empty() => text,
+        _ if m.media.is_some() => m.media.as_ref().map(media_line).unwrap_or_default(),
         Some(f) => format!("↪ {}", s.plain(&f.text)),
         None if !m.attachments.is_empty() => "📎".to_owned(),
         None => text,
@@ -525,6 +544,8 @@ pub(super) fn delete_preview(s: &Snapshot, m: &Message) -> Option<String> {
     let text = s.plain(&m.text);
     let line = if !text.trim().is_empty() {
         text
+    } else if let Some(media) = &m.media {
+        media_line(media)
     } else if let Some(a) = attachment_line(&m.attachments) {
         a
     } else {
@@ -549,11 +570,18 @@ fn attachment_line(attachments: &[Attachment]) -> Option<String> {
 }
 
 /// One line about the message a reply answers: the quoted fragment, else its text without markup,
-/// else its first attachment; a deleted message has none of them.
-fn reply_snippet(s: &Snapshot, quote: Option<&str>, text: &str, attachments: &[Attachment]) -> String {
+/// else what it is (a voice message), else its first attachment; a deleted message has none of them.
+fn reply_snippet(
+    s: &Snapshot,
+    quote: Option<&str>,
+    text: &str,
+    media: Option<&Media>,
+    attachments: &[Attachment],
+) -> String {
     let line = match quote.filter(|q| !q.trim().is_empty()) {
         Some(q) => q.to_owned(),
         None if !text.trim().is_empty() => s.mention_names().with(|who| mostik_core::markup::plain(text, who)),
+        None if media.is_some() => media.map(media_line).unwrap_or_default(),
         None => attachment_line(attachments).unwrap_or_else(|| tr().reply_deleted.to_owned()),
     };
     line.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -576,7 +604,7 @@ fn ReplyBlock(f: Forwarded, chat: ChatId, thread_parent: Option<Timestamp>) -> i
     let (name, line) = c.snap.with_untracked(|s| {
         (
             reply_author(s, &f.author, &f.author_name),
-            reply_snippet(s, f.quote.as_deref(), &f.text, &f.attachments),
+            reply_snippet(s, f.quote.as_deref(), &f.text, f.media.as_ref(), &f.attachments),
         )
     });
     let ts = f.ts;
@@ -599,7 +627,7 @@ pub(super) fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
     let (name, line) = c.snap.with_untracked(|s| {
         (
             reply_author(s, &m.author, ""),
-            reply_snippet(s, target.quote.as_deref(), &m.text, &m.attachments),
+            reply_snippet(s, target.quote.as_deref(), &m.text, m.media.as_ref(), &m.attachments),
         )
     });
     let label = if target.quote.is_some() {
@@ -776,8 +804,10 @@ pub(super) fn message_menu_items(
         // With text of the message selected, the selection, as "Copy" does anywhere else.
         <button class="menu-icon-item" on:click=move |_| {
             close_menus(c);
-            copy(quote.clone().unwrap_or_else(|| {
-                c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0))
+            copy(quote.clone().unwrap_or_else(|| match &msg.media {
+                // A voice message's text is what Telemost made of the speech.
+                Some(Media::Voice(v)) if msg.text.is_empty() => v.text.clone(),
+                _ => c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0)),
             }));
         }>{menu_item(I::Copy, tr().copy_text)}</button>
         <div class="menu-sep"></div>
@@ -829,6 +859,7 @@ mod tests {
             forwarded,
             call: None,
             system: None,
+            media: None,
             reads: None,
         }
     }
@@ -853,6 +884,7 @@ mod tests {
             text: text.into(),
             attachments,
             quote: None,
+            media: None,
             reply: false,
         }
     }

@@ -19,6 +19,7 @@ mod state;
 mod text;
 mod topbar;
 mod views;
+mod voice;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -38,6 +39,7 @@ pub(crate) use field::{place_caret, selection, wrap_selection};
 pub(crate) use org::current_org;
 pub use org::org_key;
 pub use state::{ChatTab, Ctx, Phase, ViewMode};
+pub(crate) use voice::ended as voice_ended;
 
 use avatar::HoverTip;
 use composer::Composer;
@@ -160,6 +162,8 @@ pub fn App() -> impl IntoView {
         folder_edit: RwSignal::new(None),
         custom: RwSignal::new(vec![]),
         adding_emoji: RwSignal::new(false),
+        voice: RwSignal::new(None),
+        voice_clock: RwSignal::new(0.0),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -176,6 +180,7 @@ pub fn App() -> impl IntoView {
         }
     });
     set_interval(move || c.now.set(js_sys::Date::now()), Duration::from_secs(1));
+    set_interval(move || voice::tick(c), Duration::from_millis(100));
     // A notification pause ends by itself: Telemost says nothing then.
     Effect::new(move |_| {
         let now = (c.now.get() * 1000.0) as Timestamp;

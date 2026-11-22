@@ -16,6 +16,7 @@ mod sound;
 #[cfg(target_os = "linux")]
 mod spelling;
 mod update;
+mod voice;
 mod webview;
 mod window_size;
 
@@ -357,6 +358,8 @@ fn main() {
             backend::files::save_file,
             backend::notify::test_notification,
             backend::notify::play_sound,
+            backend::voice::play_voice,
+            backend::voice::stop_voice,
             backend::threads::followed_threads,
             backend::threads::mark_thread_read,
             backend::prefs::set_preferences,

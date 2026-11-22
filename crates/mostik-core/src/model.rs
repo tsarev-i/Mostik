@@ -265,6 +265,43 @@ pub struct Message {
     /// it (`ShowReadsCount`); `None` is "not known", not "nobody".
     #[serde(default)]
     pub reads: Option<Reads>,
+    /// What the message is besides text and attachments: a voice message.
+    #[serde(default)]
+    pub media: Option<Media>,
+}
+
+/// What a message is besides text and attachments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Media {
+    Voice(Voice),
+}
+
+impl Media {
+    /// The voice message, if this is one.
+    pub fn voice(&self) -> Option<&Voice> {
+        match self {
+            Self::Voice(v) => Some(v),
+        }
+    }
+}
+
+/// A voice message (`Plain.Voice`): an Ogg Opus file with what Telemost made of the speech.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Voice {
+    /// File identifier in the Messenger storage (`FileInfo.Id2`), as an attachment's.
+    pub file_id: String,
+    /// Length in milliseconds.
+    pub duration_ms: u64,
+    /// Loudness along the message, from 0 to 15, for the bars.
+    #[serde(default)]
+    pub waveform: Vec<u8>,
+    /// The speech as text; empty when there is none.
+    #[serde(default)]
+    pub text: String,
+    /// The text is what Telemost recognized (`WasRecognized`); otherwise it is still at it.
+    #[serde(default)]
+    pub recognized: bool,
 }
 
 /// Who read one of the user's own messages, as far as Telemost says (`ReadsCount`,
@@ -456,6 +493,9 @@ pub struct Forwarded {
     /// only forwarded message from the same chat or thread, or as a quoted one.
     #[serde(default)]
     pub reply: bool,
+    /// What the original is besides text and attachments: a voice message.
+    #[serde(default)]
+    pub media: Option<Media>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1073,6 +1113,7 @@ mod tests {
             forwarded: vec![],
             call: None,
             system: None,
+            media: None,
             reads: None,
         }
     }
@@ -1088,6 +1129,7 @@ mod tests {
             attachments: vec![],
             quote: None,
             reply,
+            media: None,
         };
         let with = |forwarded| Message {
             forwarded,

@@ -201,6 +201,32 @@ fn attachments(plain: &Value) -> Vec<Attachment> {
     out
 }
 
+/// What a `Plain` is besides text and attachments: a voice message
+/// (`Voice {FileInfo, Duration, Waveform, Text, WasRecognized}`, the duration in milliseconds).
+fn media(plain: &Value) -> Option<Media> {
+    let voice = plain.get("Voice")?;
+    let info = voice.get("FileInfo")?;
+    let file_id = s(info, &["Id2"]).or_else(|| s(info, &["Id"]))?.to_owned();
+    Some(Media::Voice(Voice {
+        file_id,
+        duration_ms: n(voice, &["Duration"]).unwrap_or(0),
+        waveform: s(voice, &["Waveform"]).map(waveform).unwrap_or_default(),
+        text: s(voice, &["Text"]).unwrap_or_default().trim().to_owned(),
+        recognized: voice.get("WasRecognized").and_then(Value::as_bool).unwrap_or(false),
+    }))
+}
+
+/// The most loudness levels a voice message keeps: enough bars for ten minutes.
+const MAX_LEVELS: usize = 1200;
+
+/// Loudness levels (0 to 15) of `Voice.Waveform`: two to a byte, the high half first. The bytes
+/// come in base64, as JSON carries bytes; a string that is not base64 is read a byte per
+/// character, as the web client reads it.
+fn waveform(text: &str) -> Vec<u8> {
+    let bytes = base64(text).unwrap_or_else(|| text.chars().map(|c| u8::try_from(c).unwrap_or(u8::MAX)).collect());
+    bytes.iter().flat_map(|b| [b >> 4, b & 0x0F]).take(MAX_LEVELS).collect()
+}
+
 /// Feed text of a `Plain`. For images and files it is the caption (may be empty).
 fn plain_text(plain: &Value) -> String {
     if let Some(t) = s(plain, &["Text", "MessageText"]) {
@@ -215,8 +241,9 @@ fn plain_text(plain: &Value) -> String {
     if plain.get("Sticker").is_some() {
         return "Sticker".to_owned();
     }
+    // Shown as a player with its text (see `media`).
     if plain.get("Voice").is_some() {
-        return "🎤 Voice message".to_owned();
+        return String::new();
     }
     "Message (this type is not supported yet)".to_owned()
 }
@@ -298,6 +325,7 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
         forwarded,
         call: None,
         system: None,
+        media: media(plain),
         reads: reads(sm),
     }))
 }
@@ -389,6 +417,7 @@ fn system_note(chat: &str, ts: Timestamp, info: &Value) -> Message {
         forwarded: vec![],
         call: None,
         system: None,
+        media: None,
         reads: None,
     }
 }
@@ -435,6 +464,7 @@ fn chat_note(sm: &Value) -> Option<Message> {
     };
     Some(Message {
         system: Some(note),
+        media: None,
         reads: None,
         ..system_note(s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, info)
     })
@@ -507,6 +537,7 @@ fn forwarded(sm: &Value) -> Vec<Forwarded> {
                 chat_id: chat.map(|c| ChatId(c.to_owned())),
                 text: if gone { String::new() } else { plain_text(payload) },
                 attachments: if gone { vec![] } else { attachments(payload) },
+                media: if gone { None } else { media(payload) },
                 reply: list.len() == 1 && (quote.is_some() || (chat.is_some() && chat == own_chat)),
                 quote,
             })
@@ -2006,6 +2037,35 @@ mod tests {
         };
         assert_eq!((message.ts, message.seq_no), (MAX_SAFE_INTEGER, MAX_SAFE_INTEGER));
         assert_eq!(message.attachments[0].size, MAX_SAFE_INTEGER);
+    }
+
+    /// A voice message: its file, length, bars and text, with no text of its own in the feed; the
+    /// same in a message that forwards it.
+    #[test]
+    fn a_voice_message_has_its_player() {
+        let voice = json!({"FileInfo": {"Id2": "disk/v1", "Name": "voice.ogg", "Size": 9000},
+            "Duration": 14_500, "Waveform": "EvA=", "Text": " hello there ", "WasRecognized": true});
+        let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Voice": voice}},
+            "ServerMessageInfo": {"Timestamp": 5, "SeqNo": 1, "From": {"Guid": "u"}},
+            "ForwardedMessages": [{"Payload": {"ChatId": "d", "Voice": voice},
+                "ServerMessageInfo": {"Timestamp": 3, "From": {"Guid": "w"}}}]});
+        let Some(LiveEvent::Upsert { message, .. }) = from_push(&v, None) else {
+            panic!("not a message")
+        };
+        let expected = Media::Voice(Voice {
+            file_id: "disk/v1".into(),
+            duration_ms: 14_500,
+            waveform: vec![1, 2, 15, 0],
+            text: "hello there".into(),
+            recognized: true,
+        });
+        assert_eq!(message.text, "");
+        assert_eq!(message.media.as_ref(), Some(&expected));
+        assert_eq!(message.forwarded[0].media.as_ref(), Some(&expected));
+        assert_eq!(message.forwarded[0].text, "");
+        // Bars read a byte per character when the string is not base64, as the web client does.
+        assert_eq!(waveform("\u{12}\u{f0}"), [1, 2, 15, 0]);
+        assert_eq!(waveform(""), Vec::<u8>::new());
     }
 
     /// "Without sound" from another client: the members get a notification with no sound; the

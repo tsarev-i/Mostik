@@ -189,6 +189,14 @@ pub struct UrlArgs {
     pub url: String,
 }
 
+/// Plays voice message `file_id` (`Voice.FileInfo.Id2`) from `from_ms` milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceArgs {
+    pub file_id: String,
+    pub from_ms: u64,
+}
+
 /// A file taken off the message, as [`crate::PendingFile::path`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -553,6 +561,10 @@ commands! {
     SendFiles = "send_files", SendFilesArgs => Vec<Message>;
     /// Stops the upload of one file of a sending: the rest goes without it.
     CancelUpload = "cancel_upload", UploadFileArgs => ();
+    /// Plays a voice message, stopping the one playing; returns its length in milliseconds.
+    PlayVoice = "play_voice", VoiceArgs => u64;
+    /// Stops the voice message playing; returns where it stopped, in milliseconds.
+    StopVoice = "stop_voice", () => Option<u64>;
 
     // People and chats.
     UserProfile = "user_profile", GuidArgs => mostik_core::UserProfile;

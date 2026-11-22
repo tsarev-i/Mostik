@@ -60,6 +60,7 @@ impl ReplyTarget {
             text: m.text.clone(),
             attachments: m.attachments.clone(),
             quote: self.quote.clone(),
+            media: None,
             reply: true,
         }
     }
@@ -110,6 +111,7 @@ pub async fn send(
             forwarded: vec![],
             call: None,
             system: None,
+            media: None,
             reads: None,
         }]
     };
@@ -575,6 +577,7 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
             text: m.text.clone(),
             attachments: m.attachments.clone(),
             quote: None,
+            media: None,
             reply: false,
         }]
     } else {
@@ -595,6 +598,7 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
         forwarded: original,
         call: None,
         system: None,
+        media: None,
         reads: None,
     };
     upsert(c, message, None);

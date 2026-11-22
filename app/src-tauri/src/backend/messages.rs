@@ -235,6 +235,7 @@ pub async fn send_message(
             forwarded: vec![],
             call: None,
             system: None,
+            media: None,
             reads: None,
         });
     }

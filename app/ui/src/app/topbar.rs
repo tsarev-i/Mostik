@@ -378,7 +378,7 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     }
                     Hit::Message(m, chat) => {
                         let author = c.snap.with_untracked(|s| s.user(&m.author).map(|u| u.display_name.clone())).unwrap_or_default();
-                        let text: String = c.snap.with(|s| s.plain(&m.text)).chars().take(120).collect();
+                        let text: String = c.snap.with(|s| super::message::message_preview(s, &m)).chars().take(120).collect();
                         view! {
                             <span class="sr-msg-head"><span class="sr-chat">{chat}</span><span class="sr-sub">{author}" · "{time::relative(m.ts)}</span></span>
                             <span class="sr-text">{text}</span>
