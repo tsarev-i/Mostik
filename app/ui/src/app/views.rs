@@ -170,7 +170,8 @@ pub(super) fn ActivityList() -> impl IntoView {
     let tab = RwSignal::new(ActivityTab::All);
     let found: RwSignal<Vec<Message>> = RwSignal::new(vec![]);
     let loading = RwSignal::new(false);
-    // In the app also search for mentions by name in recent chats (the server searches one chat at a time).
+    // In the app also search for mentions by name: across the organization, or in recent chats
+    // without one.
     if c.live {
         let name = c
             .snap
@@ -188,7 +189,8 @@ pub(super) fn ActivityList() -> impl IntoView {
                 list.into_iter().take(20).map(|ch| ch.id.0.clone()).collect()
             });
             spawn_local(async move {
-                if let Ok(f) = bridge::search_messages(&name, chats).await {
+                let org = super::org::search_org(c);
+                if let Ok(f) = bridge::search_messages(&name, chats, org, bridge::SearchFilter::default()).await {
                     c.snap.update(|s| {
                         for u in f.users {
                             if s.user(&u.id).is_none() {

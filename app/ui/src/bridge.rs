@@ -3,7 +3,7 @@
 pub use mostik_core::event::LiveEvent;
 use mostik_core::{ChatId, Message, Timestamp, UnreadBadge, UserId};
 use mostik_ipc::cmd::{self, Command};
-pub use mostik_ipc::cmd::{ReplyRef, SendOptions};
+pub use mostik_ipc::cmd::{ReplyRef, SearchFilter, SendOptions};
 pub use mostik_ipc::{
     Audience, Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent,
     Threads, UpdateStatus, UploadProgress, VoiceEnded,
@@ -488,10 +488,19 @@ pub async fn open_url(url: &str) -> Result<(), String> {
 }
 
 /// Server-side message search in the listed chats.
-pub async fn search_messages(query: &str, chat_ids: Vec<String>) -> Result<FoundMessages, String> {
+/// Messages with `query` that pass `filter`: in all the chats of organization `org` at once, or,
+/// without one, in each of `chat_ids`.
+pub async fn search_messages(
+    query: &str,
+    chat_ids: Vec<String>,
+    org: Option<u64>,
+    filter: SearchFilter,
+) -> Result<FoundMessages, String> {
     let args = cmd::MessageSearchArgs {
         query: query.into(),
         chat_ids: chat_ids.into_iter().map(ChatId).collect(),
+        org,
+        filter,
     };
     call::<cmd::SearchMessages>(args).await
 }

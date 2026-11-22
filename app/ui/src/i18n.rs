@@ -453,6 +453,10 @@ pub struct Tr {
     pub send_silent: &'static str,
     pub voice_message: &'static str,
     pub who_read: &'static str,
+    pub search_important: &'static str,
+    pub search_mine: &'static str,
+    pub search_any_sender: &'static str,
+    pub search_from_title: &'static str,
     pub loading: &'static str,
     pub nobody_read: &'static str,
     pub err_who_read: &'static str,
@@ -909,6 +913,10 @@ pub static RU: Tr = Tr {
     send_silent: "Отправить без звука",
     voice_message: "Голосовое сообщение",
     who_read: "Кто прочитал",
+    search_important: "Важные",
+    search_mine: "Мои",
+    search_any_sender: "Искать от всех",
+    search_from_title: "Искать сообщения этого человека",
     loading: "Загружаем…",
     nobody_read: "Пока никто не прочитал",
     err_who_read: "Не удалось узнать, кто прочитал",
@@ -1365,6 +1373,10 @@ pub static EN: Tr = Tr {
     send_silent: "Send without sound",
     voice_message: "Voice message",
     who_read: "Who read it",
+    search_important: "Important",
+    search_mine: "Mine",
+    search_any_sender: "Search from anyone",
+    search_from_title: "Search this person's messages",
     loading: "Loading…",
     nobody_read: "Nobody has read it yet",
     err_who_read: "Couldn't find out who read it",
@@ -1659,6 +1671,14 @@ impl Tr {
             (Lang::En, Some(of)) => format!("Read by {} of {of}", count.min(of)),
             (Lang::Ru, None) => format!("Прочитали: {count}"),
             (Lang::En, None) => format!("Read by {count}"),
+        }
+    }
+
+    /// The search filter for messages from `name`.
+    pub fn search_from(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("От: {name}"),
+            Lang::En => format!("From: {name}"),
         }
     }
 

@@ -274,12 +274,33 @@ pub struct DirectorySearchArgs {
     pub org: Option<u64>,
 }
 
-/// Server-side message search in the listed chats.
+/// Server-side message search: in all the chats of organization `org` at once, or, without one
+/// (an account with no organization), in each of the listed chats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageSearchArgs {
     pub query: String,
     pub chat_ids: Vec<ChatId>,
+    #[serde(default)]
+    pub org: Option<u64>,
+    #[serde(default)]
+    pub filter: SearchFilter,
+}
+
+/// What found messages must be besides having the words: from whom, marked important.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilter {
+    #[serde(default)]
+    pub sender: Option<UserId>,
+    #[serde(default)]
+    pub important: bool,
+}
+
+impl SearchFilter {
+    pub fn is_empty(&self) -> bool {
+        self.sender.is_none() && !self.important
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -746,8 +767,14 @@ mod tests {
             MessageSearchArgs {
                 query: "hi".into(),
                 chat_ids: vec![ChatId("c1".into()), ChatId("c2".into())],
+                org: Some(7),
+                filter: SearchFilter {
+                    sender: Some(UserId("u1".into())),
+                    important: true,
+                },
             },
-            json!({ "query": "hi", "chatIds": ["c1", "c2"] }),
+            json!({ "query": "hi", "chatIds": ["c1", "c2"], "org": 7,
+                "filter": { "sender": "u1", "important": true } }),
         );
         pinned(
             StartCallArgs {

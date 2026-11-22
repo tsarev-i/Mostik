@@ -51,3 +51,11 @@ pub(super) fn in_current_org(c: Ctx, ch: &Chat) -> bool {
     }
     current_org(c).is_none_or(|o| ch.organizations.contains(&o.id))
 }
+
+/// The organization a message search covers at once (see `bridge::search_messages`): the current
+/// one; none for an account without one.
+pub(super) fn search_org(c: Ctx) -> Option<u64> {
+    c.org_now
+        .with_untracked(|o| o.as_ref().map(|o| o.id))
+        .filter(|id| *id != 0)
+}

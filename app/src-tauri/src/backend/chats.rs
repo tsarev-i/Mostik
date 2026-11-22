@@ -4,7 +4,7 @@
 use mostik_core::{Chat, ChatId, ChatKind, NotifyLevel, User, UserId};
 use mostik_ipc::cmd::{
     self, Args, ChatArgs, CreateChannelArgs, DirectorySearchArgs, FoldersArgs, GuidArgs, MembersArgs,
-    MessageSearchArgs, NotifyLevelArgs, Out, PeopleSearchArgs, StarArgs, UpdateChatArgs,
+    MessageSearchArgs, NotifyLevelArgs, Out, PeopleSearchArgs, SearchFilter, StarArgs, UpdateChatArgs,
 };
 use mostik_ipc::{ChatDetails, DirectoryHits, FoundMessages};
 use mostik_yandex::clock;
@@ -144,27 +144,50 @@ pub async fn search_people(
     Ok(convert::profiles(&v))
 }
 
-/// Message search (HTTP RPC `search`). The server searches only within one chat (`chat_id`),
-/// so the given chats are queried in parallel, at most 20.
+/// Most messages a search brings: Telemost gives one page, newest first, as long as asked.
+const FOUND_MAX: u32 = 100;
+
+/// Message search (HTTP RPC `search`). With organization `org`, one request covers all its chats
+/// (checked on 2026-11-22: without `organization_id` the search finds almost nothing, without
+/// `chat_id` it covers every chat); without one, the given chats are asked one by one, at most 20.
+/// The filter goes as the web client's `messages_filter`.
 #[tauri::command]
 pub async fn search_messages(
     state: tauri::State<'_, AppState>,
     args: Args<cmd::SearchMessages>,
 ) -> Result<Out<cmd::SearchMessages>, String> {
-    let MessageSearchArgs { query, chat_ids } = args;
+    let MessageSearchArgs {
+        query,
+        chat_ids,
+        org,
+        filter,
+    } = args;
     let live = live(&state).await?;
-    let jobs = chat_ids.into_iter().take(20).map(|chat| {
-        let mut web = live.web.clone_light();
-        let query = query.clone();
-        async move {
-            web.rpc(
-                "search",
-                json!({ "query": query, "limit": 10, "entities": ["messages"], "chat_id": chat }),
-            )
-            .await
-            .ok()
-            .filter(|v| rpc_ok(v).is_ok())
+    let mut params = json!({ "query": query, "entities": ["messages"] });
+    if let Some(f) = messages_filter(&filter) {
+        params["messages_filter"] = f;
+    }
+    let jobs: Vec<Value> = match org {
+        Some(org) => {
+            let mut p = params.clone();
+            p["limit"] = json!(FOUND_MAX);
+            p["organization_id"] = json!(org);
+            vec![p]
         }
+        None => chat_ids
+            .into_iter()
+            .take(20)
+            .map(|ChatId(chat)| {
+                let mut p = params.clone();
+                p["limit"] = json!(10);
+                p["chat_id"] = json!(chat);
+                p
+            })
+            .collect(),
+    };
+    let jobs = jobs.into_iter().map(|p| {
+        let mut web = live.web.clone_light();
+        async move { web.rpc("search", p).await.ok().filter(|v| rpc_ok(v).is_ok()) }
     });
     let (mut messages, mut users) = (Vec::new(), Vec::new());
     for v in futures_util::future::join_all(jobs).await.into_iter().flatten() {
@@ -178,6 +201,21 @@ pub async fn search_messages(
     }
     note_files(&state, &live.me, &messages);
     Ok(FoundMessages { messages, users })
+}
+
+/// The web client's `messages_filter`: `{sender: guid, is_important: true}`, or nothing.
+fn messages_filter(filter: &SearchFilter) -> Option<Value> {
+    if filter.is_empty() {
+        return None;
+    }
+    let mut f = json!({});
+    if let Some(UserId(sender)) = &filter.sender {
+        f["sender"] = json!(sender);
+    }
+    if filter.important {
+        f["is_important"] = json!(true);
+    }
+    Some(f)
 }
 
 /// "Find a conversation" beyond the user's list: the public channels and people of organization
@@ -583,4 +621,22 @@ pub async fn join_chat(
         .ok_or_else(|| "Telemost did not return the chat".to_owned())?;
     note_chat(&live, &chat);
     Ok(chat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_filter_goes_as_the_web_client_sends_it() {
+        assert_eq!(messages_filter(&SearchFilter::default()), None);
+        let f = SearchFilter {
+            sender: Some(UserId("aaaa0001-0000-4000-8000-000000000001".into())),
+            important: true,
+        };
+        assert_eq!(
+            messages_filter(&f),
+            Some(json!({ "sender": "aaaa0001-0000-4000-8000-000000000001", "is_important": true }))
+        );
+    }
 }
