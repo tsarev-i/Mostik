@@ -2,8 +2,8 @@
 
 pub use mostik_core::event::LiveEvent;
 use mostik_core::{ChatId, Message, Timestamp, UnreadBadge, UserId};
-pub use mostik_ipc::cmd::ReplyRef;
 use mostik_ipc::cmd::{self, Command};
+pub use mostik_ipc::cmd::{ReplyRef, SendOptions};
 pub use mostik_ipc::{
     Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent, Threads,
     UpdateStatus, UploadProgress,
@@ -152,17 +152,20 @@ pub async fn mark_thread_read(chat_id: &str, parent: Timestamp, ts: Timestamp, s
     call::<cmd::MarkThreadRead>(args).await
 }
 
+/// Sends a text message; a text longer than Telemost takes goes as several messages, in order.
 pub async fn send_message(
     chat_id: &str,
     text: &str,
     thread: Option<Timestamp>,
     reply: Option<ReplyRef>,
-) -> Result<Message, String> {
+    options: cmd::SendOptions,
+) -> Result<Vec<Message>, String> {
     let args = cmd::SendArgs {
         chat_id: ChatId(chat_id.into()),
         text: text.into(),
         thread,
         reply,
+        options,
     };
     call::<cmd::SendMessage>(args).await
 }
@@ -405,6 +408,7 @@ pub async fn send_files(
     paths: Vec<String>,
     text: &str,
     upload: Option<&str>,
+    options: cmd::SendOptions,
 ) -> Result<Vec<Message>, String> {
     let args = cmd::SendFilesArgs {
         chat_id: ChatId(chat_id.into()),
@@ -412,6 +416,7 @@ pub async fn send_files(
         paths,
         text: text.into(),
         upload: upload.map(str::to_owned),
+        options,
     };
     call::<cmd::SendFiles>(args).await
 }

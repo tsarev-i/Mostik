@@ -450,6 +450,9 @@ pub struct Tr {
     pub only_in_app_files: &'static str,
     pub remove_file: &'static str,
     pub uploading: &'static str,
+    pub send_silent: &'static str,
+    pub send_with_sound: &'static str,
+    pub send_important: &'static str,
     pub new_message: &'static str,
     pub new_message_to: &'static str,
     pub write_to_colleague: &'static str,
@@ -892,6 +895,9 @@ pub static RU: Tr = Tr {
     only_in_app_files: "Отправка файлов работает только в приложении",
     remove_file: "Убрать файл",
     uploading: "Загружаем…",
+    send_silent: "Отправить без звука",
+    send_with_sound: "Отправить со звуком",
+    send_important: "Отправить как важное",
     new_message: "Новое сообщение",
     new_message_to: "Кому:",
     write_to_colleague: "Написать коллеге",
@@ -1334,6 +1340,9 @@ pub static EN: Tr = Tr {
     only_in_app_files: "Sending files works only in the desktop app",
     remove_file: "Remove file",
     uploading: "Uploading…",
+    send_silent: "Send without sound",
+    send_with_sound: "Send with sound",
+    send_important: "Send as important",
     new_message: "New message",
     new_message_to: "To:",
     write_to_colleague: "Message a colleague",
@@ -1617,6 +1626,15 @@ impl Tr {
             (Lang::En, Some(of)) => format!("Read by {} of {of}", count.min(of)),
             (Lang::Ru, None) => format!("Прочитали: {count}"),
             (Lang::En, None) => format!("Read by {count}"),
+        }
+    }
+
+    /// A long message sent in parts, of which only the first `went` of `all` went: why the next
+    /// did not.
+    pub fn partly_sent(&self, went: usize, all: usize, why: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("отправлено частей: {went} из {all}, остальные не ушли ({why})"),
+            Lang::En => format!("{went} of {all} parts went, the rest did not ({why})"),
         }
     }
 

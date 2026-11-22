@@ -14,5 +14,6 @@ pub mod mock;
 pub mod model;
 pub mod reactions;
 pub mod receipts;
+pub mod split;
 
 pub use model::*;

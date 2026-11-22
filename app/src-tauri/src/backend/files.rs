@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::messages::sent_from_reply;
-use super::{AppState, Live, PendingFile, allow_files, live, push, service, target_chat, text};
+use super::{AppState, Live, PendingFile, allow_files, live, push, sending_options, service, target_chat, text};
 use crate::call;
 
 /// In-memory attachment cache: showing an image again does not hit the network.
@@ -667,11 +667,11 @@ pub(super) struct Uploads {
     sent: std::collections::HashMap<String, SentParts>,
 }
 
-/// The parts of a sending that have gone: its text (alone or as the caption of the gallery) and
-/// its files.
+/// The parts of a sending that have gone: how many parts of its text (alone or the first as the
+/// caption of the gallery) and its files.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct SentParts {
-    text: bool,
+    texts: usize,
     paths: std::collections::BTreeSet<String>,
 }
 
@@ -701,9 +701,11 @@ pub fn cancel_upload(state: tauri::State<'_, AppState>, args: Args<cmd::CancelUp
 }
 
 /// Uploads the files and sends them: images as one gallery with a caption, the rest one by one.
-/// For non-images the caption goes as a separate text message before them. With `upload` the UI
-/// gets the progress of each file and may cancel a file; a cancelled file is left out, and with
-/// every file cancelled only the caption goes, if there is one.
+/// For non-images the caption goes as a separate text message before them. A caption longer than
+/// [`wire::MESSAGE_LIMIT`] goes in parts, as a text does (see `send_message`): the first with the
+/// gallery, the rest after it without a sound. With `upload` the UI gets the progress of each file
+/// and may cancel a file; a cancelled file is left out, and with every file cancelled only the
+/// caption goes, if there is one.
 #[tauri::command]
 pub async fn send_files(
     app: AppHandle,
@@ -716,7 +718,11 @@ pub async fn send_files(
         paths,
         text,
         upload,
+        options,
     } = args;
+    if mostik_core::split::utf16_len(&text) > wire::TEXT_MAX {
+        return Err(cmd::MESSAGE_TOO_LONG.to_owned());
+    }
     let live = live(&state).await?;
     let allowed = state.allowed_files.lock().map(|a| a.clone()).unwrap_or_default();
     if let Some(bad) = paths.iter().find(|p| !allowed.contains(*p)) {
@@ -782,34 +788,43 @@ pub async fn send_files(
         }
     }
     let mut sent = Vec::new();
-    let text = if done.text {
-        String::new()
-    } else {
-        text.trim().to_owned()
+    let parts = mostik_core::split::split_long(text.trim(), wire::MESSAGE_LIMIT);
+    // The next part of the text to go: an earlier try may have sent some.
+    let mut next = done.texts;
+    // Only the first message of the sending goes as the user chose (see `sending_options`).
+    let mut first = !options.follows && done.texts == 0 && done.paths.is_empty();
+    let mut how = || {
+        let how = sending_options(options, first);
+        first = false;
+        how
     };
-    if !text.is_empty() && images.is_empty() {
-        sent.push(
-            send_plain(
-                &live,
-                &chat_id,
-                thread,
-                wire::plain_text(&target, &request_id(), &text),
-                &text,
-            )
-            .await?,
-        );
-        mark_sent(&state, upload.as_ref(), |s| s.text = true);
-    }
+    // The gallery, with the first part as its caption, goes before the rest of the text; files
+    // go after it. Images still to send mean the gallery has not gone.
     if !images.is_empty() {
-        let msg = wire::gallery(&target, &gallery_id, images, &text);
-        sent.push(send_plain(&live, &chat_id, thread, msg, &text).await?);
+        let caption = if next == 0 {
+            parts.first().map_or("", String::as_str)
+        } else {
+            ""
+        };
+        let (notify, important) = how();
+        let msg = wire::with_options(wire::gallery(&target, &gallery_id, images, caption), notify, important);
+        sent.push(send_plain(&live, &chat_id, thread, msg, caption).await?);
+        next = next.max(usize::from(!parts.is_empty()));
         mark_sent(&state, upload.as_ref(), |s| {
-            s.text = true;
+            s.texts = next;
             s.paths.extend(image_paths);
         });
     }
+    for (i, part) in parts.iter().enumerate().skip(next) {
+        let (notify, important) = how();
+        let msg = wire::with_options(wire::plain_text(&target, &request_id(), part), notify, important);
+        sent.push(send_plain(&live, &chat_id, thread, msg, part).await?);
+        mark_sent(&state, upload.as_ref(), |s| s.texts = i + 1);
+    }
     for (path, payload, info) in files {
         let msg = json!({ "Plain": { "ChatId": target, "PayloadId": payload, "MiscFile": { "FileInfo": info } } });
+        let (notify, important) = how();
+        let msg = wire::with_options(msg, notify, important);
         sent.push(send_plain(&live, &chat_id, thread, msg, "").await?);
         mark_sent(&state, upload.as_ref(), |s| {
             s.paths.insert(path);
@@ -1180,14 +1195,14 @@ mod tests {
     fn sent_parts_are_kept_by_sending() {
         let state = AppState::default();
         let id = "up1".to_owned();
-        mark_sent(&state, None, |s| s.text = true);
+        mark_sent(&state, None, |s| s.texts = 1);
         assert!(state.uploads.lock().unwrap().sent.is_empty());
-        mark_sent(&state, Some(&id), |s| s.text = true);
+        mark_sent(&state, Some(&id), |s| s.texts = 1);
         mark_sent(&state, Some(&id), |s| {
             s.paths.insert("/tmp/a.pdf".into());
         });
         let sent = state.uploads.lock().unwrap().sent.get(&id).cloned().unwrap();
-        assert!(sent.text);
+        assert_eq!(sent.texts, 1);
         assert_eq!(sent.paths.into_iter().collect::<Vec<_>>(), ["/tmp/a.pdf"]);
     }
 

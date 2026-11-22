@@ -73,12 +73,15 @@ pub fn start_reply(c: Ctx, msg: Message, quote: Option<String>) {
     crate::app::drafts::set_reply(c, &key, Some(ReplyTarget { msg, quote }));
 }
 
+/// Sends a text message, with `reply` a reply; a text longer than Telemost takes goes as several
+/// messages, the reply with the first of them.
 pub async fn send(
     c: Ctx,
     chat: ChatId,
     text: String,
     thread: Option<Timestamp>,
     reply: Option<ReplyTarget>,
+    options: bridge::SendOptions,
 ) -> Result<(), String> {
     let text = with_mention_ids(c, &text);
     let me = c.snap.with_untracked(|s| s.me.clone());
@@ -86,17 +89,23 @@ pub async fn send(
         ts: r.msg.ts,
         quote: r.quote.clone(),
     });
-    let mut message = if c.live {
-        bridge::send_message(&chat.0, &text, thread, reply_ref).await?
+    let mut messages = if c.live {
+        match bridge::send_message(&chat.0, &text, thread, reply_ref, options).await {
+            Ok(sent) => sent,
+            Err(e) => {
+                keep_unsent(c, &chat, thread, &text, reply.as_ref(), &e);
+                return Err(e);
+            }
+        }
     } else {
-        Message {
+        vec![Message {
             chat_id: chat,
             ts: now_mcs(),
             author: me,
             text,
             thread_parent: thread,
             edited: false,
-            important: false,
+            important: options.important,
             reactions: vec![],
             thread: None,
             seq_no: 0,
@@ -105,13 +114,44 @@ pub async fn send(
             call: None,
             system: None,
             reads: None,
-        }
+        }]
     };
-    if let Some(r) = &reply {
-        message.forwarded = vec![r.forwarded(c)];
+    if let (Some(r), Some(first)) = (&reply, messages.first_mut()) {
+        first.forwarded = vec![r.forwarded(c)];
     }
-    upsert(c, message, None);
+    for message in messages {
+        upsert(c, message, None);
+    }
     Ok(())
+}
+
+/// After a long text went only in part, its field keeps only the parts that did not go, and not the
+/// reply the first part carried: sending again does not repeat what went. Not if the user has
+/// changed the text meanwhile; a reply they picked meanwhile stays.
+fn keep_unsent(c: Ctx, chat: &ChatId, thread: Option<Timestamp>, sent: &str, reply: Option<&ReplyTarget>, why: &str) {
+    let Some((went, ..)) = super::partly_sent(why) else {
+        return;
+    };
+    let key = crate::app::drafts::DraftKey::field(chat.clone(), thread);
+    let draft = crate::app::drafts::get(c, &key);
+    if with_mention_ids(c, draft.text.trim()) != sent {
+        return;
+    }
+    let parts = mostik_core::split::split_long(sent, mostik_core::split::MESSAGE_LIMIT);
+    let rest = parts.get(went..).unwrap_or_default().join("\n");
+    let (rest, named) = c.snap.with_untracked(|s| {
+        s.mention_names()
+            .with(|who| mostik_core::markup::ids_to_names(&rest, who))
+    });
+    c.picked.update(|p| {
+        for (name, id) in named {
+            p.insert(name, UserId(id));
+        }
+    });
+    crate::app::drafts::set_text(c, &key, &rest, None);
+    if reply.is_some() && draft.reply.as_ref() == reply {
+        crate::app::drafts::set_reply(c, &key, None);
+    }
 }
 
 /// Sends the files attached in `chat` (in the thread of `thread`) with a caption; not available in
@@ -131,6 +171,8 @@ pub struct Outgoing {
     pub failed: Option<String>,
     /// When it was sent, for its place among the messages.
     pub ts: Timestamp,
+    /// How it goes: without a sound, as important.
+    pub options: bridge::SendOptions,
 }
 
 /// A file of an [`Outgoing`] message.
@@ -152,7 +194,13 @@ impl OutFile {
 /// Sends the files attached to the field of `chat` (or of its thread of `thread`) with `text` as
 /// an [`Outgoing`] message: the field gives them up at once and the feed shows the message while
 /// the files go.
-pub fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>) -> Result<(), String> {
+pub fn send_files(
+    c: Ctx,
+    chat: ChatId,
+    text: String,
+    thread: Option<Timestamp>,
+    options: bridge::SendOptions,
+) -> Result<(), String> {
     if !c.live {
         return Err(tr().only_in_app_files.into());
     }
@@ -177,6 +225,7 @@ pub fn send_files(c: Ctx, chat: ChatId, text: String, thread: Option<Timestamp>)
                 .collect(),
             failed: None,
             ts: super::now_mcs(),
+            options,
         })
     });
     run_upload(c, id);
@@ -196,7 +245,7 @@ fn run_upload(c: Ctx, id: String) {
         .collect();
     let text = with_mention_ids(c, &out.text);
     spawn_local(async move {
-        match bridge::send_files(&out.chat.0, out.thread, paths, &text, Some(&id)).await {
+        match bridge::send_files(&out.chat.0, out.thread, paths, &text, Some(&id), out.options).await {
             Ok(sent) => {
                 // A file cancelled before a retry was not asked for again: the pasted bytes the
                 // app kept for it go here.

@@ -364,6 +364,9 @@
 }
 .fmt:hover, .cb:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-strong); }
 .cb.round { border-radius: 50%; background: rgba(255, 255, 255, 0.08); }
+/* A send option that is on: the message goes without a sound, or as important. */
+.cb.on { background: rgba(29, 155, 209, 0.2); color: var(--accent-blue); }
+.cb.important-toggle.on { background: var(--important-bg); color: var(--online); }
 
 .sep { width: 1px; height: 20px; margin: 0 4px; background: var(--border); }
 .spacer { flex: 1; }

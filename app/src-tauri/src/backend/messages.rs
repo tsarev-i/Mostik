@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter};
 
 use super::events::unnamed_mentions;
 use super::files::prefetch_previews;
-use super::{AppState, EVENT, Live, fill_profiles, live, note_files, push, target_chat};
+use super::{AppState, EVENT, Live, fill_profiles, live, note_files, push, sending_options, target_chat};
 
 /// History page sizes. A page of 50 takes the server 0.5–1.5 s in a busy channel and 20 about
 /// 0.1–0.3 s, so a chat opens with a short page; older pages and threads take more at once.
@@ -173,7 +173,9 @@ pub async fn mark_read(
     sent
 }
 
-/// Sends a text message; with `reply`, a reply to a message of the same chat or thread.
+/// Sends a text message; with `reply`, a reply to a message of the same chat or thread. A text
+/// longer than [`wire::MESSAGE_LIMIT`] goes as several messages, one after another, as the web
+/// client sends it (see [`super::sending_options`]): the reply and the options go with the first.
 #[tauri::command]
 pub async fn send_message(
     state: tauri::State<'_, AppState>,
@@ -184,31 +186,50 @@ pub async fn send_message(
         text,
         thread,
         reply,
+        options,
     } = args;
+    if mostik_core::split::utf16_len(&text) > wire::TEXT_MAX {
+        return Err(cmd::MESSAGE_TOO_LONG.to_owned());
+    }
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    let msg = match &reply {
-        Some(r) => wire::reply(&target, &request_id(), &text, &target, r.ts, r.quote.as_deref()),
-        None => wire::plain_text(&target, &request_id(), &text),
-    };
-    let sent = sent_from_reply(&push(&live, msg).await?)?;
-    Ok(Message {
-        chat_id: ChatId(chat_id),
-        ts: sent.ts,
-        author: live.me.clone(),
-        text,
-        thread_parent: thread,
-        edited: false,
-        important: false,
-        reactions: vec![],
-        thread: None,
-        seq_no: sent.seq_no,
-        attachments: vec![],
-        forwarded: vec![],
-        call: None,
-        system: None,
-        reads: None,
-    })
+    let parts = mostik_core::split::split_long(&text, wire::MESSAGE_LIMIT);
+    let total = parts.len();
+    let mut sent_parts = Vec::with_capacity(total);
+    for (i, part) in parts.into_iter().enumerate() {
+        let msg = match (&reply, i) {
+            (Some(r), 0) => wire::reply(&target, &request_id(), &part, &target, r.ts, r.quote.as_deref()),
+            _ => wire::plain_text(&target, &request_id(), &part),
+        };
+        let (notify, important) = sending_options(options, i == 0);
+        let sent = match push(&live, wire::with_options(msg, notify, important))
+            .await
+            .and_then(|r| sent_from_reply(&r))
+        {
+            Ok(sent) => sent,
+            // What has gone stays: the feed has it from the pushes, and the error says what did not.
+            Err(e) if i > 0 => return Err(format!("{}{i}/{total}: {e}", cmd::PARTLY_SENT)),
+            Err(e) => return Err(e),
+        };
+        sent_parts.push(Message {
+            chat_id: ChatId(chat_id.clone()),
+            ts: sent.ts,
+            author: live.me.clone(),
+            text: part,
+            thread_parent: thread,
+            edited: false,
+            important,
+            reactions: vec![],
+            thread: None,
+            seq_no: sent.seq_no,
+            attachments: vec![],
+            forwarded: vec![],
+            call: None,
+            system: None,
+            reads: None,
+        });
+    }
+    Ok(sent_parts)
 }
 
 /// Edits the text of a message. `whole`: the message has images, files or forwarded messages,

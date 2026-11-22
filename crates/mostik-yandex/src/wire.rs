@@ -124,6 +124,34 @@ pub fn plain_text(chat_id: &str, payload_id: &str, text: &str) -> Value {
     json!({ "Plain": plain })
 }
 
+pub use mostik_core::split::{MESSAGE_LIMIT, TEXT_MAX};
+
+/// How the members learn of a new message: the web client's `NotificationBehaviour`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notify {
+    /// As each member's settings say (`DEFAULT`, left out).
+    Default,
+    /// A notification without a sound (`MUTED`): the "Without sound" button of the field.
+    Muted,
+    /// No notification at all (`SILENT`): the later parts of a long message.
+    Silent,
+}
+
+/// A new message from [`plain_text`], [`reply`] or [`gallery`] with how it notifies
+/// (`NotificationBehaviour`, next to `Plain`) and marked important or not (`Plain.IsImportant`),
+/// as the web client sends it.
+pub fn with_options(mut msg: Value, notify: Notify, important: bool) -> Value {
+    if important {
+        msg["Plain"]["IsImportant"] = json!(true);
+    }
+    match notify {
+        Notify::Default => {}
+        Notify::Muted => msg["NotificationBehaviour"] = json!(3),
+        Notify::Silent => msg["NotificationBehaviour"] = json!(1),
+    }
+    msg
+}
+
 /// Reply to message `source_ts` of chat `source_chat`, as the web client sends it: the original as
 /// the only forwarded message from the same chat (a thread chat for a thread reply). A quoted
 /// fragment goes into `ForwardedMessageStyles[0].Quote`.
@@ -232,6 +260,20 @@ pub fn end_ringing(ringing_id: &str, reason: EndRinging) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As the web client sends them: `NotificationBehaviour` next to `Plain`, `IsImportant` in it.
+    #[test]
+    fn options_go_where_the_web_client_puts_them() {
+        let plain = || plain_text("c1", "p1", "hi");
+        assert_eq!(with_options(plain(), Notify::Default, false), plain());
+        let muted = with_options(plain(), Notify::Muted, true);
+        assert_eq!(muted["NotificationBehaviour"], 3);
+        assert_eq!(muted["Plain"]["IsImportant"], true);
+        assert_eq!(muted["Plain"]["Text"]["MessageText"], "hi");
+        let silent = with_options(gallery("c1", "p1", vec![], "x"), Notify::Silent, false);
+        assert_eq!(silent["NotificationBehaviour"], 1);
+        assert!(silent["Plain"].get("IsImportant").is_none());
+    }
 
     #[test]
     fn ringing_answers_carry_the_ringing_id() {

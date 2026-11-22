@@ -3,6 +3,7 @@
 
 use std::sync::Mutex as StdMutex;
 
+use mostik_core::event::Alert;
 use mostik_core::{Message, NotifyLevel, User};
 use mostik_ipc::cmd::{self, Args, Out, SoundArgs};
 use mostik_yandex::clock;
@@ -55,7 +56,9 @@ pub(super) fn may_ring(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message) 
     state.prefs.lock().is_ok_and(|p| p.notify != NotifyMode::Nothing)
 }
 
-pub(super) fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>) {
+/// Notifies of message `m`, unless something says not to; with a sound unless its sender asked for
+/// none (`alert`).
+pub(super) fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, author: Option<&User>, alert: Alert) {
     let Ok(mut sh) = shared.lock() else { return };
     // A thread reply lives in the thread chat: its time and number mean nothing in the parent chat.
     // A ringing call is not a message in the chat: the read marker cannot point at it.
@@ -67,7 +70,13 @@ pub(super) fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, au
     }
     // Only the start of a call notifies; "the call ended" and changes of the chat are just lines in it.
     let ended = matches!(m.call, Some(mostik_core::CallNote::Ended { .. }));
-    if !sh.ready || sh.me.as_ref() == Some(&m.author) || m.edited || ended || m.system.is_some() {
+    if !sh.ready
+        || sh.me.as_ref() == Some(&m.author)
+        || m.edited
+        || ended
+        || m.system.is_some()
+        || alert == Alert::Silent
+    {
         return;
     }
     // A muted chat notifies about mentions only, or about nothing.
@@ -140,7 +149,9 @@ pub(super) fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, au
     if let Err(e) = builder.show() {
         eprintln!("notification not shown: {e}");
     }
-    crate::sound::play(&prefs.sound);
+    if alert != Alert::Quiet {
+        crate::sound::play(&prefs.sound);
+    }
 }
 
 /// Plays a notification sound: the preview in the preferences.

@@ -666,7 +666,7 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
 }
 
 /// UI event built from a Xiva push; the type is shared with the UI.
-pub use mostik_core::event::LiveEvent;
+pub use mostik_core::event::{Alert, LiveEvent};
 
 /// Parses the body of a `delivery` push. `None` means the event is not of interest yet.
 pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
@@ -743,6 +743,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
             author: sm.pointer("/ServerMessageInfo/From").and_then(user_from),
             mentioned: mentioned_users(sm),
             message,
+            alert: Alert::from_code(n(cm, &["NotificationBehaviour"]).unwrap_or(0)),
         }),
         Parsed::Deleted {
             chat_id,
@@ -2005,6 +2006,28 @@ mod tests {
         };
         assert_eq!((message.ts, message.seq_no), (MAX_SAFE_INTEGER, MAX_SAFE_INTEGER));
         assert_eq!(message.attachments[0].size, MAX_SAFE_INTEGER);
+    }
+
+    /// "Without sound" from another client: the members get a notification with no sound; the
+    /// later parts of a long message, none.
+    #[test]
+    fn a_push_says_how_its_message_notifies() {
+        let alert = |behaviour: Option<u64>| {
+            let mut v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Text": {"MessageText": "hi"}}},
+                "ServerMessageInfo": {"Timestamp": 5, "SeqNo": 1, "From": {"Guid": "u"}}});
+            if let Some(b) = behaviour {
+                v["ClientMessage"]["NotificationBehaviour"] = json!(b);
+            }
+            match from_push(&v, None) {
+                Some(LiveEvent::Upsert { alert, .. }) => alert,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(alert(None), Alert::Default);
+        assert_eq!(alert(Some(0)), Alert::Default);
+        assert_eq!(alert(Some(1)), Alert::Silent);
+        assert_eq!(alert(Some(2)), Alert::Default);
+        assert_eq!(alert(Some(3)), Alert::Quiet);
     }
 
     #[test]

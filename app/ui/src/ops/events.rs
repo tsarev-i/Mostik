@@ -20,6 +20,7 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             message,
             author,
             mentioned,
+            ..
         } => {
             if !mentioned.is_empty() {
                 c.snap.update(|s| learn_users(s, mentioned));

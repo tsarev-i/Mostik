@@ -108,7 +108,7 @@ fn ends_word(rest: &str) -> bool {
 }
 
 /// Length of a Telemost user id: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` in hex digits.
-const GUID_LEN: usize = 36;
+pub(crate) const GUID_LEN: usize = 36;
 
 /// Whether `s` is a Telemost user id.
 fn is_guid(s: &str) -> bool {
@@ -120,7 +120,7 @@ fn is_guid(s: &str) -> bool {
 }
 
 /// The user id at the start of `after` (the text right after `@`), ending at a word boundary.
-fn guid_at(after: &str) -> Option<&str> {
+pub(crate) fn guid_at(after: &str) -> Option<&str> {
     let id = after.get(..GUID_LEN)?;
     (is_guid(id) && ends_word(&after[GUID_LEN..])).then_some(id)
 }

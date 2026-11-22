@@ -74,6 +74,25 @@ pub struct SendArgs {
     pub text: String,
     pub thread: Option<Timestamp>,
     pub reply: Option<ReplyRef>,
+    /// How the message goes: without a sound, as important.
+    #[serde(default)]
+    pub options: SendOptions,
+}
+
+/// How a new message goes, as the buttons by the official client's field set it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendOptions {
+    /// The members get it without a sound or a notification.
+    #[serde(default)]
+    pub silent: bool,
+    /// It goes marked as important, as "Mark as important" marks a sent one.
+    #[serde(default)]
+    pub important: bool,
+    /// It goes on from a message just sent (files after the text of a reply): none of its
+    /// messages is the first, which alone carries the two above.
+    #[serde(default)]
+    pub follows: bool,
 }
 
 /// What a sent message replies to: message `ts` of the chat (or thread) it is sent to, with the
@@ -188,6 +207,9 @@ pub struct SendFilesArgs {
     /// The UI's id of this sending: its progress comes as [`crate::UploadProgress`] with it, and
     /// [`CancelUpload`] names it.
     pub upload: Option<String>,
+    /// How the messages go: without a sound, as important.
+    #[serde(default)]
+    pub options: SendOptions,
 }
 
 /// How [`SendFiles`] fails when an upload stops moving, after `<file name>: `. The UI shows it
@@ -209,6 +231,10 @@ pub const DISK_FILE_TOO_LARGE: &str = "the file is larger than Yandex Disk takes
 /// How sending or editing a message fails when Telemost refuses its text as too big
 /// (`message too big`). The UI shows it in its own words.
 pub const MESSAGE_TOO_LONG: &str = "the message is too long";
+
+/// How [`SendMessage`] fails when a long text went in parts and a later part did not go, before
+/// `<parts sent>/<parts>: <why>`: the parts that went stay. The UI shows it in its own words.
+pub const PARTLY_SENT: &str = "only some parts of the message went: ";
 
 /// One file of a sending going on: [`CancelUpload`] stops its upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -509,7 +535,7 @@ commands! {
     MarkThreadRead = "mark_thread_read", ThreadReadArgs => ();
 
     // Messages.
-    SendMessage = "send_message", SendArgs => Message;
+    SendMessage = "send_message", SendArgs => Vec<Message>;
     EditMessage = "edit_message", EditArgs => ();
     DeleteMessage = "delete_message", MsgArgs => ();
     SetReaction = "set_reaction", ReactionArgs => ();
@@ -611,9 +637,15 @@ mod tests {
                 ts: 5,
                 quote: Some("q".into()),
             }),
+            options: SendOptions {
+                silent: true,
+                important: false,
+                follows: false,
+            },
         };
         let expected = json!({
             "chatId": "c1", "text": "hi", "thread": null, "reply": { "ts": 5, "quote": "q" },
+            "options": { "silent": true, "important": false, "follows": false },
         });
         assert_eq!(serde_json::to_value(&args).unwrap(), expected);
         assert_eq!(serde_json::from_value::<SendArgs>(expected).unwrap(), args);
@@ -659,6 +691,7 @@ mod tests {
                 text: "hi".into(),
                 thread: None,
                 reply: None,
+                options: SendOptions::default(),
             }
         );
         let reply: ReplyRef = serde_json::from_value(json!({ "ts": 5 })).unwrap();
@@ -838,8 +871,10 @@ mod tests {
                 paths: vec!["/tmp/a.png".into()],
                 text: "".into(),
                 upload: Some("up1".into()),
+                options: SendOptions::default(),
             },
-            json!({ "chatId": "c1", "thread": 5, "paths": ["/tmp/a.png"], "text": "", "upload": "up1" }),
+            json!({ "chatId": "c1", "thread": 5, "paths": ["/tmp/a.png"], "text": "", "upload": "up1",
+                "options": { "silent": false, "important": false, "follows": false } }),
         );
         pinned(
             UploadFileArgs {

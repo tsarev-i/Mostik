@@ -213,6 +213,26 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     let parent = move || if thread { c.thread.get_untracked() } else { None };
     let suggestions: RwSignal<Vec<Suggestion>> = RwSignal::new(vec![]);
     let suggest_sel = RwSignal::new(0usize);
+    // How the next message goes, as the buttons by the official client's field set it: without a
+    // sound, as important. Both are for one message: they are off again once it has gone and in
+    // another chat or thread.
+    let silent = RwSignal::new(false);
+    let important = RwSignal::new(false);
+    // As in the official client: no "without sound" for notes or a bot, nothing important in a
+    // channel (Telemost does not take it there).
+    let can_silent = Memo::new(move |_| {
+        let id = c.current.get();
+        c.snap.with(|s| match s.chat(&id).map(|ch| &ch.kind) {
+            Some(ChatKind::Notes) | None => false,
+            Some(ChatKind::Direct { peer }) => !s.user(peer).is_some_and(|u| u.is_robot),
+            Some(_) => true,
+        })
+    });
+    let can_important = Memo::new(move |_| {
+        let id = c.current.get();
+        c.snap
+            .with(|s| s.chat(&id).is_some_and(|ch| ch.kind != ChatKind::Broadcast))
+    });
 
     // The field shows the draft: a restored draft, a sent message clearing it, formatting. Typing
     // already shows, so the field is filled again only when its text differs, or when the emoji set
@@ -273,6 +293,11 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         }
         now
     });
+    Effect::new(move |_| {
+        field_key.track();
+        silent.set(false);
+        important.set(false);
+    });
     let remember = move |text: &str| {
         if let Some(key) = field_key.get_untracked() {
             drafts::set_text(c, &key, text, None);
@@ -305,6 +330,11 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         let thread_parent = parent();
         let sent_text = text.clone();
         let replying = reply.get_untracked();
+        let options = bridge::SendOptions {
+            silent: silent.get_untracked() && can_silent.get_untracked(),
+            important: important.get_untracked() && can_important.get_untracked(),
+            follows: false,
+        };
         sending.set(true);
         spawn_local(async move {
             // A reply is a text message: attached files follow it without a caption. Files alone
@@ -314,13 +344,23 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             // the field is free.
             let result = match (replying.clone(), with_files) {
                 (Some(r), true) if !text.is_empty() => {
-                    match ops::send(c, chat.clone(), text, thread_parent, Some(r)).await {
-                        Ok(()) => ops::send_files(c, chat, String::new(), thread_parent),
+                    match ops::send(c, chat.clone(), text, thread_parent, Some(r), options).await {
+                        // The files go on from the reply: quietly, unmarked.
+                        Ok(()) => ops::send_files(
+                            c,
+                            chat,
+                            String::new(),
+                            thread_parent,
+                            bridge::SendOptions {
+                                follows: true,
+                                ..options
+                            },
+                        ),
                         Err(e) => Err(e),
                     }
                 }
-                (_, true) => ops::send_files(c, chat, text, thread_parent),
-                (r, false) => ops::send(c, chat, text, thread_parent, r).await,
+                (_, true) => ops::send_files(c, chat, text, thread_parent, options),
+                (r, false) => ops::send(c, chat, text, thread_parent, r, options).await,
             };
             // The composer may be gone by now (the user left the chat view while files uploaded).
             sending.try_set(false);
@@ -330,6 +370,11 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             }
             match result {
                 Ok(()) => {
+                    // The options were for this message, unless the field is another one's by now.
+                    if field_key.try_get_untracked().flatten() == Some(key.clone()) {
+                        silent.try_set(false);
+                        important.try_set(false);
+                    }
                     // Clear only what was sent: while the message was on its way the user may have
                     // switched to another chat or thread, or kept typing.
                     let unchanged = |d: &str| d.trim() == sent_text;
@@ -573,6 +618,23 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                         });
                     }><Icon icon=I::Plus size=16/></button>
                     <crate::compose::EmojiButton field class="cb" size=18/>
+                    // Pressing them keeps the caret in the field.
+                    <Show when=move || can_silent.get()>
+                        <button class="cb" class:on=move || silent.get() aria-pressed=move || silent.get().to_string()
+                            title=move || if silent.get() { tr().send_with_sound } else { tr().send_silent }
+                            on:mousedown=|e: ev::MouseEvent| e.prevent_default()
+                            on:click=move |_| silent.update(|v| *v = !*v)>
+                            <Icon icon=I::BellOff size=16/>
+                        </button>
+                    </Show>
+                    <Show when=move || can_important.get()>
+                        <button class="cb important-toggle" class:on=move || important.get() aria-pressed=move || important.get().to_string()
+                            title=move || if important.get() { tr().unmark_important } else { tr().send_important }
+                            on:mousedown=|e: ev::MouseEvent| e.prevent_default()
+                            on:click=move |_| important.update(|v| *v = !*v)>
+                            <Icon icon=I::Bookmark size=16/>
+                        </button>
+                    </Show>
                     {move || sending.get().then(|| view! { <span class="composer-hint">{tr().uploading}</span> })}
                     // Follows the Enter choice in Preferences at once, not only in a field made after it.
                     <span class="composer-hint">{move || {
