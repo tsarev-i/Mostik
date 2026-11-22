@@ -448,6 +448,8 @@ pub fn App() -> impl IntoView {
             c.confirm_delete.set(None);
         } else if c.confirm_leave.with_untracked(Option::is_some) {
             c.confirm_leave.set(None);
+        } else if c.audience.with_untracked(Option::is_some) {
+            c.audience.set(None);
         } else if c.folder_edit.with_untracked(Option::is_some) {
             c.folder_edit.set(None);
         } else if c.browsing.get_untracked() {

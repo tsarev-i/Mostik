@@ -137,11 +137,26 @@ pub struct AudiencePage {
     pub reads: Vec<(User, Timestamp)>,
     /// Who reacted, with what and when (`UserReactions [{UserInfo, Type, Timestamp}]`).
     pub reactions: Vec<(User, u64, Timestamp)>,
+    /// How long each list was and where it ended, the entries left out above counted too: what the
+    /// next page goes on from.
+    pub reads_end: PageEnd,
+    pub reactions_end: PageEnd,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct PageEnd {
+    pub entries: usize,
+    /// The time of the last entry.
+    pub last: Option<Timestamp>,
 }
 
 /// A page of Xiva `list_reactions`; empty lists are left out of the answer.
 pub fn audience(v: &Value) -> AudiencePage {
     let list = |key: &str| v.get(key).and_then(Value::as_array).into_iter().flatten();
+    let end = |key: &str| PageEnd {
+        entries: list(key).count(),
+        last: list(key).last().and_then(|r| n(r, &["Timestamp"])),
+    };
     let reads = list("UserReads")
         .filter_map(|r| {
             Some((
@@ -156,7 +171,12 @@ pub fn audience(v: &Value) -> AudiencePage {
             Some((user, n(r, &["Type"])?, n(r, &["Timestamp"]).unwrap_or(0)))
         })
         .collect();
-    AudiencePage { reads, reactions }
+    AudiencePage {
+        reads,
+        reactions,
+        reads_end: end("UserReads"),
+        reactions_end: end("UserReactions"),
+    }
 }
 
 /// People from `RecentUserReactions`, with the names the UI shows in the reaction tooltip.
@@ -2114,8 +2134,21 @@ mod tests {
             "UserReactions": [{"UserInfo": {"Guid": "aaaa0001-0000-4000-8000-000000000002", "DisplayName": "Boris"},
                 "Type": 100_101, "Timestamp": 7}],
         });
-        let AudiencePage { reads, reactions } = audience(&v);
+        let AudiencePage {
+            reads,
+            reactions,
+            reads_end,
+            ..
+        } = audience(&v);
         assert_eq!(reads.len(), 1);
+        // The entry without a person counts for the next page.
+        assert_eq!(
+            reads_end,
+            PageEnd {
+                entries: 2,
+                last: Some(8)
+            }
+        );
         assert_eq!((reads[0].0.display_name.as_str(), reads[0].1), ("Anna Smirnova", 9));
         assert_eq!(
             (reactions[0].0.display_name.as_str(), reactions[0].1, reactions[0].2),

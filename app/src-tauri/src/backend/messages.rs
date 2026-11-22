@@ -442,12 +442,17 @@ pub async fn message_audience(
             if v.get("Status").and_then(Value::as_u64).is_some_and(|s| s != 0) {
                 return Err(format!("Telemost did not say who read it: {}", shape(&v)));
             }
-            let convert::AudiencePage { reads, reactions } = convert::audience(&v);
-            let (got, last) = match mode {
-                wire::ListMode::Reads => (reads.len(), reads.last().map(|r| r.1)),
-                wire::ListMode::Reactions => (reactions.len(), reactions.last().map(|r| r.2)),
+            let convert::AudiencePage {
+                reads,
+                reactions,
+                reads_end,
+                reactions_end,
+            } = convert::audience(&v);
+            // Counted from what came, also the entries without a person in them.
+            let end = match mode {
+                wire::ListMode::Reads => reads_end,
+                wire::ListMode::Reactions => reactions_end,
             };
-            let known = out.reads.len() + out.reactions.len();
             for (user, ts) in reads {
                 if mode == wire::ListMode::Reads && !out.reads.iter().any(|s| s.user.id == user.id) {
                     out.reads.push(Seen { user, ts });
@@ -458,10 +463,9 @@ pub async fn message_audience(
                     out.reactions.push(Reacted { user, kind, ts });
                 }
             }
-            // The page before the last person of this one, while pages are full and bring someone new.
-            let grew = out.reads.len() + out.reactions.len() > known;
-            match last {
-                Some(last) if got >= AUDIENCE_PAGE as usize && grew => before = Some(last),
+            // The page before the last entry of this one, while pages are full and move on.
+            match end.last {
+                Some(last) if end.entries >= AUDIENCE_PAGE as usize && before != Some(last) => before = Some(last),
                 _ => break,
             }
         }
