@@ -510,11 +510,27 @@ pub(super) fn ForwardedBlock(f: Forwarded) -> impl IntoView {
     }
 }
 
-/// What a message is besides text and attachments, in the feed: a voice message.
+/// What a message is besides text and attachments, in the feed: a voice message, a sticker.
 #[component]
 fn MediaView(media: Media) -> impl IntoView {
     match media {
-        Media::Voice(v) => view! { <super::voice::VoiceCard voice=v/> },
+        Media::Voice(v) => view! { <super::voice::VoiceCard voice=v/> }.into_any(),
+        Media::Sticker(s) => view! { <StickerView sticker=s/> }.into_any(),
+    }
+}
+
+/// A sticker: its picture from Telemost's public host, unless pictures are off in the feed (then
+/// the word). The browser demo has no pictures and shows a stand-in.
+#[component]
+fn StickerView(sticker: Sticker) -> impl IntoView {
+    let c = ctx();
+    let inline = c.settings.with_untracked(|s| s.inline_media);
+    match sticker.url("middle") {
+        Some(src) if c.live && inline => {
+            view! { <img class="sticker" src=src alt=tr().sticker title=tr().sticker loading="lazy"/> }.into_any()
+        }
+        _ if !c.live => view! { <div class="sticker stand-in" title=tr().sticker>"🐱"</div> }.into_any(),
+        _ => view! { <div class="msg-text sticker-word">{format!("🖼 {}", tr().sticker)}</div> }.into_any(),
     }
 }
 
@@ -522,6 +538,7 @@ fn MediaView(media: Media) -> impl IntoView {
 fn media_line(media: &Media) -> String {
     match media {
         Media::Voice(v) => super::voice::voice_line(v),
+        Media::Sticker(_) => tr().sticker.to_owned(),
     }
 }
 
@@ -804,9 +821,9 @@ pub(super) fn message_menu_items(
         // With text of the message selected, the selection, as "Copy" does anywhere else.
         <button class="menu-icon-item" on:click=move |_| {
             close_menus(c);
-            copy(quote.clone().unwrap_or_else(|| match &msg.media {
+            copy(quote.clone().unwrap_or_else(|| match msg.media.as_ref().and_then(Media::voice) {
                 // A voice message's text is what Telemost made of the speech.
-                Some(Media::Voice(v)) if msg.text.is_empty() => v.text.clone(),
+                Some(v) if msg.text.is_empty() => v.text.clone(),
                 _ => c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0)),
             }));
         }>{menu_item(I::Copy, tr().copy_text)}</button>

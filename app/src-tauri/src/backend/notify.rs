@@ -120,6 +120,8 @@ pub(super) fn notify(app: &AppHandle, shared: &StdMutex<Shared>, m: &Message, au
     let voice = m.media.as_ref().and_then(mostik_core::Media::voice);
     let body: String = if m.call.is_some() {
         text(app, "📞 Начался созвон", "📞 A call started").to_owned()
+    } else if matches!(m.media, Some(mostik_core::Media::Sticker(_))) {
+        text(app, "Стикер", "Sticker").to_owned()
     } else if let Some(v) = voice.filter(|_| m.text.is_empty()) {
         match prefs.preview && v.recognized && !v.text.is_empty() {
             true => format!("🎤 {}", v.text.chars().take(200).collect::<String>()),

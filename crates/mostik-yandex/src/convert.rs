@@ -202,8 +202,15 @@ fn attachments(plain: &Value) -> Vec<Attachment> {
 }
 
 /// What a `Plain` is besides text and attachments: a voice message
-/// (`Voice {FileInfo, Duration, Waveform, Text, WasRecognized}`, the duration in milliseconds).
+/// (`Voice {FileInfo, Duration, Waveform, Text, WasRecognized}`, the duration in milliseconds) or a
+/// sticker (`Sticker {Id, SetId}`).
 fn media(plain: &Value) -> Option<Media> {
+    if let Some(sticker) = plain.get("Sticker") {
+        return Some(Media::Sticker(Sticker {
+            id: s(sticker, &["Id"])?.to_owned(),
+            set_id: s(sticker, &["SetId"]).unwrap_or_default().to_owned(),
+        }));
+    }
     let voice = plain.get("Voice")?;
     let info = voice.get("FileInfo")?;
     let file_id = s(info, &["Id2"]).or_else(|| s(info, &["Id"]))?.to_owned();
@@ -238,8 +245,9 @@ fn plain_text(plain: &Value) -> String {
     if plain.get("Gallery").is_some() || plain.get("Image").is_some() || plain.get("MiscFile").is_some() {
         return String::new();
     }
+    // Shown as a picture (see `media`).
     if plain.get("Sticker").is_some() {
-        return "Sticker".to_owned();
+        return String::new();
     }
     // Shown as a player with its text (see `media`).
     if plain.get("Voice").is_some() {
@@ -2066,6 +2074,24 @@ mod tests {
         // Bars read a byte per character when the string is not base64, as the web client does.
         assert_eq!(waveform("\u{12}\u{f0}"), [1, 2, 15, 0]);
         assert_eq!(waveform(""), Vec::<u8>::new());
+    }
+
+    /// A sticker is a picture, with no text of its own.
+    #[test]
+    fn a_sticker_is_a_picture() {
+        let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Sticker": {"Id": "st/1", "SetId": "pack"}}},
+            "ServerMessageInfo": {"Timestamp": 5, "SeqNo": 1, "From": {"Guid": "u"}}});
+        let Some(LiveEvent::Upsert { message, .. }) = from_push(&v, None) else {
+            panic!("not a message")
+        };
+        assert_eq!(message.text, "");
+        assert_eq!(
+            message.media,
+            Some(Media::Sticker(Sticker {
+                id: "st/1".into(),
+                set_id: "pack".into(),
+            }))
+        );
     }
 
     /// "Without sound" from another client: the members get a notification with no sound; the

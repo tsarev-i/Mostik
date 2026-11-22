@@ -354,6 +354,13 @@ pub fn demo(now: Timestamp) -> Snapshot {
             })),
             ..msg("dev", today + 66 * MIN, "boris", "")
         },
+        Message {
+            media: Some(Media::Sticker(Sticker {
+                id: "demo/sticker1".into(),
+                set_id: "demo".into(),
+            })),
+            ..msg("general", today + 4 * MIN, "boris", "")
+        },
         call("design", yesterday + 210 * MIN, "anna", true),
         call("design", yesterday + 245 * MIN, "anna", false),
         call("release", today + 55 * MIN, "gleb", true),

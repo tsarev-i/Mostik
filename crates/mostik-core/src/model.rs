@@ -265,7 +265,7 @@ pub struct Message {
     /// it (`ShowReadsCount`); `None` is "not known", not "nobody".
     #[serde(default)]
     pub reads: Option<Reads>,
-    /// What the message is besides text and attachments: a voice message.
+    /// What the message is besides text and attachments: a voice message, a sticker.
     #[serde(default)]
     pub media: Option<Media>,
 }
@@ -275,6 +275,7 @@ pub struct Message {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Media {
     Voice(Voice),
+    Sticker(Sticker),
 }
 
 impl Media {
@@ -282,7 +283,33 @@ impl Media {
     pub fn voice(&self) -> Option<&Voice> {
         match self {
             Self::Voice(v) => Some(v),
+            Self::Sticker(_) => None,
         }
+    }
+}
+
+/// A sticker (`Plain.Sticker`): a picture from a sticker pack, on Telemost's public file host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sticker {
+    pub id: String,
+    /// The pack it is from.
+    #[serde(default)]
+    pub set_id: String,
+}
+
+impl Sticker {
+    /// The picture of the sticker at `size` (`small`, `middle`), as the web client loads it:
+    /// `https://files.messenger.yandex.net/<id>?size=<size>`, no login needed. `None` for an id
+    /// that is not a plain path, so it cannot lead elsewhere.
+    pub fn url(&self, size: &str) -> Option<String> {
+        let plain = |s: &str| {
+            !s.is_empty()
+                && s != "."
+                && s != ".."
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        };
+        (self.id.len() <= 256 && self.id.split('/').all(plain) && plain(size))
+            .then(|| format!("https://files.messenger.yandex.net/{}?size={size}", self.id))
     }
 }
 
@@ -493,7 +520,7 @@ pub struct Forwarded {
     /// only forwarded message from the same chat or thread, or as a quoted one.
     #[serde(default)]
     pub reply: bool,
-    /// What the original is besides text and attachments: a voice message.
+    /// What the original is besides text and attachments: a voice message, a sticker.
     #[serde(default)]
     pub media: Option<Media>,
 }
@@ -966,6 +993,23 @@ mod chat_icon_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sticker's picture is on the public host, by an id that is a plain path, never elsewhere.
+    #[test]
+    fn a_sticker_picture_stays_on_the_public_host() {
+        let sticker = |id: &str| Sticker {
+            id: id.into(),
+            set_id: String::new(),
+        };
+        assert_eq!(
+            sticker("ab12/c-d_e.1").url("middle").as_deref(),
+            Some("https://files.messenger.yandex.net/ab12/c-d_e.1?size=middle")
+        );
+        for bad in ["", "../x", "a/../b", "a//b", "a?b", "a#b", "a b", "@evil.com/x", "a%2F"] {
+            assert_eq!(sticker(bad).url("middle"), None, "{bad}");
+        }
+        assert_eq!(sticker("a").url("x&y=1"), None);
+    }
 
     #[test]
     fn a_deleted_message_counts_as_unread_by_the_read_position() {
