@@ -130,6 +130,35 @@ fn reads(sm: &Value) -> Option<Reads> {
     })
 }
 
+/// A page of Xiva `list_reactions`.
+#[derive(Debug, Default, PartialEq)]
+pub struct AudiencePage {
+    /// Who read the message and when (`UserReads [{UserInfo, Timestamp}]`).
+    pub reads: Vec<(User, Timestamp)>,
+    /// Who reacted, with what and when (`UserReactions [{UserInfo, Type, Timestamp}]`).
+    pub reactions: Vec<(User, u64, Timestamp)>,
+}
+
+/// A page of Xiva `list_reactions`; empty lists are left out of the answer.
+pub fn audience(v: &Value) -> AudiencePage {
+    let list = |key: &str| v.get(key).and_then(Value::as_array).into_iter().flatten();
+    let reads = list("UserReads")
+        .filter_map(|r| {
+            Some((
+                r.get("UserInfo").and_then(user_from)?,
+                n(r, &["Timestamp"]).unwrap_or(0),
+            ))
+        })
+        .collect();
+    let reactions = list("UserReactions")
+        .filter_map(|r| {
+            let user = r.get("UserInfo").and_then(user_from)?;
+            Some((user, n(r, &["Type"])?, n(r, &["Timestamp"]).unwrap_or(0)))
+        })
+        .collect();
+    AudiencePage { reads, reactions }
+}
+
 /// People from `RecentUserReactions`, with the names the UI shows in the reaction tooltip.
 fn reaction_authors(sm: &Value) -> Vec<User> {
     sm.get("RecentUserReactions")
@@ -2074,6 +2103,26 @@ mod tests {
         // Bars read a byte per character when the string is not base64, as the web client does.
         assert_eq!(waveform("\u{12}\u{f0}"), [1, 2, 15, 0]);
         assert_eq!(waveform(""), Vec::<u8>::new());
+    }
+
+    /// `list_reactions`: who read the message and who reacted, as the web client reads them.
+    #[test]
+    fn who_read_and_reacted() {
+        let v = json!({
+            "UserReads": [{"UserInfo": {"Guid": "aaaa0001-0000-4000-8000-000000000001", "DisplayName": "Anna Smirnova"},
+                "Timestamp": 9}, {"Timestamp": 8}],
+            "UserReactions": [{"UserInfo": {"Guid": "aaaa0001-0000-4000-8000-000000000002", "DisplayName": "Boris"},
+                "Type": 100_101, "Timestamp": 7}],
+        });
+        let AudiencePage { reads, reactions } = audience(&v);
+        assert_eq!(reads.len(), 1);
+        assert_eq!((reads[0].0.display_name.as_str(), reads[0].1), ("Anna Smirnova", 9));
+        assert_eq!(
+            (reactions[0].0.display_name.as_str(), reactions[0].1, reactions[0].2),
+            ("Boris", 100_101, 7)
+        );
+        // Empty lists are left out of the answer.
+        assert_eq!(audience(&json!({})), AudiencePage::default());
     }
 
     /// A sticker is a picture, with no text of its own.

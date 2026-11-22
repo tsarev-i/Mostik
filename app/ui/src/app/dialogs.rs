@@ -798,6 +798,104 @@ pub(super) fn DeleteDialog() -> impl IntoView {
     }
 }
 
+/// "Who read it" for an own group message: the people who reacted, with their reactions, and the
+/// people who read it, newest first, as Telemost lists them (`list_reactions`). The demo shows what
+/// the message itself knows.
+#[component]
+pub(super) fn AudienceDialog(msg: Message) -> impl IntoView {
+    let c = ctx();
+    let close = move || c.audience.set(None);
+    let data: RwSignal<Option<Result<bridge::Audience, String>>> = RwSignal::new(None);
+    if c.live {
+        let m = msg.clone();
+        spawn_local(async move {
+            let got = bridge::message_audience(&m).await;
+            if let Ok(a) = &got {
+                // Their photos and names, for the rows and the rest of the window.
+                c.snap.update(|s| {
+                    for u in a
+                        .reads
+                        .iter()
+                        .map(|r| &r.user)
+                        .chain(a.reactions.iter().map(|r| &r.user))
+                    {
+                        if s.user(&u.id).is_none_or(|known| !known.has_name()) {
+                            s.users.retain(|x| x.id != u.id);
+                            s.users.push(u.clone());
+                        }
+                    }
+                });
+            }
+            // The window may be closed by now.
+            data.try_set(Some(got));
+        });
+    } else {
+        let a = c.snap.with_untracked(|s| bridge::Audience {
+            reads: msg
+                .reads
+                .iter()
+                .flat_map(|r| &r.recent)
+                .filter_map(|id| s.user(id).cloned())
+                .map(|user| mostik_ipc::Seen { user, ts: msg.ts })
+                .collect(),
+            reactions: vec![],
+        });
+        data.set(Some(Ok(a)));
+    }
+    let chat = msg.chat_id.clone();
+    let person = move |user: User, side: AnyView| {
+        let (id, name_id) = (user.id.clone(), user.id.clone());
+        let name = user.display_name.clone();
+        view! {
+            <div class="member-row">
+                <button class="face-btn" on:click=move |_| { close(); ops::open_profile(c, id.clone()); }>
+                    <Avatar user=user size=32/>
+                </button>
+                <span class="dm-body">
+                    <span class="dm-name">
+                        <button class="person-link" on:click=move |_| { close(); ops::open_profile(c, name_id.clone()); }>{name}</button>
+                    </span>
+                </span>
+                <span class="audience-side">{side}</span>
+            </div>
+        }
+    };
+    view! {
+        <Modal on_close=Callback::new(move |_| close())>
+            <header><h2>{tr().who_read}</h2></header>
+            <div class="audience">
+                {move || match data.get() {
+                    None => view! { <p class="audience-note">{tr().loading}</p> }.into_any(),
+                    Some(Err(e)) => view! { <p class="audience-note">{format!("{}: {}", tr().err_who_read, ops::in_own_words(&e))}</p> }.into_any(),
+                    Some(Ok(a)) => {
+                        let chat = chat.clone();
+                        let reactions = (!a.reactions.is_empty()).then(|| {
+                            let rows = a.reactions.clone().into_iter().map(|r| {
+                                let glyph = match crate::custom::by_kind(c, &chat, r.kind) {
+                                    Some(e) => crate::custom::image(&e, "custom-emoji").into_any(),
+                                    None => view! { <span class="emoji">{mostik_core::reactions::emoji(r.kind)}</span> }.into_any(),
+                                };
+                                person(r.user, glyph)
+                            }).collect_view();
+                            view! { <div class="sr-title">{tr().reaction_count(a.reactions.len())}</div>{rows} }
+                        });
+                        let reads = if a.reads.is_empty() {
+                            view! { <p class="audience-note">{tr().nobody_read}</p> }.into_any()
+                        } else {
+                            let rows = a.reads.clone().into_iter().map(|r| {
+                                let when = view! { <span class="audience-time" title=crate::time::full(r.ts)>{crate::time::relative(r.ts)}</span> }.into_any();
+                                person(r.user, when)
+                            }).collect_view();
+                            view! { <div class="sr-title">{tr().read_count(a.reads.len())}</div>{rows} }.into_any()
+                        };
+                        view! { {reactions}{reads} }.into_any()
+                    }
+                }}
+            </div>
+        </Modal>
+    }
+}
+
 /// Leave-channel confirmation opened from the sidebar menu.
 #[component]
 pub(super) fn LeaveDialog(id: ChatId) -> impl IntoView {

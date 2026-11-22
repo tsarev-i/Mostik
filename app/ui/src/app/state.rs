@@ -144,6 +144,8 @@ pub struct Ctx {
     pub custom: RwSignal<Vec<mostik_core::custom_emoji::EmojiSet>>,
     /// The "Add custom emoji" dialog, opened from the emoji picker as in Slack.
     pub adding_emoji: RwSignal<bool>,
+    /// The own message whose readers and reactions the "Who read it" window shows.
+    pub audience: RwSignal<Option<Message>>,
     /// The voice message playing or paused.
     pub voice: RwSignal<Option<super::voice::VoiceNow>>,
     /// Ticks while a voice message plays, to move its player on.

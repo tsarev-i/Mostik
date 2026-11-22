@@ -542,6 +542,8 @@ commands! {
     SendMessage = "send_message", SendArgs => crate::SentText;
     EditMessage = "edit_message", EditArgs => ();
     DeleteMessage = "delete_message", MsgArgs => ();
+    /// Who read an own message and who reacted to it.
+    MessageAudience = "message_audience", MsgArgs => crate::Audience;
     SetReaction = "set_reaction", ReactionArgs => ();
     SetImportant = "set_important", ImportantArgs => ();
     MarkUnread = "mark_unread", UnreadArgs => ();

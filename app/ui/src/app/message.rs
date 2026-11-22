@@ -807,8 +807,18 @@ pub(super) fn message_menu_items(
             <div class="menu-sep"></div>
         }
     });
+    // Who read an own group message, as far as Telemost tells it.
+    let audience = matches!(read_status(c, &msg), Some(receipts::ReadStatus::Read { .. })).then(|| {
+        let m = msg.clone();
+        view! {
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); c.audience.set(Some(m.clone())); }>
+                {menu_item(I::Check, tr().who_read)}
+            </button>
+        }
+    });
     view! {
         {replies}
+        {audience}
         // Telemost does not make your own message unread, so the item is only for others' messages.
         {(!in_thread && !mine).then(|| view! {
             <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::mark_unread(c, &m_unread); }>

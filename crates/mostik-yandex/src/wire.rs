@@ -93,6 +93,33 @@ pub fn importance(chat_id: &str, ts: u64, important: bool) -> Value {
     json!({ "UpdateFields": { "ChatId": chat_id, "Timestamp": ts, "ImportanceFlag": if important { 1 } else { 2 } } })
 }
 
+/// What [`list_reactions`] asks for: the web client's `ListReactionsMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListMode {
+    /// Who reacted (`ONLY_REACTIONS`).
+    Reactions = 0,
+    /// Who read it (`ONLY_READ_TIMESTAMPS`).
+    Reads = 1,
+}
+
+/// Xiva `list_reactions`: a page of up to `limit` people who reacted to or read message `ts` of
+/// `chat_id`, newest first; the next page is the one before the time of the last of them
+/// (`MaxTimestamp`). The answer has `UserReactions [{UserInfo, Type, Timestamp}]` and `UserReads
+/// [{UserInfo, Timestamp}]`.
+pub fn list_reactions(chat_id: &str, ts: u64, limit: u32, before: Option<u64>, mode: ListMode) -> Value {
+    let mut v = json!({
+        "RequestId": request_id(),
+        "ChatId": chat_id,
+        "Timestamp": ts,
+        "Limit": limit,
+        "Mode": mode as u32,
+    });
+    if let Some(before) = before {
+        v["MaxTimestamp"] = json!(before);
+    }
+    v
+}
+
 /// Marks the chat as read up to message `ts` with number `seq_no`.
 pub fn seen_marker(chat_id: &str, ts: u64, seq_no: u64) -> Value {
     json!({ "SeenMarker": { "ChatId": chat_id, "Timestamp": ts, "SeqNo": seq_no } })
@@ -260,6 +287,22 @@ pub fn end_ringing(ringing_id: &str, reason: EndRinging) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_reactions_pages_back_from_the_last_one() {
+        let first = list_reactions("0/0/c", 5, 50, None, ListMode::Reads);
+        assert_eq!(
+            (first["ChatId"].clone(), first["Timestamp"].clone()),
+            (json!("0/0/c"), json!(5))
+        );
+        assert_eq!((first["Limit"].clone(), first["Mode"].clone()), (json!(50), json!(1)));
+        assert!(first.get("MaxTimestamp").is_none() && first["RequestId"].is_string());
+        let next = list_reactions("0/0/c", 5, 50, Some(77), ListMode::Reactions);
+        assert_eq!(
+            (next["MaxTimestamp"].clone(), next["Mode"].clone()),
+            (json!(77), json!(0))
+        );
+    }
 
     /// As the web client sends them: `NotificationBehaviour` next to `Plain`, `IsImportant` in it.
     #[test]

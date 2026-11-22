@@ -44,6 +44,28 @@ pub struct Threads {
     pub users: Vec<User>,
 }
 
+/// Who read one of the user's own messages and who reacted to it, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Audience {
+    pub reads: Vec<Seen>,
+    pub reactions: Vec<Reacted>,
+}
+
+/// Someone who read a message, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seen {
+    pub user: User,
+    pub ts: Timestamp,
+}
+
+/// Someone who reacted to a message, with what (the reaction's `Type`) and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reacted {
+    pub user: User,
+    pub kind: u64,
+    pub ts: Timestamp,
+}
+
 /// Server-side message search result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FoundMessages {

@@ -452,6 +452,10 @@ pub struct Tr {
     pub uploading: &'static str,
     pub send_silent: &'static str,
     pub voice_message: &'static str,
+    pub who_read: &'static str,
+    pub loading: &'static str,
+    pub nobody_read: &'static str,
+    pub err_who_read: &'static str,
     pub sticker: &'static str,
     pub voice_recognizing: &'static str,
     pub voice_more: &'static str,
@@ -904,6 +908,10 @@ pub static RU: Tr = Tr {
     uploading: "Загружаем…",
     send_silent: "Отправить без звука",
     voice_message: "Голосовое сообщение",
+    who_read: "Кто прочитал",
+    loading: "Загружаем…",
+    nobody_read: "Пока никто не прочитал",
+    err_who_read: "Не удалось узнать, кто прочитал",
     sticker: "Стикер",
     voice_recognizing: "Распознавание…",
     voice_more: "Ещё",
@@ -1356,6 +1364,10 @@ pub static EN: Tr = Tr {
     uploading: "Uploading…",
     send_silent: "Send without sound",
     voice_message: "Voice message",
+    who_read: "Who read it",
+    loading: "Loading…",
+    nobody_read: "Nobody has read it yet",
+    err_who_read: "Couldn't find out who read it",
     sticker: "Sticker",
     voice_recognizing: "Transcribing…",
     voice_more: "More",
@@ -1647,6 +1659,22 @@ impl Tr {
             (Lang::En, Some(of)) => format!("Read by {} of {of}", count.min(of)),
             (Lang::Ru, None) => format!("Прочитали: {count}"),
             (Lang::En, None) => format!("Read by {count}"),
+        }
+    }
+
+    /// The heading of the readers in "Who read it".
+    pub fn read_count(&self, n: usize) -> String {
+        match self.lang {
+            Lang::Ru => format!("Прочитали: {n}"),
+            Lang::En => format!("Read by {n}"),
+        }
+    }
+
+    /// The heading of the reactions in "Who read it".
+    pub fn reaction_count(&self, n: usize) -> String {
+        match self.lang {
+            Lang::Ru => format!("Реакции: {n}"),
+            Lang::En => format!("Reactions: {n}"),
         }
     }
 

@@ -44,8 +44,8 @@ pub(crate) use voice::ended as voice_ended;
 use avatar::HoverTip;
 use composer::Composer;
 use dialogs::{
-    AboutDialog, BrowseChannelsDialog, ChannelDetailsDialog, CreateChannelDialog, DeleteDialog, FolderDialog,
-    ForwardDialog, LeaveDialog, NewMessageDialog,
+    AboutDialog, AudienceDialog, BrowseChannelsDialog, ChannelDetailsDialog, CreateChannelDialog, DeleteDialog,
+    FolderDialog, ForwardDialog, LeaveDialog, NewMessageDialog,
 };
 use feed::{ChannelHeader, MessageList, PinsView};
 use files::FilesView;
@@ -162,6 +162,7 @@ pub fn App() -> impl IntoView {
         folder_edit: RwSignal::new(None),
         custom: RwSignal::new(vec![]),
         adding_emoji: RwSignal::new(false),
+        audience: RwSignal::new(None),
         voice: RwSignal::new(None),
         voice_clock: RwSignal::new(0.0),
     };
@@ -526,6 +527,7 @@ pub fn App() -> impl IntoView {
         {move || c.creating_channel.get().map(|to| view! { <CreateChannelDialog to=to/> })}
         {move || c.new_message.get().then(|| view! { <NewMessageDialog/> })}
         {move || c.forwarding.get().map(|m| view! { <ForwardDialog msg=m/> })}
+        {move || c.audience.get().map(|m| view! { <AudienceDialog msg=m/> })}
         {move || c.browsing.get().then(|| view! { <BrowseChannelsDialog/> })}
         {move || c.status_dialog.get().then(|| view! { <StatusDialog/> })}
         {move || c.details.get().map(|tab| view! { <ChannelDetailsDialog initial=tab/> })}

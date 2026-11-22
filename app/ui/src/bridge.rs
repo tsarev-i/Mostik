@@ -5,8 +5,8 @@ use mostik_core::{ChatId, Message, Timestamp, UnreadBadge, UserId};
 use mostik_ipc::cmd::{self, Command};
 pub use mostik_ipc::cmd::{ReplyRef, SendOptions};
 pub use mostik_ipc::{
-    Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent, Threads,
-    UpdateStatus, UploadProgress, VoiceEnded,
+    Audience, Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent,
+    Threads, UpdateStatus, UploadProgress, VoiceEnded,
 };
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
@@ -261,6 +261,16 @@ pub async fn set_preferences(s: &crate::settings::Settings) -> Result<(), String
         spell_check: s.spell_check,
     };
     call::<cmd::SetPreferences>(args).await
+}
+
+/// Who read own message `m` and who reacted to it.
+pub async fn message_audience(m: &Message) -> Result<Audience, String> {
+    call::<cmd::MessageAudience>(cmd::MsgArgs {
+        chat_id: m.chat_id.clone(),
+        ts: m.ts,
+        thread: m.thread_parent,
+    })
+    .await
 }
 
 /// A voice message played to its end, or that could not play: [`VoiceEnded`].

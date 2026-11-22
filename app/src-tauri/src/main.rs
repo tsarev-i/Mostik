@@ -359,6 +359,7 @@ fn main() {
             backend::notify::test_notification,
             backend::notify::play_sound,
             backend::voice::play_voice,
+            backend::messages::message_audience,
             backend::voice::stop_voice,
             backend::threads::followed_threads,
             backend::threads::mark_thread_read,

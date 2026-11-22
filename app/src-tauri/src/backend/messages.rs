@@ -9,7 +9,7 @@ use mostik_ipc::cmd::{
     self, Args, ChatArgs, EditArgs, ForwardArgs, HistoryArgs, ImportantArgs, MsgArgs, Out, PinArgs, ReactionArgs,
     SendArgs, UnreadArgs,
 };
-use mostik_ipc::{HistoryPage, Sent, SentText, Unsent};
+use mostik_ipc::{Audience, HistoryPage, Reacted, Seen, Sent, SentText, Unsent};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::wire::{self, HistoryRequest, request_id};
@@ -408,6 +408,74 @@ pub(super) fn sent_from_reply(resp: &Value) -> Result<Sent, String> {
             .ok_or("Telemost did not return the message time")?,
         seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
     })
+}
+
+/// People asked for in one `list_reactions` page, as many as the web client asks for at most.
+const AUDIENCE_PAGE: u32 = 50;
+/// Pages asked for one list at most: a thousand people.
+const AUDIENCE_PAGES: usize = 20;
+
+/// Who read own message `ts` and who reacted to it (Xiva `list_reactions`, page by page), newest
+/// first, each person once.
+#[tauri::command]
+pub async fn message_audience(
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::MessageAudience>,
+) -> Result<Out<cmd::MessageAudience>, String> {
+    let MsgArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+        thread,
+    } = args;
+    let live = live(&state).await?;
+    let target = target_chat(&chat_id, thread)?;
+    let mut out = Audience::default();
+    for mode in [wire::ListMode::Reads, wire::ListMode::Reactions] {
+        let mut before = None;
+        for _ in 0..AUDIENCE_PAGES {
+            let page = wire::list_reactions(&target, ts, AUDIENCE_PAGE, before, mode);
+            let v = live
+                .xiva
+                .call("list_reactions", &page, 20)
+                .await
+                .map_err(|e| e.to_string())?;
+            if v.get("Status").and_then(Value::as_u64).is_some_and(|s| s != 0) {
+                return Err(format!("Telemost did not say who read it: {}", shape(&v)));
+            }
+            let convert::AudiencePage { reads, reactions } = convert::audience(&v);
+            let (got, last) = match mode {
+                wire::ListMode::Reads => (reads.len(), reads.last().map(|r| r.1)),
+                wire::ListMode::Reactions => (reactions.len(), reactions.last().map(|r| r.2)),
+            };
+            let known = out.reads.len() + out.reactions.len();
+            for (user, ts) in reads {
+                if mode == wire::ListMode::Reads && !out.reads.iter().any(|s| s.user.id == user.id) {
+                    out.reads.push(Seen { user, ts });
+                }
+            }
+            for (user, kind, ts) in reactions {
+                if mode == wire::ListMode::Reactions && !out.reactions.iter().any(|r| r.user.id == user.id) {
+                    out.reactions.push(Reacted { user, kind, ts });
+                }
+            }
+            // The page before the last person of this one, while pages are full and bring someone new.
+            let grew = out.reads.len() + out.reactions.len() > known;
+            match last {
+                Some(last) if got >= AUDIENCE_PAGE as usize && grew => before = Some(last),
+                _ => break,
+            }
+        }
+    }
+    if let Ok(mut sh) = live.shared.lock() {
+        let users: Vec<_> = out
+            .reads
+            .iter()
+            .map(|s| s.user.clone())
+            .chain(out.reactions.iter().map(|r| r.user.clone()))
+            .collect();
+        sh.learn_names(&users);
+    }
+    Ok(out)
 }
 
 /// Forwards message `ts` from `from_chat` (a thread reply from the thread chat) to `to_chat` with a comment.
