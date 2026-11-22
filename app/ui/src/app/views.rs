@@ -170,14 +170,27 @@ pub(super) fn ActivityList() -> impl IntoView {
     let tab = RwSignal::new(ActivityTab::All);
     let found: RwSignal<Vec<Message>> = RwSignal::new(vec![]);
     let loading = RwSignal::new(false);
-    // In the app also search for mentions by name: across the organization, or in recent chats
-    // without one.
+    // In the app also search for mentions by name: across the current organization, again when
+    // another one is picked, or in recent chats without one.
     if c.live {
         let name = c
             .snap
             .with_untracked(|s| s.user(&s.me).map(|u| u.display_name.clone()))
             .unwrap_or_default();
-        if !name.is_empty() {
+        let seq = RwSignal::new(0u32);
+        // Only another organization makes it search again, not a change of the current one.
+        let org = Memo::new(move |_| {
+            c.org_now.track();
+            super::org::search_org(c)
+        });
+        Effect::new(move |_| {
+            let org = org.get();
+            let n = seq.get_untracked() + 1;
+            seq.set(n);
+            found.set(vec![]);
+            if name.is_empty() {
+                return;
+            }
             loading.set(true);
             let chats: Vec<String> = c.snap.with_untracked(|s| {
                 let mut list: Vec<&Chat> = s
@@ -188,9 +201,14 @@ pub(super) fn ActivityList() -> impl IntoView {
                 list.sort_by_key(|ch| std::cmp::Reverse(ch.last_ts));
                 list.into_iter().take(20).map(|ch| ch.id.0.clone()).collect()
             });
+            let name = name.clone();
             spawn_local(async move {
-                let org = super::org::search_org(c);
-                if let Ok(f) = bridge::search_messages(&name, chats, org, bridge::SearchFilter::default()).await {
+                let found_now = bridge::search_messages(&name, chats, org, Default::default()).await;
+                // Another organization picked meanwhile: its own search answers.
+                if seq.try_get_untracked() != Some(n) {
+                    return;
+                }
+                if let Ok(f) = found_now {
                     c.snap.update(|s| {
                         for u in f.users {
                             if s.user(&u.id).is_none() {
@@ -202,7 +220,7 @@ pub(super) fn ActivityList() -> impl IntoView {
                 }
                 loading.try_set(false);
             });
-        }
+        });
     }
     let items = Memo::new(move |_| {
         let extra = found.get();

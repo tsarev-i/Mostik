@@ -398,8 +398,9 @@ fn SearchResults(
     };
     move || {
         let q = c.search.get();
+        // Nothing asked yet: only the filters, so a search can start from one of them.
         if q.trim().is_empty() && filter.with(bridge::SearchFilter::is_empty) {
-            return None;
+            return view! { <div class="search-results">{chips.clone()}</div> }.into_any();
         }
         let list = hits.get();
         let sel = selected.get();
@@ -463,13 +464,14 @@ fn SearchResults(
             })
             .collect_view();
         let empty = hits.with(Vec::is_empty);
-        Some(view! {
+        view! {
             <div class="search-results">
                 {chips.clone()}
                 {rows}
                 {move || loading.get().then(|| view! { <div class="sr-empty">{tr().searching}</div> })}
                 {move || (empty && !loading.get()).then(|| view! { <div class="sr-empty">{tr().nothing_found}</div> })}
             </div>
-        })
+        }
+        .into_any()
     }
 }
