@@ -668,11 +668,13 @@ pub(super) struct Uploads {
 }
 
 /// The parts of a sending that have gone: how many parts of its text (alone or the first as the
-/// caption of the gallery) and its files.
+/// caption of the gallery) and its files. The text's parts are kept as first cut: cut again, with
+/// other names known by then, they could fall apart elsewhere and the count would not fit them.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct SentParts {
     texts: usize,
     paths: std::collections::BTreeSet<String>,
+    parts: Option<Vec<String>>,
 }
 
 /// Records a part of sending `upload` that has gone.
@@ -788,7 +790,13 @@ pub async fn send_files(
         }
     }
     let mut sent = Vec::new();
-    let parts = super::messages::split_text(&live, text.trim());
+    let parts = match done.parts {
+        Some(parts) => parts,
+        None => super::messages::split_text(&live, text.trim()),
+    };
+    mark_sent(&state, upload.as_ref(), |s| {
+        s.parts.get_or_insert_with(|| parts.clone());
+    });
     // The next part of the text to go: an earlier try may have sent some.
     let mut next = done.texts;
     // Only the first message of the sending goes as the user chose (see `sending_options`).
@@ -1201,7 +1209,14 @@ mod tests {
         mark_sent(&state, Some(&id), |s| {
             s.paths.insert("/tmp/a.pdf".into());
         });
+        // The text keeps the parts it was first cut into.
+        for cut in [["first", "cut"], ["other", "cut"]] {
+            mark_sent(&state, Some(&id), |s| {
+                s.parts.get_or_insert_with(|| cut.map(String::from).to_vec());
+            });
+        }
         let sent = state.uploads.lock().unwrap().sent.get(&id).cloned().unwrap();
+        assert_eq!(sent.parts.as_deref(), Some(&["first".to_owned(), "cut".to_owned()][..]));
         assert_eq!(sent.texts, 1);
         assert_eq!(sent.paths.into_iter().collect::<Vec<_>>(), ["/tmp/a.pdf"]);
     }
