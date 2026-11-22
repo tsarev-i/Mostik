@@ -295,7 +295,7 @@ pub(super) fn ForwardDialog(msg: Message) -> impl IntoView {
             text: msg.text.clone(),
             attachments: msg.attachments.clone(),
             quote: None,
-            media: None,
+            media: msg.media.clone(),
             reply: false,
         };
         match msg.forwarded.first() {

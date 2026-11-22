@@ -29,9 +29,11 @@ pub struct VoiceNow {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VoiceState {
-    /// Asked to play from `from_ms`: the sound is on its way.
+    /// Asked to play from `from_ms`: the sound is on its way. `request` tells this asking from
+    /// an earlier one, whose answer may still come.
     Loading {
         from_ms: u64,
+        request: u64,
     },
     /// Playing from `from_ms` since `since` (`Date.now()`, milliseconds).
     Playing {
@@ -47,7 +49,7 @@ impl VoiceNow {
     /// Where it is at time `now` (`Date.now()`), in milliseconds.
     pub fn at_ms(&self, now: f64) -> u64 {
         let at = match self.state {
-            VoiceState::Loading { from_ms } => from_ms,
+            VoiceState::Loading { from_ms, .. } => from_ms,
             VoiceState::Playing { from_ms, since } => from_ms + (now - since).max(0.0) as u64,
             VoiceState::Paused { at_ms } => at_ms,
         };
@@ -59,9 +61,18 @@ impl VoiceNow {
     }
 }
 
+thread_local! {
+    /// Counts the requests to play.
+    static REQUESTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Plays voice message `file_id` from `from_ms`; in the browser demo only the player moves.
 fn play(c: Ctx, file_id: String, duration_ms: u64, from_ms: u64) {
-    let state = VoiceState::Loading { from_ms };
+    let request = REQUESTS.with(|n| {
+        n.set(n.get() + 1);
+        n.get()
+    });
+    let state = VoiceState::Loading { from_ms, request };
     c.voice.set(Some(VoiceNow {
         file_id: file_id.clone(),
         duration_ms,
@@ -84,7 +95,7 @@ fn play(c: Ctx, file_id: String, duration_ms: u64, from_ms: u64) {
     }
     spawn_local(async move {
         let result = bridge::play_voice(&id, from_ms).await;
-        // A pause or another message meanwhile wins.
+        // A pause, another message or another request to play meanwhile wins.
         if c.voice
             .with_untracked(|v| v.as_ref().is_none_or(|v| v.file_id != id || v.state != state))
         {
@@ -335,7 +346,14 @@ mod tests {
             duration_ms: 10_000,
             state,
         };
-        assert_eq!(v(VoiceState::Loading { from_ms: 2000 }).at_ms(0.0), 2000);
+        assert_eq!(
+            v(VoiceState::Loading {
+                from_ms: 2000,
+                request: 1
+            })
+            .at_ms(0.0),
+            2000
+        );
         let playing = v(VoiceState::Playing {
             from_ms: 1000,
             since: 5000.0,

@@ -60,7 +60,7 @@ impl ReplyTarget {
             text: m.text.clone(),
             attachments: m.attachments.clone(),
             quote: self.quote.clone(),
-            media: None,
+            media: m.media.clone(),
             reply: true,
         }
     }
@@ -577,7 +577,7 @@ pub async fn forward(c: Ctx, m: Message, to: ChatId, text: String) -> Result<(),
             text: m.text.clone(),
             attachments: m.attachments.clone(),
             quote: None,
-            media: None,
+            media: m.media.clone(),
             reply: false,
         }]
     } else {

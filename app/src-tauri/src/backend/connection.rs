@@ -140,6 +140,7 @@ pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<
 pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Out<cmd::Logout>, String> {
     // From here on nothing of the old session is saved again or reconnected.
     let generation = state.session.renew();
+    super::voice::forget();
     let live = state.live.lock().await.take();
     // It waits for the call browser to go: not on an async worker.
     let closing = app.clone();

@@ -543,13 +543,20 @@ fn media_line(media: &Media) -> String {
 }
 
 /// A message in one line of a list: its text without markup, else what it is (a voice message),
-/// else the text of the message it forwards (`↪ …`), else 📎 for attachments alone.
+/// else the text of the message it forwards or what that one is (`↪ …`), else 📎 for attachments
+/// alone.
 pub(super) fn message_preview(s: &Snapshot, m: &Message) -> String {
     let text = s.plain(&m.text);
     match m.forwarded.first() {
         _ if !text.is_empty() => text,
         _ if m.media.is_some() => m.media.as_ref().map(media_line).unwrap_or_default(),
-        Some(f) => format!("↪ {}", s.plain(&f.text)),
+        Some(f) => {
+            let text = s.plain(&f.text);
+            match &f.media {
+                Some(media) if text.is_empty() => format!("↪ {}", media_line(media)),
+                _ => format!("↪ {text}"),
+            }
+        }
         None if !m.attachments.is_empty() => "📎".to_owned(),
         None => text,
     }
@@ -568,10 +575,12 @@ pub(super) fn delete_preview(s: &Snapshot, m: &Message) -> Option<String> {
     } else {
         let f = m.forwarded.first()?;
         let text = s.plain(&f.text);
-        let what = if text.trim().is_empty() {
-            attachment_line(&f.attachments)?
-        } else {
+        let what = if !text.trim().is_empty() {
             text
+        } else if let Some(media) = &f.media {
+            media_line(media)
+        } else {
+            attachment_line(&f.attachments)?
         };
         format!("↪ {what}")
     };
@@ -931,6 +940,17 @@ mod tests {
         assert_eq!(preview(message("", vec![], fwd)).as_deref(), Some("↪ 📄 report.pdf"));
         assert_eq!(preview(message("", vec![], vec![forwarded("", vec![])])), None);
         assert_eq!(preview(message("", vec![], vec![])), None);
+        // A forwarded voice message or sticker has no text: it says what it is.
+        let sticker = Forwarded {
+            media: Some(Media::Sticker(Sticker {
+                id: "a".into(),
+                set_id: "b".into(),
+            })),
+            ..forwarded("", vec![])
+        };
+        let line = format!("↪ {}", tr().sticker);
+        assert_eq!(preview(message("", vec![], vec![sticker.clone()])), Some(line.clone()));
+        assert_eq!(message_preview(&s, &message("", vec![], vec![sticker])), line);
     }
 }
 
