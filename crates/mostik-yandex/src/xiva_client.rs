@@ -174,8 +174,7 @@ impl XivaClient {
             ping_interval_ms: Arc::new(AtomicU64::new(DEFAULT_PING_INTERVAL_MS)),
             kill: Arc::default(),
         };
-        let (w, p, c, sub, live) = (
-            writer.clone(),
+        let (p, c, sub, live) = (
             pending.clone(),
             closed.clone(),
             subscription_id.clone(),
@@ -240,15 +239,9 @@ impl XivaClient {
                             }
                             on_event(Incoming::Text(v));
                         }
-                        // Only when the writer is free: waiting for it would stop the reading, and with
-                        // it the check that drops a dead connection, behind a send stuck on a full
-                        // socket. A busy writer is sending anyway, and tungstenite answers the ping
-                        // with it.
-                        WsMessage::Ping(payload) => {
-                            if let Ok(mut w) = w.try_lock() {
-                                let _ = w.send(WsMessage::Pong(payload)).await;
-                            }
-                        }
+                        // A ping frame needs nothing here: tungstenite queues the pong and sends it
+                        // with the next read or write (#43). Xiva sends none anyway, only the text
+                        // pings above.
                         WsMessage::Close(frame) => {
                             break match frame {
                                 Some(f) => format!("close frame {}: {}", u16::from(f.code), f.reason),
@@ -469,6 +462,23 @@ mod tests {
         assert!(matches!(answer, Err(XivaError::Closed)), "{answer:?}");
         assert!(xiva.is_closed());
         assert_eq!(*got.lock().unwrap(), ["push 1", "closed"]);
+    }
+
+    #[tokio::test]
+    async fn a_ping_frame_gets_its_pong() {
+        let (_, handler) = recorder();
+        let (_xiva, mut server) = pair(handler).await;
+        server
+            .send(WsMessage::Ping(b"still there?".to_vec().into()))
+            .await
+            .unwrap();
+        let answer = tokio::time::timeout(Duration::from_secs(5), server.next())
+            .await
+            .expect("no pong in time");
+        assert!(
+            matches!(&answer, Some(Ok(WsMessage::Pong(payload))) if &payload[..] == b"still there?"),
+            "{answer:?}"
+        );
     }
 
     #[tokio::test]

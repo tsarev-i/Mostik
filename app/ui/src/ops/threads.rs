@@ -93,6 +93,7 @@ pub fn load_threads(c: Ctx) {
                         unread: replies[mine + 1..].iter().filter(|r| r.author != s.me).count() as u32,
                         last_ts: replies.last().map_or(p.ts, |r| r.ts),
                         last_seq: 0,
+                        seen_seq: None,
                     })
                 })
                 .collect()
@@ -122,7 +123,7 @@ pub(super) fn merge_threads(c: Ctx, fresh: Vec<FollowedThread>) {
             if let Some(old) = list.iter().find(|o| same(o, t))
                 && old.last_ts > t.last_ts
             {
-                (t.unread, t.last_ts, t.last_seq) = (old.unread, old.last_ts, old.last_seq);
+                (t.unread, t.last_ts, t.last_seq, t.seen_seq) = (old.unread, old.last_ts, old.last_seq, old.seen_seq);
             }
         }
         for old in list.iter() {
@@ -166,6 +167,7 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
                     unread: 0,
                     last_ts: 0,
                     last_seq: 0,
+                    seen_seq: None,
                 });
                 list.len() - 1
             }
@@ -177,10 +179,10 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
             t.last_seq = t.last_seq.max(m.seq_no);
         }
         if mine {
-            t.unread = 0;
+            t.read();
         } else if open {
             read_now = t.unread > 0 || m.seq_no > 0;
-            t.unread = 0;
+            t.read();
         } else {
             t.unread = t.unread.saturating_add(1);
         }
@@ -199,7 +201,7 @@ pub fn read_thread(c: Ctx, chat: ChatId, parent: Timestamp) {
             .iter_mut()
             .find(|t| t.parent.chat_id == chat && t.parent.ts == parent)
         {
-            t.unread = 0;
+            t.read();
             last = Some((t.last_ts, t.last_seq));
         }
     });

@@ -44,6 +44,28 @@ pub struct Threads {
     pub users: Vec<User>,
 }
 
+/// Who read one of the user's own messages and who reacted to it, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Audience {
+    pub reads: Vec<Seen>,
+    pub reactions: Vec<Reacted>,
+}
+
+/// Someone who read a message, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seen {
+    pub user: User,
+    pub ts: Timestamp,
+}
+
+/// Someone who reacted to a message, with what (the reaction's `Type`) and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reacted {
+    pub user: User,
+    pub kind: u64,
+    pub ts: Timestamp,
+}
+
 /// Server-side message search result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FoundMessages {
@@ -106,6 +128,29 @@ pub struct UploadProgress {
     pub path: String,
     pub sent: u64,
     pub total: u64,
+}
+
+/// What [`cmd::SendMessage`] sent: its messages, in order, and when a long text went only in part,
+/// what did not go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentText {
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub unsent: Option<Unsent>,
+}
+
+/// The parts of a long text that did not go, as one text to send again, and why the first of them
+/// did not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unsent {
+    pub text: String,
+    pub why: String,
+}
+
+/// A voice message played to its end, or that could not play (`mostik://voice`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceEnded {
+    pub file_id: String,
 }
 
 /// Files dropped onto the chat window and where, in logical pixels of the window.

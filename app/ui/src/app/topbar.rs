@@ -10,6 +10,7 @@ use mostik_core::*;
 
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::keys::{self, Action};
 use crate::{bridge, ops, time};
 
 use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon};
@@ -26,21 +27,6 @@ enum Hit {
     Message(Box<Message>, String),
 }
 
-/// Whether the app runs on macOS, where Option+arrows belong to text fields.
-fn on_mac() -> bool {
-    web_sys::window()
-        .and_then(|w| w.navigator().user_agent().ok())
-        .is_some_and(|ua| ua.contains("Mac OS"))
-}
-
-/// Whether the focus is in a text field: an input, a text area or an editable element.
-fn in_text_field() -> bool {
-    document().active_element().is_some_and(|el| {
-        matches!(el.tag_name().as_str(), "INPUT" | "TEXTAREA")
-            || wasm_bindgen::JsCast::dyn_ref::<web_sys::HtmlElement>(&el).is_some_and(|el| el.is_content_editable())
-    })
-}
-
 #[component]
 pub(super) fn TopBar() -> impl IntoView {
     let c = ctx();
@@ -49,13 +35,13 @@ pub(super) fn TopBar() -> impl IntoView {
     let history_open = RwSignal::new(false);
     let selected = RwSignal::new(0usize);
     let hits: RwSignal<Vec<Hit>> = RwSignal::new(vec![]);
+    // What found messages must be besides having the words: from whom, important.
+    let filter: RwSignal<bridge::SearchFilter> = RwSignal::new(Default::default());
     let placeholder = move || tr().search_in(&org_name(c));
-    // Ctrl+K is the quick switcher, Alt+← / Alt+→ go back and forward, as in Slack. Ctrl+Shift+K
-    // is "Add link" in a message field. The physical key, so that Ctrl+K works in any layout (in
-    // Russian the key gives "л"). On macOS Option+arrows in a text field move the caret by word:
-    // there they stay the field's, and Cmd+[ / Cmd+] go back and forward, as in Slack for Mac.
+    // The quick switcher (Ctrl+K, Cmd+K on macOS), back and forward (Alt+← / Alt+→, Cmd+[ / Cmd+]
+    // on macOS), as in Slack, or the keys the user gave them (see [`keys`]).
     scoped_window_listener(ev::keydown, move |e| {
-        if e.ctrl_key() && !e.shift_key() && e.code() == "KeyK" {
+        if keys::pressed(&e, Action::Search) {
             e.prevent_default();
             if let Some(el) = input.get_untracked() {
                 let _ = el.focus();
@@ -63,16 +49,12 @@ pub(super) fn TopBar() -> impl IntoView {
             }
         } else if e.key() == "Escape" && history_open.get_untracked() {
             history_open.set(false);
-        } else if e.alt_key()
-            && !e.ctrl_key()
-            && (e.key() == "ArrowLeft" || e.key() == "ArrowRight")
-            && !(on_mac() && in_text_field())
-        {
+        } else if keys::pressed(&e, Action::Back) {
             e.prevent_default();
-            ops::navigate(c, e.key() == "ArrowLeft");
-        } else if e.meta_key() && !e.shift_key() && matches!(e.code().as_str(), "BracketLeft" | "BracketRight") {
+            ops::navigate(c, true);
+        } else if keys::pressed(&e, Action::Forward) {
             e.prevent_default();
-            ops::navigate(c, e.code() == "BracketLeft");
+            ops::navigate(c, false);
         }
     });
     // A click outside the search and history closes their drop-downs.
@@ -93,6 +75,7 @@ pub(super) fn TopBar() -> impl IntoView {
     let activate = move |hit: Hit| {
         open.set(false);
         c.search.set(String::new());
+        filter.set(Default::default());
         if let Some(el) = input.get_untracked() {
             let _ = el.blur();
         }
@@ -109,6 +92,7 @@ pub(super) fn TopBar() -> impl IntoView {
                 e.stop_propagation();
                 if c.search.with_untracked(String::is_empty) {
                     open.set(false);
+                    filter.set(Default::default());
                     if let Some(el) = input.get_untracked() {
                         let _ = el.blur();
                     }
@@ -133,13 +117,16 @@ pub(super) fn TopBar() -> impl IntoView {
             _ => {}
         }
     };
+    let hint = move |name: &'static str, action: Action| {
+        move || format!("{name} ({})", c.settings.with(|s| keys::shown(&s.shortcuts, action)))
+    };
     let can_back = move || c.nav_back.with(|v| !v.is_empty());
     let can_forward = move || c.nav_forward.with(|v| !v.is_empty());
     view! {
         <header class="topbar">
             <div class="topbar-nav">
-                <button class="tb-btn" title=tr().back disabled=move || !can_back() on:click=move |_| ops::navigate(c, true)><Icon icon=I::ArrowLeft/></button>
-                <button class="tb-btn" title=tr().forward disabled=move || !can_forward() on:click=move |_| ops::navigate(c, false)><Icon icon=I::ArrowRight/></button>
+                <button class="tb-btn" title=hint(tr().back, Action::Back) disabled=move || !can_back() on:click=move |_| ops::navigate(c, true)><Icon icon=I::ArrowLeft/></button>
+                <button class="tb-btn" title=hint(tr().forward, Action::Forward) disabled=move || !can_forward() on:click=move |_| ops::navigate(c, false)><Icon icon=I::ArrowRight/></button>
                 <div class="history-wrap">
                     <button class="tb-btn" class:active=move || history_open.get() title=tr().history
                         on:click=move |_| history_open.update(|v| *v = !*v)><Icon icon=I::Clock/></button>
@@ -159,10 +146,10 @@ pub(super) fn TopBar() -> impl IntoView {
                         on:input=move |e| { c.search.set(event_target_value(&e)); selected.set(0); open.set(true); }
                         on:keydown=on_key
                     />
-                    <span class="kbd">"Ctrl K"</span>
+                    <span class="kbd">{move || c.settings.with(|s| keys::shown(&s.shortcuts, Action::Search)).replace('+', " ")}</span>
                 </label>
                 <Show when=move || open.get()>
-                    <SearchResults hits=hits selected=selected on_pick=Callback::new(activate)/>
+                    <SearchResults hits=hits selected=selected filter=filter on_pick=Callback::new(activate)/>
                 </Show>
             </div>
             <div class="topbar-right">
@@ -245,15 +232,24 @@ fn HistoryMenu(on_close: Callback<()>) -> impl IntoView {
 }
 
 #[component]
-fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: Callback<Hit>) -> impl IntoView {
+fn SearchResults(
+    hits: RwSignal<Vec<Hit>>,
+    selected: RwSignal<usize>,
+    filter: RwSignal<bridge::SearchFilter>,
+    on_pick: Callback<Hit>,
+) -> impl IntoView {
     let c = ctx();
-    // Server results: messages from all chats and people from the directory (app only).
-    let remote: RwSignal<(String, Vec<Message>, Vec<User>)> = RwSignal::new((String::new(), vec![], vec![]));
+    // Server results: messages from all chats and people from the directory (app only), for the
+    // words and the filter they were asked with.
+    type Remote = (String, bridge::SearchFilter, Vec<Message>, Vec<User>);
+    let remote: RwSignal<Remote> = RwSignal::new((String::new(), Default::default(), vec![], vec![]));
     let loading = RwSignal::new(false);
     let seq = RwSignal::new(0u32);
     Effect::new(move |_| {
         let q = c.search.get().trim().to_owned();
-        if !c.live || q.chars().count() < 2 {
+        let f = filter.get();
+        // A filter alone is a search too: all the important messages.
+        if !c.live || (q.chars().count() < 2 && f.is_empty()) {
             loading.set(false);
             return;
         }
@@ -267,7 +263,9 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     return;
                 }
                 spawn_local(async move {
-                    // The server searches within one chat: the current one and the most recent ones.
+                    // Without an organization the server searches one chat at a time: the current
+                    // one and the most recent ones.
+                    let org = super::org::search_org(c);
                     let chats: Vec<String> = c.snap.with_untracked(|s| {
                         let cur = c.current.get_untracked();
                         let mut list: Vec<&Chat> = s.chats.iter().filter(|ch| ch.id != cur).collect();
@@ -278,8 +276,12 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                             .take(20)
                             .collect()
                     });
-                    let found = bridge::search_messages(&q, chats).await;
-                    let people = bridge::search_people(&q, None).await;
+                    let found = bridge::search_messages(&q, chats, org, f.clone()).await;
+                    // People are found by name, not by a filter.
+                    let people = match q.chars().count() >= 2 && f.is_empty() {
+                        true => bridge::search_people(&q, None).await,
+                        false => Ok(vec![]),
+                    };
                     if seq.try_get_untracked() != Some(n) {
                         return;
                     }
@@ -295,7 +297,7 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     if let Err(e) = &found {
                         leptos::logging::warn!("search: {e}");
                     }
-                    remote.try_set((q, found.map(|f| f.messages).unwrap_or_default(), people));
+                    remote.try_set((q, f, found.map(|f| f.messages).unwrap_or_default(), people));
                     loading.try_set(false);
                 });
             },
@@ -304,14 +306,19 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
     });
     Effect::new(move |_| {
         let q = c.search.get().trim().to_lowercase();
-        if q.is_empty() {
+        let f = filter.get();
+        if q.is_empty() && f.is_empty() {
             return hits.set(vec![]);
         }
+        let passes =
+            |m: &Message| (!f.important || m.important) && f.sender.as_ref().is_none_or(|who| &m.author == who);
         let list = c.snap.with(|s| {
+            // Chats and people are found by name: not with a filter on.
+            let by_name = f.is_empty();
             let mut out: Vec<Hit> = s
                 .chats
                 .iter()
-                .filter(|ch| !matches!(ch.kind, ChatKind::Direct { .. }))
+                .filter(|ch| by_name && !matches!(ch.kind, ChatKind::Direct { .. }))
                 .map(|ch| (ch.id.clone(), display_title(s, ch), Mark::of(ch)))
                 .filter(|(_, t, _)| t.to_lowercase().contains(&q))
                 .take(6)
@@ -320,11 +327,11 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
             let mut people: Vec<User> = s
                 .users
                 .iter()
-                .filter(|u| !u.is_robot && u.display_name.to_lowercase().contains(&q))
+                .filter(|u| by_name && !u.is_robot && u.display_name.to_lowercase().contains(&q))
                 .cloned()
                 .collect();
-            remote.with(|(rq, _, rp)| {
-                if rq.to_lowercase() == q {
+            remote.with(|(rq, rf, _, rp)| {
+                if rq.to_lowercase() == q && *rf == f {
                     for u in rp {
                         if !people.iter().any(|p| p.id == u.id) {
                             people.push(u.clone());
@@ -336,12 +343,12 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
             let mut messages: Vec<Message> = s.mention_names().with(|who| {
                 s.messages
                     .iter()
-                    .filter(|m| mostik_core::markup::plain(&m.text, who).to_lowercase().contains(&q))
+                    .filter(|m| passes(m) && mostik_core::markup::plain(&m.text, who).to_lowercase().contains(&q))
                     .cloned()
                     .collect()
             });
-            remote.with(|(rq, rm, _)| {
-                if rq.to_lowercase() == q {
+            remote.with(|(rq, rf, rm, _)| {
+                if rq.to_lowercase() == q && *rf == f {
                     for m in rm {
                         if !messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
                             messages.push(m.clone());
@@ -361,10 +368,39 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
         }
         hits.set(list);
     });
+    let me = c.snap.with_untracked(|s| s.me.clone());
+    // The filters above the results: important ones, one's own, from a person picked in the list.
+    let chips = move || {
+        let f = filter.get();
+        let mine = f.sender.as_ref() == Some(&me);
+        let other = f.sender.clone().filter(|who| who != &me).map(|who| {
+            c.snap
+                .with_untracked(|s| s.user(&who).map(|u| u.display_name.clone()))
+                .unwrap_or_default()
+        });
+        let me = me.clone();
+        view! {
+            <div class="sr-filters" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
+                <button class="sr-chip" class:on=f.important on:click=move |_| filter.update(|f| f.important = !f.important)>
+                    <Icon icon=I::Bookmark size=12/>{tr().search_important}
+                </button>
+                <button class="sr-chip" class:on=mine on:click=move |_| {
+                    let me = me.clone();
+                    filter.update(|f| f.sender = if f.sender.as_ref() == Some(&me) { None } else { Some(me) });
+                }>{tr().search_mine}</button>
+                {other.map(|name| view! {
+                    <button class="sr-chip on" title=tr().search_any_sender on:click=move |_| filter.update(|f| f.sender = None)>
+                        {tr().search_from(&name)}<Icon icon=I::X size=12/>
+                    </button>
+                })}
+            </div>
+        }
+    };
     move || {
         let q = c.search.get();
-        if q.trim().is_empty() {
-            return None;
+        // Nothing asked yet: only the filters, so a search can start from one of them.
+        if q.trim().is_empty() && filter.with(bridge::SearchFilter::is_empty) {
+            return view! { <div class="search-results">{chips.clone()}</div> }.into_any();
         }
         let list = hits.get();
         let sel = selected.get();
@@ -395,7 +431,7 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     }
                     Hit::Message(m, chat) => {
                         let author = c.snap.with_untracked(|s| s.user(&m.author).map(|u| u.display_name.clone())).unwrap_or_default();
-                        let text: String = c.snap.with(|s| s.plain(&m.text)).chars().take(120).collect();
+                        let text: String = c.snap.with(|s| super::message::message_preview(s, &m)).chars().take(120).collect();
                         view! {
                             <span class="sr-msg-head"><span class="sr-chat">{chat}</span><span class="sr-sub">{author}" · "{time::relative(m.ts)}</span></span>
                             <span class="sr-text">{text}</span>
@@ -403,19 +439,39 @@ fn SearchResults(hits: RwSignal<Vec<Hit>>, selected: RwSignal<usize>, on_pick: C
                     }
                 };
                 let msg_cls = if kind == "msg" { format!("{cls} msg") } else { cls.to_owned() };
-                view! {
-                    {title}
+                // A person's messages: the search goes on with them as the sender, without the name.
+                let from = match &picked {
+                    Hit::Person(u) => Some(u.id.clone()),
+                    _ => None,
+                };
+                let row = view! {
                     <button class=msg_cls on:mouseenter=move |_| selected.set(i) on:click=move |_| on_pick.run(picked.clone())>{body}</button>
-                }
+                };
+                let row = match from {
+                    Some(id) => view! {
+                        <div class="sr-person">
+                            {row}
+                            <button class="sr-from" title=tr().search_from_title on:mousedown=|e: ev::MouseEvent| e.prevent_default()
+                                on:click=move |_| {
+                                    filter.update(|f| f.sender = Some(id.clone()));
+                                    c.search.set(String::new());
+                                }>{tr().search_messages}</button>
+                        </div>
+                    }.into_any(),
+                    None => row.into_any(),
+                };
+                view! { {title}{row} }
             })
             .collect_view();
         let empty = hits.with(Vec::is_empty);
-        Some(view! {
+        view! {
             <div class="search-results">
+                {chips.clone()}
                 {rows}
                 {move || loading.get().then(|| view! { <div class="sr-empty">{tr().searching}</div> })}
                 {move || (empty && !loading.get()).then(|| view! { <div class="sr-empty">{tr().nothing_found}</div> })}
             </div>
-        })
+        }
+        .into_any()
     }
 }

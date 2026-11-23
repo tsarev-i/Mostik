@@ -183,6 +183,18 @@ pub struct Chat {
     /// furthest reader of a group.
     #[serde(default)]
     pub peer_seen_ts: Timestamp,
+    /// The sequence number of the latest message (`LastSeqNo`), as far as known.
+    #[serde(default)]
+    pub last_seq: u64,
+    /// How far the user has read the chat, by sequence number (`LastSeenByMeSeqNo`): a message
+    /// numbered above it is unread (see [`Snapshot::among_unread`]). Unknown for a chat that came
+    /// during the session (joined, created, found) until it is read.
+    #[serde(default)]
+    pub seen_seq: Option<u64>,
+    /// Messages numbered above [`Chat::seen_seq`] that the unread count did not take in: they came
+    /// while the chat was in view, with "Mark as read on open" off. Kept for this session only.
+    #[serde(default, skip)]
+    pub uncounted: Vec<u64>,
 }
 
 /// User's organization: a "workspace" in Slack terms.
@@ -253,6 +265,70 @@ pub struct Message {
     /// it (`ShowReadsCount`); `None` is "not known", not "nobody".
     #[serde(default)]
     pub reads: Option<Reads>,
+    /// What the message is besides text and attachments: a voice message, a sticker.
+    #[serde(default)]
+    pub media: Option<Media>,
+}
+
+/// What a message is besides text and attachments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Media {
+    Voice(Voice),
+    Sticker(Sticker),
+}
+
+impl Media {
+    /// The voice message, if this is one.
+    pub fn voice(&self) -> Option<&Voice> {
+        match self {
+            Self::Voice(v) => Some(v),
+            Self::Sticker(_) => None,
+        }
+    }
+}
+
+/// A sticker (`Plain.Sticker`): a picture from a sticker pack, on Telemost's public file host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sticker {
+    pub id: String,
+    /// The pack it is from.
+    #[serde(default)]
+    pub set_id: String,
+}
+
+impl Sticker {
+    /// The picture of the sticker at `size` (`small`, `middle`), as the web client loads it:
+    /// `https://files.messenger.yandex.net/<id>?size=<size>`, no login needed. `None` for an id
+    /// that is not a plain path, so it cannot lead elsewhere.
+    pub fn url(&self, size: &str) -> Option<String> {
+        let plain = |s: &str| {
+            !s.is_empty()
+                && s != "."
+                && s != ".."
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        };
+        (self.id.len() <= 256 && self.id.split('/').all(plain) && plain(size))
+            .then(|| format!("https://files.messenger.yandex.net/{}?size={size}", self.id))
+    }
+}
+
+/// A voice message (`Plain.Voice`): an Ogg Opus file with what Telemost made of the speech.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Voice {
+    /// File identifier in the Messenger storage (`FileInfo.Id2`), as an attachment's.
+    pub file_id: String,
+    /// Length in milliseconds.
+    pub duration_ms: u64,
+    /// Loudness along the message, from 0 to 15, for the bars.
+    #[serde(default)]
+    pub waveform: Vec<u8>,
+    /// The speech as text; empty when there is none.
+    #[serde(default)]
+    pub text: String,
+    /// The text is what Telemost recognized (`WasRecognized`); otherwise it is still at it.
+    #[serde(default)]
+    pub recognized: bool,
 }
 
 /// Who read one of the user's own messages, as far as Telemost says (`ReadsCount`,
@@ -412,6 +488,18 @@ pub struct FollowedThread {
     /// Time and number of the last reply: the order of the list and the read marker.
     pub last_ts: Timestamp,
     pub last_seq: u64,
+    /// How far the user has read the thread, by the replies' sequence numbers; unknown for a
+    /// thread followed during the session until it is read.
+    #[serde(default)]
+    pub seen_seq: Option<u64>,
+}
+
+impl FollowedThread {
+    /// The thread is read up to its last known reply.
+    pub fn read(&mut self) {
+        self.unread = 0;
+        self.seen_seq = Some(self.seen_seq.unwrap_or(0).max(self.last_seq));
+    }
 }
 
 /// Forwarded message: author, time, text and attachments of the original.
@@ -432,6 +520,9 @@ pub struct Forwarded {
     /// only forwarded message from the same chat or thread, or as a quoted one.
     #[serde(default)]
     pub reply: bool,
+    /// What the original is besides text and attachments: a voice message, a sticker.
+    #[serde(default)]
+    pub media: Option<Media>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,7 +531,20 @@ pub enum AttachmentKind {
     File,
 }
 
-/// Message attachment: a gallery image or a file.
+/// A Unicode bidi control: it reorders the text around it, so a file sent as
+/// `invoice<U+202E>fdp.exe` would show as `invoiceexe.pdf` (#42).
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// A file name from someone else's message as it is shown and saved: its bidi controls become
+/// `_`, so the name reads as it really is (`invoice_fdp.exe`).
+pub fn plain_file_name(name: &str) -> String {
+    name.chars().map(|c| if is_bidi_control(c) { '_' } else { c }).collect()
+}
+
+/// Message attachment: a gallery image or a file. The name has no bidi controls (see
+/// [`plain_file_name`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub kind: AttachmentKind,
@@ -553,6 +657,51 @@ impl Snapshot {
                 .filter(|u| u.has_name())
                 .map(|u| (u.id.0.clone(), u.display_name.clone()))
                 .collect(),
+        }
+    }
+
+    /// Whether message `ts` of `chat` (a reply in thread `parent`, or a feed message) is still
+    /// unread, so that deleting it lowers the `unread` count: a message deleted after it came must
+    /// not leave the chat unread with nothing to read in it. Telemost counts unread messages by
+    /// sequence numbers, so it is the message numbered above `seen_seq`, the user's read position
+    /// ([`Chat::seen_seq`], [`FollowedThread::seen_seq`]), unless the count never took it in
+    /// (`uncounted`, see [`Chat::uncounted`]): neither a gap in the loaded history (after a
+    /// reconnection) nor earlier deletions change that. Own messages, ones without a number and
+    /// any message while the position is unknown never count: a wrong guess would take the count
+    /// of a message that is still unread.
+    pub fn among_unread(
+        &self,
+        chat: &ChatId,
+        parent: Option<Timestamp>,
+        ts: Timestamp,
+        unread: u32,
+        seen_seq: Option<u64>,
+        uncounted: &[u64],
+    ) -> bool {
+        let Some(seen_seq) = seen_seq else {
+            return false;
+        };
+        self.messages
+            .iter()
+            .find(|m| &m.chat_id == chat && m.thread_parent == parent && m.ts == ts)
+            .is_some_and(|m| unread > 0 && m.seq_no > seen_seq && m.author != self.me && !uncounted.contains(&m.seq_no))
+    }
+
+    /// The user has read `chat` to its end: no unread messages or mentions, and the read position
+    /// at the latest message known, loaded or counted.
+    pub fn read_chat(&mut self, chat: &ChatId) {
+        let loaded = self
+            .messages
+            .iter()
+            .filter(|m| &m.chat_id == chat && m.thread_parent.is_none())
+            .map(|m| m.seq_no)
+            .max()
+            .unwrap_or(0);
+        if let Some(ch) = self.chats.iter_mut().find(|ch| &ch.id == chat) {
+            ch.unread = 0;
+            ch.mentions = 0;
+            ch.seen_seq = Some(ch.seen_seq.unwrap_or(0).max(ch.last_seq).max(loaded));
+            ch.uncounted.clear();
         }
     }
 
@@ -737,6 +886,9 @@ impl Chat {
             pinned: None,
             organizations: vec![],
             peer_seen_ts: 0,
+            last_seq: 0,
+            seen_seq: None,
+            uncounted: vec![],
         }
     }
 
@@ -842,6 +994,84 @@ mod chat_icon_tests {
 mod tests {
     use super::*;
 
+    /// A sticker's picture is on the public host, by an id that is a plain path, never elsewhere.
+    #[test]
+    fn a_sticker_picture_stays_on_the_public_host() {
+        let sticker = |id: &str| Sticker {
+            id: id.into(),
+            set_id: String::new(),
+        };
+        assert_eq!(
+            sticker("ab12/c-d_e.1").url("middle").as_deref(),
+            Some("https://files.messenger.yandex.net/ab12/c-d_e.1?size=middle")
+        );
+        for bad in ["", "../x", "a/../b", "a//b", "a?b", "a#b", "a b", "@evil.com/x", "a%2F"] {
+            assert_eq!(sticker(bad).url("middle"), None, "{bad}");
+        }
+        assert_eq!(sticker("a").url("x&y=1"), None);
+    }
+
+    #[test]
+    fn a_deleted_message_counts_as_unread_by_the_read_position() {
+        let chat = ChatId("c".into());
+        let msg = |ts: Timestamp, seq: u64, author: &str, parent: Option<Timestamp>| Message {
+            thread_parent: parent,
+            seq_no: seq,
+            ..crate::mock::msg("c", ts, author, "")
+        };
+        let mut s = snapshot(vec![Chat {
+            last_seq: 5,
+            seen_seq: Some(3),
+            unread: 2,
+            ..Chat::new(chat.clone(), ChatKind::Group { public: false })
+        }]);
+        s.messages = vec![
+            msg(100, 1, "anna", None),
+            msg(200, 2, "me", None),
+            msg(300, 3, "anna", None),
+            msg(400, 4, "boris", None),
+            msg(500, 5, "anna", None),
+            msg(600, 1, "anna", Some(100)),
+        ];
+        let seen = |s: &Snapshot| s.chats[0].seen_seq;
+        assert!(s.among_unread(&chat, None, 500, 2, seen(&s), &[]));
+        assert!(s.among_unread(&chat, None, 400, 2, seen(&s), &[]));
+        assert!(!s.among_unread(&chat, None, 300, 2, seen(&s), &[]));
+        assert!(!s.among_unread(&chat, None, 500, 0, seen(&s), &[]));
+        // Own messages never count.
+        assert!(!s.among_unread(&chat, None, 200, 5, Some(0), &[]));
+        // Deleting unread ones one by one, the newest first, keeps the others unread (the
+        // count going down does not move the read position).
+        s.messages.retain(|m| m.ts != 500);
+        assert!(s.among_unread(&chat, None, 400, 1, seen(&s), &[]));
+        // One the count did not take in (it came while the chat was in view) is no unread one.
+        assert!(!s.among_unread(&chat, None, 400, 1, seen(&s), &[4]));
+        // A gap after a reconnection does not matter either.
+        s.messages.retain(|m| m.ts != 300);
+        assert!(!s.among_unread(&chat, None, 100, 1, seen(&s), &[]));
+        // An unknown position (a chat that came during the session) says nothing.
+        assert!(!s.among_unread(&chat, None, 400, 1, None, &[]));
+        // A thread reply counts against the thread's own position.
+        assert!(s.among_unread(&chat, Some(100), 600, 1, Some(0), &[]));
+        assert!(!s.among_unread(&chat, Some(100), 600, 1, Some(1), &[]));
+        // Read to the end: the position goes to the latest known number.
+        s.read_chat(&chat);
+        assert_eq!((s.chats[0].unread, s.chats[0].mentions, seen(&s)), (0, 0, Some(5)));
+        assert!(!s.among_unread(&chat, None, 400, 1, seen(&s), &[]));
+    }
+
+    #[test]
+    fn file_names_lose_their_bidi_controls() {
+        assert_eq!(plain_file_name("invoice\u{202E}fdp.exe"), "invoice_fdp.exe");
+        assert_eq!(
+            plain_file_name("a\u{200E}b\u{200F}c\u{202A}d\u{2066}e\u{2069}f\u{061C}.txt"),
+            "a_b_c_d_e_f_.txt"
+        );
+        // Letters of right-to-left scripts and the joiners stay.
+        assert_eq!(plain_file_name("שלום\u{200D}.txt"), "שלום\u{200D}.txt");
+        assert_eq!(plain_file_name("Отчёт.pdf"), "Отчёт.pdf");
+    }
+
     fn snapshot(chats: Vec<Chat>) -> Snapshot {
         Snapshot {
             me: UserId("me".into()),
@@ -927,6 +1157,7 @@ mod tests {
             forwarded: vec![],
             call: None,
             system: None,
+            media: None,
             reads: None,
         }
     }
@@ -942,6 +1173,7 @@ mod tests {
             attachments: vec![],
             quote: None,
             reply,
+            media: None,
         };
         let with = |forwarded| Message {
             forwarded,

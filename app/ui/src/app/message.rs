@@ -68,6 +68,7 @@ pub(super) fn MessageRow(
         })
     });
     let attachments = Memo::new(move |_| msg.with(|m| m.attachments.clone()));
+    let media = Memo::new(move |_| msg.with(|m| m.media.clone()));
     let reactions = Memo::new(move |_| msg.with(|m| m.reactions.clone()));
     let thread = Memo::new(move |_| msg.with(|m| m.thread.clone().filter(|t| !in_thread && t.reply_count > 0)));
     let mentions_me = {
@@ -328,6 +329,7 @@ pub(super) fn MessageRow(
                     } else {
                         body.clone().into_any()
                     }}
+                    {move || media.get().map(|m| view! { <MediaView media=m/> })}
                     {forwarded_blocks}
                     {move || view! { <Attachments list=attachments.get()/> }}
                     {reactions_view}
@@ -369,13 +371,40 @@ pub(super) fn MessageRow(
 }
 
 /// The hover tip of a message's time, as in Slack: the full date and time and, for an own message
-/// someone has read, "(read)" after it. When and by how many it was read does not matter.
+/// someone has read, "(read)" after it in a direct chat. In a group, how many of the members have
+/// read it and the latest of them by name, as the reaction tip names people (#49): in a chat of
+/// 200, one reader and everyone must not look the same. Telemost names the latest three only.
 fn time_tip_text(c: Ctx, msg: &Message) -> String {
     let full = time::full(msg.ts);
-    if read_status(c, msg).is_some_and(|r| r.is_read()) {
-        format!("{full} {}", tr().read_mark)
-    } else {
-        full
+    match read_status(c, msg) {
+        Some(receipts::ReadStatus::Read {
+            count,
+            recent,
+            everyone,
+        }) if count > 0 => {
+            let (others, names) = c.snap.with_untracked(|s| {
+                // The members besides the author; unknown while the chat has not said.
+                let others = s
+                    .chat(&msg.chat_id)
+                    .map(|ch| ch.member_count.saturating_sub(1))
+                    .filter(|n| *n > 0);
+                let names: Vec<String> = recent
+                    .iter()
+                    .filter(|u| **u != s.me)
+                    .filter_map(|u| s.user(u).filter(|u| u.has_name()).map(|u| u.display_name.clone()))
+                    .collect();
+                (others, names)
+            });
+            let mut tip = format!("{full}\n{}", tr().read_by(count, others, everyone));
+            if !names.is_empty() {
+                let more = count.saturating_sub(names.len() as u32);
+                tip.push('\n');
+                tip.push_str(&tr().readers(&names, more));
+            }
+            tip
+        }
+        Some(r) if r.is_read() => format!("{full} {}", tr().read_mark),
+        _ => full,
     }
 }
 
@@ -474,19 +503,60 @@ pub(super) fn ForwardedBlock(f: Forwarded) -> impl IntoView {
                 <Avatar user=face size=20/><b>{name}</b>
             </button>
             {text.map(|text| view! { <div class="msg-text">{text}</div> })}
+            {f.media.clone().map(|m| view! { <MediaView media=m/> })}
             <Attachments list=f.attachments.clone()/>
             {footer}
         </div>
     }
 }
 
-/// A message in one line of a list: its text without markup, else the text of the message it
-/// forwards (`↪ …`), else 📎 for attachments alone.
+/// What a message is besides text and attachments, in the feed: a voice message, a sticker.
+#[component]
+fn MediaView(media: Media) -> impl IntoView {
+    match media {
+        Media::Voice(v) => view! { <super::voice::VoiceCard voice=v/> }.into_any(),
+        Media::Sticker(s) => view! { <StickerView sticker=s/> }.into_any(),
+    }
+}
+
+/// A sticker: its picture from Telemost's public host, unless pictures are off in the feed (then
+/// the word). The browser demo has no pictures and shows a stand-in.
+#[component]
+fn StickerView(sticker: Sticker) -> impl IntoView {
+    let c = ctx();
+    let inline = c.settings.with_untracked(|s| s.inline_media);
+    match sticker.url("middle") {
+        Some(src) if c.live && inline => {
+            view! { <img class="sticker" src=src alt=tr().sticker title=tr().sticker loading="lazy"/> }.into_any()
+        }
+        _ if !c.live => view! { <div class="sticker stand-in" title=tr().sticker>"🐱"</div> }.into_any(),
+        _ => view! { <div class="msg-text sticker-word">{format!("🖼 {}", tr().sticker)}</div> }.into_any(),
+    }
+}
+
+/// [`Media`] in one line of a list.
+fn media_line(media: &Media) -> String {
+    match media {
+        Media::Voice(v) => super::voice::voice_line(v),
+        Media::Sticker(_) => tr().sticker.to_owned(),
+    }
+}
+
+/// A message in one line of a list: its text without markup, else what it is (a voice message),
+/// else the text of the message it forwards or what that one is (`↪ …`), else 📎 for attachments
+/// alone.
 pub(super) fn message_preview(s: &Snapshot, m: &Message) -> String {
     let text = s.plain(&m.text);
     match m.forwarded.first() {
         _ if !text.is_empty() => text,
-        Some(f) => format!("↪ {}", s.plain(&f.text)),
+        _ if m.media.is_some() => m.media.as_ref().map(media_line).unwrap_or_default(),
+        Some(f) => {
+            let text = s.plain(&f.text);
+            match &f.media {
+                Some(media) if text.is_empty() => format!("↪ {}", media_line(media)),
+                _ => format!("↪ {text}"),
+            }
+        }
         None if !m.attachments.is_empty() => "📎".to_owned(),
         None => text,
     }
@@ -498,15 +568,19 @@ pub(super) fn delete_preview(s: &Snapshot, m: &Message) -> Option<String> {
     let text = s.plain(&m.text);
     let line = if !text.trim().is_empty() {
         text
+    } else if let Some(media) = &m.media {
+        media_line(media)
     } else if let Some(a) = attachment_line(&m.attachments) {
         a
     } else {
         let f = m.forwarded.first()?;
         let text = s.plain(&f.text);
-        let what = if text.trim().is_empty() {
-            attachment_line(&f.attachments)?
-        } else {
+        let what = if !text.trim().is_empty() {
             text
+        } else if let Some(media) = &f.media {
+            media_line(media)
+        } else {
+            attachment_line(&f.attachments)?
         };
         format!("↪ {what}")
     };
@@ -522,11 +596,18 @@ fn attachment_line(attachments: &[Attachment]) -> Option<String> {
 }
 
 /// One line about the message a reply answers: the quoted fragment, else its text without markup,
-/// else its first attachment; a deleted message has none of them.
-fn reply_snippet(s: &Snapshot, quote: Option<&str>, text: &str, attachments: &[Attachment]) -> String {
+/// else what it is (a voice message), else its first attachment; a deleted message has none of them.
+fn reply_snippet(
+    s: &Snapshot,
+    quote: Option<&str>,
+    text: &str,
+    media: Option<&Media>,
+    attachments: &[Attachment],
+) -> String {
     let line = match quote.filter(|q| !q.trim().is_empty()) {
         Some(q) => q.to_owned(),
         None if !text.trim().is_empty() => s.mention_names().with(|who| mostik_core::markup::plain(text, who)),
+        None if media.is_some() => media.map(media_line).unwrap_or_default(),
         None => attachment_line(attachments).unwrap_or_else(|| tr().reply_deleted.to_owned()),
     };
     line.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -549,7 +630,7 @@ fn ReplyBlock(f: Forwarded, chat: ChatId, thread_parent: Option<Timestamp>) -> i
     let (name, line) = c.snap.with_untracked(|s| {
         (
             reply_author(s, &f.author, &f.author_name),
-            reply_snippet(s, f.quote.as_deref(), &f.text, &f.attachments),
+            reply_snippet(s, f.quote.as_deref(), &f.text, f.media.as_ref(), &f.attachments),
         )
     });
     let ts = f.ts;
@@ -572,7 +653,7 @@ pub(super) fn ReplyBar(target: ops::ReplyTarget) -> impl IntoView {
     let (name, line) = c.snap.with_untracked(|s| {
         (
             reply_author(s, &m.author, ""),
-            reply_snippet(s, target.quote.as_deref(), &m.text, &m.attachments),
+            reply_snippet(s, target.quote.as_deref(), &m.text, m.media.as_ref(), &m.attachments),
         )
     });
     let label = if target.quote.is_some() {
@@ -735,8 +816,18 @@ pub(super) fn message_menu_items(
             <div class="menu-sep"></div>
         }
     });
+    // Who read an own group message, as far as Telemost tells it.
+    let audience = matches!(read_status(c, &msg), Some(receipts::ReadStatus::Read { .. })).then(|| {
+        let m = msg.clone();
+        view! {
+            <button class="menu-icon-item" on:click=move |_| { close_menus(c); c.audience.set(Some(m.clone())); }>
+                {menu_item(I::Check, tr().who_read)}
+            </button>
+        }
+    });
     view! {
         {replies}
+        {audience}
         // Telemost does not make your own message unread, so the item is only for others' messages.
         {(!in_thread && !mine).then(|| view! {
             <button class="menu-icon-item" on:click=move |_| { close_menus(c); ops::mark_unread(c, &m_unread); }>
@@ -749,8 +840,10 @@ pub(super) fn message_menu_items(
         // With text of the message selected, the selection, as "Copy" does anywhere else.
         <button class="menu-icon-item" on:click=move |_| {
             close_menus(c);
-            copy(quote.clone().unwrap_or_else(|| {
-                c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0))
+            copy(quote.clone().unwrap_or_else(|| match msg.media.as_ref().and_then(Media::voice) {
+                // A voice message's text is what Telemost made of the speech.
+                Some(v) if msg.text.is_empty() => v.text.clone(),
+                _ => c.snap.with_untracked(|s| s.mention_names().with(|who| mostik_core::markup::ids_to_names(&msg.text, who).0)),
             }));
         }>{menu_item(I::Copy, tr().copy_text)}</button>
         <div class="menu-sep"></div>
@@ -802,6 +895,7 @@ mod tests {
             forwarded,
             call: None,
             system: None,
+            media: None,
             reads: None,
         }
     }
@@ -826,6 +920,7 @@ mod tests {
             text: text.into(),
             attachments,
             quote: None,
+            media: None,
             reply: false,
         }
     }
@@ -845,6 +940,17 @@ mod tests {
         assert_eq!(preview(message("", vec![], fwd)).as_deref(), Some("↪ 📄 report.pdf"));
         assert_eq!(preview(message("", vec![], vec![forwarded("", vec![])])), None);
         assert_eq!(preview(message("", vec![], vec![])), None);
+        // A forwarded voice message or sticker has no text: it says what it is.
+        let sticker = Forwarded {
+            media: Some(Media::Sticker(Sticker {
+                id: "a".into(),
+                set_id: "b".into(),
+            })),
+            ..forwarded("", vec![])
+        };
+        let line = format!("↪ {}", tr().sticker);
+        assert_eq!(preview(message("", vec![], vec![sticker.clone()])), Some(line.clone()));
+        assert_eq!(message_preview(&s, &message("", vec![], vec![sticker])), line);
     }
 }
 
@@ -880,7 +986,8 @@ pub(super) fn Outbox(#[prop(optional)] in_thread: bool) -> impl IntoView {
 fn failure_reason(why: &str) -> String {
     let known = [
         (mostik_ipc::cmd::UPLOAD_STALLED, tr().upload_stalled),
-        (mostik_ipc::cmd::FILE_TOO_LARGE, tr().file_too_large),
+        (mostik_ipc::cmd::DISK_FULL, tr().disk_full),
+        (mostik_ipc::cmd::DISK_FILE_TOO_LARGE, tr().disk_file_too_large),
     ];
     known
         .into_iter()
@@ -888,7 +995,7 @@ fn failure_reason(why: &str) -> String {
             let name = why.strip_suffix(theirs)?.strip_suffix(": ")?;
             Some(format!("{name}: {ours}"))
         })
-        .unwrap_or_else(|| why.to_owned())
+        .unwrap_or_else(|| ops::in_own_words(why))
 }
 
 /// One [`ops::Outgoing`] message.
@@ -932,7 +1039,7 @@ fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
                 <div class="file-card out-file" class:cancelled=f.cancelled>
                     <span class="file-icon">{if f.file.image { "🖼" } else { "📄" }}</span>
                     <span class="file-meta">
-                        <span class="file-name">{f.file.name.clone()}</span>
+                        <span class="file-name">{mostik_core::plain_file_name(&f.file.name)}</span>
                         <span class="file-size">{if f.cancelled { tr().upload_cancelled.to_owned() } else { human_size(f.file.size) }}</span>
                     </span>
                     {if can_cancel {

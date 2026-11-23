@@ -234,8 +234,6 @@ pub struct Tr {
     pub link_text: &'static str,
     pub link_address: &'static str,
     pub link_remove: &'static str,
-    pub hint_shift_enter: &'static str,
-    pub hint_ctrl_enter: &'static str,
     pub send: &'static str,
     pub thread: &'static str,
     // Avatar menu
@@ -288,7 +286,9 @@ pub struct Tr {
     pub cancel_upload: &'static str,
     pub upload_cancelled: &'static str,
     pub upload_stalled: &'static str,
-    pub file_too_large: &'static str,
+    pub disk_full: &'static str,
+    pub disk_file_too_large: &'static str,
+    pub message_too_long: &'static str,
     pub only_in_app_calls: &'static str,
     pub only_in_app_notifications: &'static str,
     pub saved_to: &'static str,
@@ -306,6 +306,8 @@ pub struct Tr {
     pub s_custom: &'static str,
     pub reset_order: &'static str,
     pub hide_chat: &'static str,
+    /// The grey dot of a muted chat with unread messages.
+    pub unread_muted: &'static str,
     pub create_section: &'static str,
     pub new_section_title: &'static str,
     pub new_section_item: &'static str,
@@ -337,7 +339,6 @@ pub struct Tr {
     pub p_advanced: &'static str,
     pub p_accessibility: &'static str,
     pub p_zoom: &'static str,
-    pub p_zoom_hint: &'static str,
     pub p_notify_about: &'static str,
     pub p_notify_all: &'static str,
     pub p_notify_direct: &'static str,
@@ -362,6 +363,9 @@ pub struct Tr {
     pub p_clock24: &'static str,
     pub p_language: &'static str,
     pub p_language_hint: &'static str,
+    pub p_spelling: &'static str,
+    pub p_spell_check: &'static str,
+    pub p_spell_check_hint: &'static str,
     pub p_when_view: &'static str,
     pub p_read_on_open: &'static str,
     pub p_leave_unread: &'static str,
@@ -369,7 +373,30 @@ pub struct Tr {
     pub p_show_read_receipts: &'static str,
     pub p_enter_to: &'static str,
     pub p_enter_send: &'static str,
-    pub p_enter_newline: &'static str,
+    // Preferences → Keyboard shortcuts
+    pub p_shortcuts: &'static str,
+    pub sc_general: &'static str,
+    pub sc_message_field: &'static str,
+    pub sc_search: &'static str,
+    pub sc_close: &'static str,
+    pub sc_zoom_in: &'static str,
+    pub sc_zoom_out: &'static str,
+    pub sc_zoom_reset: &'static str,
+    /// macOS only: Cmd+W hides the main window.
+    pub sc_hide_window: &'static str,
+    pub sc_quit: &'static str,
+    pub sc_send: &'static str,
+    pub sc_newline: &'static str,
+    pub sc_edit_last: &'static str,
+    pub sc_change_hint: &'static str,
+    /// In place of the keys while new ones are being pressed.
+    pub sc_press: &'static str,
+    pub sc_press_title: &'static str,
+    pub sc_change: &'static str,
+    pub sc_reset: &'static str,
+    pub sc_reset_all: &'static str,
+    /// The keys are the system's or a text field's: copy, paste, undo, Enter.
+    pub sc_system: &'static str,
     pub theme_names: [&'static str; 7],
     // Profile
     pub profile: &'static str,
@@ -423,6 +450,24 @@ pub struct Tr {
     pub only_in_app_files: &'static str,
     pub remove_file: &'static str,
     pub uploading: &'static str,
+    pub send_silent: &'static str,
+    pub voice_message: &'static str,
+    pub who_read: &'static str,
+    pub search_important: &'static str,
+    pub search_mine: &'static str,
+    pub search_any_sender: &'static str,
+    pub search_from_title: &'static str,
+    pub loading: &'static str,
+    pub nobody_read: &'static str,
+    pub err_who_read: &'static str,
+    pub sticker: &'static str,
+    pub voice_recognizing: &'static str,
+    pub voice_more: &'static str,
+    pub voice_play: &'static str,
+    pub voice_pause: &'static str,
+    pub err_voice: &'static str,
+    pub send_with_sound: &'static str,
+    pub send_important: &'static str,
     pub new_message: &'static str,
     pub new_message_to: &'static str,
     pub write_to_colleague: &'static str,
@@ -656,8 +701,6 @@ pub static RU: Tr = Tr {
     link_text: "Текст",
     link_address: "Ссылка",
     link_remove: "Убрать ссылку",
-    hint_shift_enter: "Shift+Enter: новая строка",
-    hint_ctrl_enter: "Ctrl+Enter: отправить",
     send: "Отправить",
     thread: "Тред",
     active: "В сети",
@@ -707,7 +750,9 @@ pub static RU: Tr = Tr {
     cancel_upload: "Отменить загрузку",
     upload_cancelled: "отменено",
     upload_stalled: "загрузка остановилась, проверьте соединение",
-    file_too_large: "файл больше 50 МБ, Телемост такие не принимает",
+    disk_full: "на Яндекс Диске не хватает места, файлы больше 50 МБ отправляются через него",
+    disk_file_too_large: "Яндекс Диск не принимает такие большие файлы, а файлы больше 50 МБ отправляются через него",
+    message_too_long: "сообщение слишком длинное",
     only_in_app_calls: "Созвоны работают только в приложении",
     only_in_app_notifications: "Уведомления работают только в приложении",
     saved_to: "Сохранено",
@@ -725,6 +770,7 @@ pub static RU: Tr = Tr {
     s_custom: "Свой порядок",
     reset_order: "Сбросить свой порядок",
     hide_chat: "Скрыть из списка",
+    unread_muted: "Есть непрочитанные, уведомления выключены",
     create_section: "Создать раздел",
     new_section_title: "Новый раздел",
     new_section_item: "Новый раздел…",
@@ -755,7 +801,6 @@ pub static RU: Tr = Tr {
     p_advanced: "Дополнительно",
     p_accessibility: "Специальные возможности",
     p_zoom: "Масштаб",
-    p_zoom_hint: "Ctrl+= увеличивает, Ctrl+- уменьшает, Ctrl+0 возвращает исходный размер.",
     p_notify_about: "Уведомлять меня о…",
     p_notify_all: "Всех новых сообщениях",
     p_notify_direct: "Личных сообщениях и упоминаниях",
@@ -778,6 +823,9 @@ pub static RU: Tr = Tr {
     p_clock24: "24-часовой формат",
     p_language: "Язык",
     p_language_hint: "Язык интерфейса Мостика. Переписка не переводится.",
+    p_spelling: "Орфография",
+    p_spell_check: "Проверять орфографию в сообщениях",
+    p_spell_check_hint: "Слова с ошибками подчёркиваются, исправления в меню по правому клику. Русский и английский проверяются всегда, вместе с языком системы.",
     p_when_view: "Когда я открываю чат",
     p_read_on_open: "Отмечать его прочитанным",
     p_leave_unread: "Оставлять непрочитанные сообщения непрочитанными",
@@ -785,7 +833,26 @@ pub static RU: Tr = Tr {
     p_show_read_receipts: "Показывать отметки о прочтении",
     p_enter_to: "При наборе сообщения Enter…",
     p_enter_send: "Отправляет сообщение",
-    p_enter_newline: "Начинает новую строку (отправка по Ctrl+Enter)",
+    p_shortcuts: "Горячие клавиши",
+    sc_general: "Общие",
+    sc_message_field: "Поле сообщения",
+    sc_search: "Поиск и переход к беседе",
+    sc_close: "Закрыть меню или окно",
+    sc_zoom_in: "Увеличить масштаб",
+    sc_zoom_out: "Уменьшить масштаб",
+    sc_zoom_reset: "Исходный масштаб",
+    sc_hide_window: "Скрыть окно, Мостик остаётся в Dock",
+    sc_quit: "Выйти из Мостика",
+    sc_send: "Отправить сообщение",
+    sc_newline: "Новая строка",
+    sc_edit_last: "Изменить своё последнее сообщение (в пустом поле)",
+    sc_change_hint: "Нажмите на сочетание, чтобы назначить другое",
+    sc_press: "Нажмите клавиши…",
+    sc_press_title: "Esc: отмена",
+    sc_change: "Назначить другое сочетание",
+    sc_reset: "Вернуть стандартное",
+    sc_reset_all: "Вернуть все стандартные",
+    sc_system: "Это сочетание занято системой",
     theme_names: ["Сумерки", "Мох", "Вечер", "Полночь", "Лес", "Океан", "Закат"],
     profile: "Профиль",
     message_button: "Сообщение",
@@ -843,6 +910,24 @@ pub static RU: Tr = Tr {
     only_in_app_files: "Отправка файлов работает только в приложении",
     remove_file: "Убрать файл",
     uploading: "Загружаем…",
+    send_silent: "Отправить без звука",
+    voice_message: "Голосовое сообщение",
+    who_read: "Кто прочитал",
+    search_important: "Важные",
+    search_mine: "Мои",
+    search_any_sender: "Искать от всех",
+    search_from_title: "Искать сообщения этого человека",
+    loading: "Загружаем…",
+    nobody_read: "Пока никто не прочитал",
+    err_who_read: "Не удалось узнать, кто прочитал",
+    sticker: "Стикер",
+    voice_recognizing: "Распознавание…",
+    voice_more: "Ещё",
+    voice_play: "Слушать",
+    voice_pause: "Пауза",
+    err_voice: "Не удалось воспроизвести голосовое сообщение",
+    send_with_sound: "Отправить со звуком",
+    send_important: "Отправить как важное",
     new_message: "Новое сообщение",
     new_message_to: "Кому:",
     write_to_colleague: "Написать коллеге",
@@ -1076,8 +1161,6 @@ pub static EN: Tr = Tr {
     link_text: "Text",
     link_address: "Link",
     link_remove: "Remove link",
-    hint_shift_enter: "Shift+Enter to add a new line",
-    hint_ctrl_enter: "Ctrl+Enter to send",
     send: "Send now",
     thread: "Thread",
     active: "Active",
@@ -1127,7 +1210,9 @@ pub static EN: Tr = Tr {
     cancel_upload: "Cancel upload",
     upload_cancelled: "cancelled",
     upload_stalled: "the upload stopped, check the connection",
-    file_too_large: "the file is larger than 50 MB, Telemost does not take such files",
+    disk_full: "there is no room left on Yandex Disk, files over 50 MB are sent through it",
+    disk_file_too_large: "Yandex Disk does not take files this large, and files over 50 MB are sent through it",
+    message_too_long: "the message is too long",
     only_in_app_calls: "Calls work only in the desktop app",
     only_in_app_notifications: "Notifications work only in the desktop app",
     saved_to: "Saved",
@@ -1145,6 +1230,7 @@ pub static EN: Tr = Tr {
     s_custom: "Custom",
     reset_order: "Reset custom order",
     hide_chat: "Hide from sidebar",
+    unread_muted: "Unread messages, notifications are off",
     create_section: "Create section",
     new_section_title: "New section",
     new_section_item: "New section…",
@@ -1175,7 +1261,6 @@ pub static EN: Tr = Tr {
     p_advanced: "Advanced",
     p_accessibility: "Accessibility",
     p_zoom: "Zoom",
-    p_zoom_hint: "Use Ctrl+= to zoom in, Ctrl+- to zoom out and Ctrl+0 to reset.",
     p_notify_about: "Notify me about…",
     p_notify_all: "All new messages",
     p_notify_direct: "Direct messages and mentions",
@@ -1198,6 +1283,9 @@ pub static EN: Tr = Tr {
     p_clock24: "Show times with 24-hour clock",
     p_language: "Language",
     p_language_hint: "The language of the Mostik interface. Messages are not translated.",
+    p_spelling: "Spelling",
+    p_spell_check: "Check spelling in messages",
+    p_spell_check_hint: "Misspelled words are underlined, with corrections in the right-click menu. Russian and English are always checked, along with the system language.",
     p_when_view: "When I view a chat",
     p_read_on_open: "Mark it as read",
     p_leave_unread: "Leave unseen messages unread",
@@ -1205,7 +1293,26 @@ pub static EN: Tr = Tr {
     p_show_read_receipts: "Show read receipts",
     p_enter_to: "When writing a message, press Enter to…",
     p_enter_send: "Send the message",
-    p_enter_newline: "Start a new line (use Ctrl+Enter to send)",
+    p_shortcuts: "Keyboard shortcuts",
+    sc_general: "General",
+    sc_message_field: "Message field",
+    sc_search: "Search and jump to a conversation",
+    sc_close: "Close a menu or dialog",
+    sc_zoom_in: "Zoom in",
+    sc_zoom_out: "Zoom out",
+    sc_zoom_reset: "Actual size",
+    sc_hide_window: "Hide the window, Mostik stays in the Dock",
+    sc_quit: "Quit Mostik",
+    sc_send: "Send the message",
+    sc_newline: "New line",
+    sc_edit_last: "Edit your last message (in an empty field)",
+    sc_change_hint: "Click a shortcut to change it",
+    sc_press: "Press keys…",
+    sc_press_title: "Esc to cancel",
+    sc_change: "Change the shortcut",
+    sc_reset: "Restore default",
+    sc_reset_all: "Restore all defaults",
+    sc_system: "This shortcut belongs to the system",
     theme_names: ["Dusk", "Moss", "Twilight", "Midnight", "Forest", "Ocean", "Sunset"],
     profile: "Profile",
     message_button: "Message",
@@ -1263,6 +1370,24 @@ pub static EN: Tr = Tr {
     only_in_app_files: "Sending files works only in the desktop app",
     remove_file: "Remove file",
     uploading: "Uploading…",
+    send_silent: "Send without sound",
+    voice_message: "Voice message",
+    who_read: "Who read it",
+    search_important: "Important",
+    search_mine: "Mine",
+    search_any_sender: "Search from anyone",
+    search_from_title: "Search this person's messages",
+    loading: "Loading…",
+    nobody_read: "Nobody has read it yet",
+    err_who_read: "Couldn't find out who read it",
+    sticker: "Sticker",
+    voice_recognizing: "Transcribing…",
+    voice_more: "More",
+    voice_play: "Play",
+    voice_pause: "Pause",
+    err_voice: "Couldn't play the voice message",
+    send_with_sound: "Send with sound",
+    send_important: "Send as important",
     new_message: "New message",
     new_message_to: "To:",
     write_to_colleague: "Message a colleague",
@@ -1536,6 +1661,65 @@ impl Tr {
         }
     }
 
+    /// How many have read an own group message: of `others`, the members besides the author, when
+    /// known (#49).
+    pub fn read_by(&self, count: u32, others: Option<u32>, everyone: bool) -> String {
+        match (self.lang, others) {
+            (Lang::Ru, _) if everyone => "Прочитали все".to_owned(),
+            (Lang::En, _) if everyone => "Read by everyone".to_owned(),
+            (Lang::Ru, Some(of)) => format!("Прочитали {} из {of}", count.min(of)),
+            (Lang::En, Some(of)) => format!("Read by {} of {of}", count.min(of)),
+            (Lang::Ru, None) => format!("Прочитали: {count}"),
+            (Lang::En, None) => format!("Read by {count}"),
+        }
+    }
+
+    /// The search filter for messages from `name`.
+    pub fn search_from(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("От: {name}"),
+            Lang::En => format!("From: {name}"),
+        }
+    }
+
+    /// The heading of the readers in "Who read it".
+    pub fn read_count(&self, n: usize) -> String {
+        match self.lang {
+            Lang::Ru => format!("Прочитали: {n}"),
+            Lang::En => format!("Read by {n}"),
+        }
+    }
+
+    /// The heading of the reactions in "Who read it".
+    pub fn reaction_count(&self, n: usize) -> String {
+        match self.lang {
+            Lang::Ru => format!("Реакции: {n}"),
+            Lang::En => format!("Reactions: {n}"),
+        }
+    }
+
+    /// A long message of which only the first parts went: the rest is back in the field, and why it
+    /// did not go.
+    pub fn partly_sent(&self, why: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("ушло не всё, остаток в поле ({why})"),
+            Lang::En => format!("not all of it went, the rest is in the field ({why})"),
+        }
+    }
+
+    /// The latest readers of an own group message by name, and how many more: "Anna, Oleg, Ivan
+    /// and 9 more".
+    pub fn readers(&self, names: &[String], more: u32) -> String {
+        let mut who = names.to_vec();
+        if more > 0 {
+            who.push(match self.lang {
+                Lang::Ru => format!("ещё {more}"),
+                Lang::En => format!("{more} more"),
+            });
+        }
+        self.list(&who)
+    }
+
     /// "Anna, Boris and Vera".
     pub fn list(&self, names: &[String]) -> String {
         let and = match self.lang {
@@ -1646,7 +1830,55 @@ impl Tr {
         }
     }
 
-    /// The "Update" button tooltip and the line above it in Preferences.
+    /// The hint under a message field when Enter sends: the keys that start a new line.
+    pub fn hint_newline(&self, keys: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{keys}: новая строка"),
+            Lang::En => format!("{keys} to add a new line"),
+        }
+    }
+
+    /// The hint under a message field when Enter starts a new line: the keys that send.
+    pub fn hint_send(&self, keys: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{keys}: отправить"),
+            Lang::En => format!("{keys} to send"),
+        }
+    }
+
+    /// Preferences → Accessibility: the zoom keys.
+    pub fn zoom_hint(&self, zoom_in: &str, zoom_out: &str, reset: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("{zoom_in} увеличивает, {zoom_out} уменьшает, {reset} возвращает исходный размер"),
+            Lang::En => format!("Use {zoom_in} to zoom in, {zoom_out} to zoom out and {reset} to reset"),
+        }
+    }
+
+    /// New keys for a shortcut that has none of Ctrl, Alt or Cmd: they would fire while typing.
+    pub fn sc_need_modifier(&self, mac: bool) -> String {
+        let keys = if mac { "⌘, ⌥ или ⌃" } else { "Ctrl или Alt" };
+        match self.lang {
+            Lang::Ru => format!("Добавьте к клавише {keys}"),
+            Lang::En => format!("Hold {} with the key", keys.replace("или", "or")),
+        }
+    }
+
+    /// New keys for a shortcut that are already another action's.
+    pub fn sc_taken(&self, action: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Уже назначено: «{action}»"),
+            Lang::En => format!("Already used for {action}"),
+        }
+    }
+
+    /// Preferences → Advanced: Enter starts a new line, and these keys send.
+    pub fn enter_newline(&self, send: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Начинает новую строку (отправка по {send})"),
+            Lang::En => format!("Start a new line (use {send} to send)"),
+        }
+    }
+
     /// "Delete :name:?" in the emoji picker.
     pub fn emoji_delete_ask(&self, name: &str) -> String {
         match self.lang {
@@ -1655,6 +1887,7 @@ impl Tr {
         }
     }
 
+    /// The "Update" button tooltip and the line above it in Preferences.
     pub fn update_available(&self, v: &str) -> String {
         match self.lang {
             Lang::Ru => format!("Доступна новая версия {v}. Мостик установит её и перезапустится."),
@@ -1740,6 +1973,20 @@ mod tests {
         );
         assert_eq!(EN.members_count(1), "1 member");
         assert_eq!(EN.members_count(21), "21 members");
+    }
+
+    #[test]
+    fn group_reads() {
+        assert_eq!(RU.read_by(12, Some(199), false), "Прочитали 12 из 199");
+        assert_eq!(EN.read_by(12, Some(199), false), "Read by 12 of 199");
+        assert_eq!(RU.read_by(5, Some(5), true), "Прочитали все");
+        assert_eq!(EN.read_by(3, None, false), "Read by 3");
+        // A count above a stale member count.
+        assert_eq!(EN.read_by(7, Some(5), false), "Read by 5 of 5");
+        let names = ["Anna".to_owned(), "Oleg".to_owned(), "Ivan".to_owned()];
+        assert_eq!(EN.readers(&names, 9), "Anna, Oleg, Ivan and 9 more");
+        assert_eq!(RU.readers(&names, 9), "Anna, Oleg, Ivan и ещё 9");
+        assert_eq!(EN.readers(&names[..1], 0), "Anna");
     }
 
     #[test]

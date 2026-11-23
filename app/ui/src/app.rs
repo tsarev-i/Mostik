@@ -19,6 +19,7 @@ mod state;
 mod text;
 mod topbar;
 mod views;
+mod voice;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -37,25 +38,26 @@ pub(crate) use avatar::{Avatar, display_title};
 pub(crate) use field::{place_caret, selection, wrap_selection};
 pub(crate) use org::current_org;
 pub use org::org_key;
-pub use state::{ChatTab, Ctx, Phase, ViewMode, enter_sends};
+pub use state::{ChatTab, Ctx, Phase, ViewMode};
+pub(crate) use voice::ended as voice_ended;
 
 use avatar::HoverTip;
 use composer::Composer;
 use dialogs::{
-    AboutDialog, BrowseChannelsDialog, ChannelDetailsDialog, CreateChannelDialog, DeleteDialog, FolderDialog,
-    ForwardDialog, LeaveDialog, NewMessageDialog,
+    AboutDialog, AudienceDialog, BrowseChannelsDialog, ChannelDetailsDialog, CreateChannelDialog, DeleteDialog,
+    FolderDialog, ForwardDialog, LeaveDialog, NewMessageDialog,
 };
 use feed::{ChannelHeader, MessageList, PinsView};
 use files::FilesView;
 use menus::ContextMenu;
 use org::ORG_KEY;
-use preferences::{AddEmojiDialog, PrefTab, PreferencesDialog};
+use preferences::{AddEmojiDialog, PrefTab, PreferencesDialog, UpdateActions};
 use profile::{ProfilePane, StatusDialog};
 use rail::Rail;
 use sidebar::{Sidebar, chat_drag_to, chat_drop};
 use state::{
-    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, ctx, empty_snapshot, set_locale, store_width,
-    stored_width,
+    Drag, MAIN_MIN, RAIL_W, SIDEBAR_RANGE, THREAD_MIN, apply_settings, close_menus, ctx, empty_snapshot, set_locale,
+    store_width, stored_width,
 };
 use topbar::TopBar;
 use views::{DraftsView, ThreadPane, ThreadsView};
@@ -160,6 +162,9 @@ pub fn App() -> impl IntoView {
         folder_edit: RwSignal::new(None),
         custom: RwSignal::new(vec![]),
         adding_emoji: RwSignal::new(false),
+        audience: RwSignal::new(None),
+        voice: RwSignal::new(None),
+        voice_clock: RwSignal::new(0.0),
     };
     provide_context(c);
     apply_settings(&c.settings.get_untracked());
@@ -176,6 +181,7 @@ pub fn App() -> impl IntoView {
         }
     });
     set_interval(move || c.now.set(js_sys::Date::now()), Duration::from_secs(1));
+    set_interval(move || voice::tick(c), Duration::from_millis(100));
     // A notification pause ends by itself: Telemost says nothing then.
     Effect::new(move |_| {
         let now = (c.now.get() * 1000.0) as Timestamp;
@@ -381,16 +387,25 @@ pub fn App() -> impl IntoView {
         chat_drop(c);
     });
 
-    // Ctrl+= / Ctrl+- / Ctrl+0 zoom, as in Slack.
+    // Ctrl+= / Ctrl+- / Ctrl+0 zoom, Ctrl+, opens Preferences, as in Slack; Cmd on macOS. Or the
+    // keys the user gave them (see [`crate::keys`]).
     scoped_window_listener(ev::keydown, move |e| {
-        if !(e.ctrl_key() || e.meta_key()) || e.alt_key() {
+        use crate::keys::{Action, pressed};
+        if pressed(&e, Action::Preferences) {
+            e.prevent_default();
+            close_menus(c);
+            c.me_menu.set(false);
+            c.prefs.set(true);
             return;
         }
-        let next = match e.key().as_str() {
-            "=" | "+" => Some(true),
-            "-" | "_" => Some(false),
-            "0" => None,
-            _ => return,
+        let next = if pressed(&e, Action::ZoomIn) {
+            Some(true)
+        } else if pressed(&e, Action::ZoomOut) {
+            Some(false)
+        } else if pressed(&e, Action::ZoomReset) {
+            None
+        } else {
+            return;
         };
         e.prevent_default();
         c.settings
@@ -433,6 +448,8 @@ pub fn App() -> impl IntoView {
             c.confirm_delete.set(None);
         } else if c.confirm_leave.with_untracked(Option::is_some) {
             c.confirm_leave.set(None);
+        } else if c.audience.with_untracked(Option::is_some) {
+            c.audience.set(None);
         } else if c.folder_edit.with_untracked(Option::is_some) {
             c.folder_edit.set(None);
         } else if c.browsing.get_untracked() {
@@ -512,6 +529,7 @@ pub fn App() -> impl IntoView {
         {move || c.creating_channel.get().map(|to| view! { <CreateChannelDialog to=to/> })}
         {move || c.new_message.get().then(|| view! { <NewMessageDialog/> })}
         {move || c.forwarding.get().map(|m| view! { <ForwardDialog msg=m/> })}
+        {move || c.audience.get().map(|m| view! { <AudienceDialog msg=m/> })}
         {move || c.browsing.get().then(|| view! { <BrowseChannelsDialog/> })}
         {move || c.status_dialog.get().then(|| view! { <StatusDialog/> })}
         {move || c.details.get().map(|tab| view! { <ChannelDetailsDialog initial=tab/> })}
@@ -581,6 +599,12 @@ fn LoginScreen(reason: Option<String>) -> impl IntoView {
                 <p class="login-note">
                     {tr().login_note_unofficial}
                 </p>
+                // Sign-in may break after a change on the Telemost side, while the fix is already
+                // out: the update does not need a session (#47).
+                <div class="login-update">
+                    <p>{tr().version(env!("CARGO_PKG_VERSION"))}</p>
+                    <UpdateActions login=true/>
+                </div>
             </div>
         </div>
     }

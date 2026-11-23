@@ -74,6 +74,25 @@ pub struct SendArgs {
     pub text: String,
     pub thread: Option<Timestamp>,
     pub reply: Option<ReplyRef>,
+    /// How the message goes: without a sound, as important.
+    #[serde(default)]
+    pub options: SendOptions,
+}
+
+/// How a new message goes, as the buttons by the official client's field set it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendOptions {
+    /// The members get it without a sound or a notification.
+    #[serde(default)]
+    pub silent: bool,
+    /// It goes marked as important, as "Mark as important" marks a sent one.
+    #[serde(default)]
+    pub important: bool,
+    /// It goes on from a message just sent (files after the text of a reply): none of its
+    /// messages is the first, which alone carries the two above.
+    #[serde(default)]
+    pub follows: bool,
 }
 
 /// What a sent message replies to: message `ts` of the chat (or thread) it is sent to, with the
@@ -170,6 +189,14 @@ pub struct UrlArgs {
     pub url: String,
 }
 
+/// Plays voice message `file_id` (`Voice.FileInfo.Id2`) from `from_ms` milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceArgs {
+    pub file_id: String,
+    pub from_ms: u64,
+}
+
 /// A file taken off the message, as [`crate::PendingFile::path`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -188,19 +215,30 @@ pub struct SendFilesArgs {
     /// The UI's id of this sending: its progress comes as [`crate::UploadProgress`] with it, and
     /// [`CancelUpload`] names it.
     pub upload: Option<String>,
+    /// How the messages go: without a sound, as important.
+    #[serde(default)]
+    pub options: SendOptions,
 }
 
 /// How [`SendFiles`] fails when an upload stops moving, after `<file name>: `. The UI shows it
 /// in its own words.
 pub const UPLOAD_STALLED: &str = "the upload stopped, check the connection";
 
-/// The largest file Telemost takes in a message: a larger one is refused with `HTTP 400 bad_file`
-/// after the whole of it has gone. (Its own client sends those through Yandex Disk.)
+/// The largest file the Messenger storage takes: a larger one is refused with `HTTP 400 bad_file`
+/// after the whole of it has gone, so it goes through the user's Yandex Disk, as in the web client.
 pub const MAX_UPLOAD: u64 = 50 * 1024 * 1024;
 
-/// How [`SendFiles`] fails for a file over [`MAX_UPLOAD`], after `<file name>: `, before anything is
-/// uploaded. The UI shows it in its own words.
-pub const FILE_TOO_LARGE: &str = "the file is larger than 50 MB";
+/// How [`SendFiles`] fails, after `<file name>: `, when Yandex Disk has no room for a file over
+/// [`MAX_UPLOAD`]. The UI shows it in its own words.
+pub const DISK_FULL: &str = "there is no room left on Yandex Disk";
+
+/// How [`SendFiles`] fails, after `<file name>: `, when a file is larger than Yandex Disk takes.
+/// The UI shows it in its own words.
+pub const DISK_FILE_TOO_LARGE: &str = "the file is larger than Yandex Disk takes";
+
+/// How sending or editing a message fails when Telemost refuses its text as too big
+/// (`message too big`). The UI shows it in its own words.
+pub const MESSAGE_TOO_LONG: &str = "the message is too long";
 
 /// One file of a sending going on: [`CancelUpload`] stops its upload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,12 +274,33 @@ pub struct DirectorySearchArgs {
     pub org: Option<u64>,
 }
 
-/// Server-side message search in the listed chats.
+/// Server-side message search: in all the chats of organization `org` at once, or, without one
+/// (an account with no organization), in each of the listed chats.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageSearchArgs {
     pub query: String,
     pub chat_ids: Vec<ChatId>,
+    #[serde(default)]
+    pub org: Option<u64>,
+    #[serde(default)]
+    pub filter: SearchFilter,
+}
+
+/// What found messages must be besides having the words: from whom, marked important.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilter {
+    #[serde(default)]
+    pub sender: Option<UserId>,
+    #[serde(default)]
+    pub important: bool,
+}
+
+impl SearchFilter {
+    pub fn is_empty(&self) -> bool {
+        self.sender.is_none() && !self.important
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -349,6 +408,8 @@ pub struct PrefsArgs {
     pub sound: String,
     /// The tray icon on Linux and Windows; macOS always shows the white one as a template.
     pub tray_icon: TrayIcon,
+    /// Check spelling in the message fields (#50): on Linux WebKitGTK does it only when asked.
+    pub spell_check: bool,
 }
 
 /// The tray icon from "Preferences".
@@ -499,9 +560,11 @@ commands! {
     MarkThreadRead = "mark_thread_read", ThreadReadArgs => ();
 
     // Messages.
-    SendMessage = "send_message", SendArgs => Message;
+    SendMessage = "send_message", SendArgs => crate::SentText;
     EditMessage = "edit_message", EditArgs => ();
     DeleteMessage = "delete_message", MsgArgs => ();
+    /// Who read an own message and who reacted to it.
+    MessageAudience = "message_audience", MsgArgs => crate::Audience;
     SetReaction = "set_reaction", ReactionArgs => ();
     SetImportant = "set_important", ImportantArgs => ();
     MarkUnread = "mark_unread", UnreadArgs => ();
@@ -521,6 +584,10 @@ commands! {
     SendFiles = "send_files", SendFilesArgs => Vec<Message>;
     /// Stops the upload of one file of a sending: the rest goes without it.
     CancelUpload = "cancel_upload", UploadFileArgs => ();
+    /// Plays a voice message, stopping the one playing; returns its length in milliseconds.
+    PlayVoice = "play_voice", VoiceArgs => u64;
+    /// Stops the voice message playing; returns where it stopped, in milliseconds.
+    StopVoice = "stop_voice", () => Option<u64>;
 
     // People and chats.
     UserProfile = "user_profile", GuidArgs => mostik_core::UserProfile;
@@ -601,9 +668,15 @@ mod tests {
                 ts: 5,
                 quote: Some("q".into()),
             }),
+            options: SendOptions {
+                silent: true,
+                important: false,
+                follows: false,
+            },
         };
         let expected = json!({
             "chatId": "c1", "text": "hi", "thread": null, "reply": { "ts": 5, "quote": "q" },
+            "options": { "silent": true, "important": false, "follows": false },
         });
         assert_eq!(serde_json::to_value(&args).unwrap(), expected);
         assert_eq!(serde_json::from_value::<SendArgs>(expected).unwrap(), args);
@@ -613,10 +686,11 @@ mod tests {
             lang: "en".into(),
             sound: "bell".into(),
             tray_icon: TrayIcon::App,
+            spell_check: true,
         };
         pinned(
             args,
-            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell", "trayIcon": "app" }),
+            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell", "trayIcon": "app", "spellCheck": true }),
         );
         let args = ThreadReadArgs {
             chat_id: ChatId("c1".into()),
@@ -648,6 +722,7 @@ mod tests {
                 text: "hi".into(),
                 thread: None,
                 reply: None,
+                options: SendOptions::default(),
             }
         );
         let reply: ReplyRef = serde_json::from_value(json!({ "ts": 5 })).unwrap();
@@ -692,8 +767,14 @@ mod tests {
             MessageSearchArgs {
                 query: "hi".into(),
                 chat_ids: vec![ChatId("c1".into()), ChatId("c2".into())],
+                org: Some(7),
+                filter: SearchFilter {
+                    sender: Some(UserId("u1".into())),
+                    important: true,
+                },
             },
-            json!({ "query": "hi", "chatIds": ["c1", "c2"] }),
+            json!({ "query": "hi", "chatIds": ["c1", "c2"], "org": 7,
+                "filter": { "sender": "u1", "important": true } }),
         );
         pinned(
             StartCallArgs {
@@ -827,8 +908,10 @@ mod tests {
                 paths: vec!["/tmp/a.png".into()],
                 text: "".into(),
                 upload: Some("up1".into()),
+                options: SendOptions::default(),
             },
-            json!({ "chatId": "c1", "thread": 5, "paths": ["/tmp/a.png"], "text": "", "upload": "up1" }),
+            json!({ "chatId": "c1", "thread": 5, "paths": ["/tmp/a.png"], "text": "", "upload": "up1",
+                "options": { "silent": false, "important": false, "follows": false } }),
         );
         pinned(
             UploadFileArgs {

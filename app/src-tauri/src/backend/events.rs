@@ -121,11 +121,13 @@ pub(super) fn handle_incoming(
             if let LiveEvent::Upsert { message, mentioned, .. } = &ev {
                 learn_mentions(app, shared, message, mentioned);
             }
-            if let LiveEvent::Upsert { message, author, .. } = &ev
+            if let LiveEvent::Upsert {
+                message, author, alert, ..
+            } = &ev
                 && !message.is_ringing()
-                && reply_notifies_now(app, shared, message, author.as_ref())
+                && reply_notifies_now(app, shared, message, author.as_ref(), *alert)
             {
-                notify(app, shared, message, author.as_ref());
+                notify(app, shared, message, author.as_ref(), *alert);
             }
             let _ = app.emit(EVENT, &ev);
         }
@@ -259,11 +261,12 @@ async fn add_chat(app: AppHandle, shared: Arc<StdMutex<Shared>>, chat_id: String
             message,
             author,
             mentioned,
+            alert,
         } = &ev
         {
             learn_mentions(&app, &shared, message, mentioned);
-            if reply_notifies_now(&app, &shared, message, author.as_ref()) {
-                notify(&app, &shared, message, author.as_ref());
+            if reply_notifies_now(&app, &shared, message, author.as_ref(), *alert) {
+                notify(&app, &shared, message, author.as_ref(), *alert);
             }
         }
     }

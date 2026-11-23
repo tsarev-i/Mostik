@@ -34,6 +34,7 @@ pub mod prefs;
 pub mod presence;
 pub mod service;
 pub mod threads;
+pub mod voice;
 
 pub(crate) use calls::open_call;
 pub(crate) use connection::{probing, write_probe};
@@ -90,7 +91,7 @@ struct Shared {
     not_followed: BTreeSet<(String, Timestamp)>,
     /// Replies in threads of unknown standing that wait for the list to be fetched again, to
     /// notify about the ones the user turns out to follow.
-    thread_wait: Vec<(Message, Option<User>)>,
+    thread_wait: Vec<(Message, Option<User>, mostik_core::event::Alert)>,
     /// Mostik service chats (see [`service`]): their events never reach the UI.
     service: BTreeSet<String>,
     /// The service chats of the chat list, for the sync after the connection.
@@ -259,6 +260,18 @@ async fn live(state: &AppState) -> Result<Arc<Live>, String> {
         .ok_or_else(|| "No connection to Telemost, reconnecting…".to_owned())
 }
 
+/// How a message of a sending goes, as the web client sends them: the first as the user chose
+/// (without a sound, important), the later ones (the rest of a long text, more files) with no
+/// notification and not marked, so one sending does not ring many times.
+fn sending_options(options: mostik_ipc::cmd::SendOptions, first: bool) -> (mostik_yandex::wire::Notify, bool) {
+    use mostik_yandex::wire;
+    match (first, options.silent) {
+        (false, _) => (wire::Notify::Silent, false),
+        (true, true) => (wire::Notify::Muted, options.important),
+        (true, false) => (wire::Notify::Default, options.important),
+    }
+}
+
 /// Chat the request goes to: the chat itself or the thread chat of message `thread`.
 fn target_chat(chat_id: &str, thread: Option<Timestamp>) -> Result<String, String> {
     match thread {
@@ -277,10 +290,29 @@ async fn push(live: &Live, client_message: Value) -> Result<Value, String> {
         .ok_or("Telemost has not issued a subscription yet, try again in a couple of seconds")?;
     let req = PushRequest::new(&sub, &live.user_agent, client_message).with_origin(live.service_id.as_deref());
     let resp = live.xiva.call("push", &req, 20).await.map_err(|e| e.to_string())?;
-    if resp.get("MessageInfo").is_none() && resp.get("Status").and_then(Value::as_u64).unwrap_or(0) != 0 {
-        return Err(format!("Telemost rejected the request: {}", shape(&resp)));
+    rejection(&resp).map_or(Ok(resp), Err)
+}
+
+/// Why Telemost refused a push, from its answer: an error status with no message info, or with an
+/// empty one, as for a text too big (`{"Status":13,"Details":"message too big: …","MessageInfo":{}}`).
+fn rejection(resp: &Value) -> Option<String> {
+    let status = resp.get("Status").and_then(Value::as_u64).unwrap_or(0);
+    let info = resp.get("MessageInfo");
+    let empty = info.and_then(Value::as_object).is_some_and(serde_json::Map::is_empty);
+    let refused = (info.is_none() && status != 0) || (empty && status > 1);
+    if !refused {
+        return None;
     }
-    Ok(resp)
+    let details = resp.get("Details").and_then(Value::as_str).unwrap_or_default();
+    if details.starts_with("message too big") {
+        return Some(mostik_ipc::cmd::MESSAGE_TOO_LONG.to_owned());
+    }
+    let why = if details.is_empty() {
+        shape(resp).to_string()
+    } else {
+        details.to_owned()
+    };
+    Some(format!("Telemost rejected the request: {why}"))
 }
 
 /// Sends a client message over the current connection.
@@ -366,6 +398,38 @@ fn rpc_ok(v: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first message of a sending goes as the user chose, the rest quietly and unmarked.
+    #[test]
+    fn only_the_first_message_of_a_sending_carries_its_options() {
+        use mostik_ipc::cmd::SendOptions;
+        use mostik_yandex::wire::Notify;
+        let both = SendOptions {
+            silent: true,
+            important: true,
+            follows: false,
+        };
+        assert_eq!(sending_options(both, true), (Notify::Muted, true));
+        assert_eq!(sending_options(both, false), (Notify::Silent, false));
+        assert_eq!(sending_options(SendOptions::default(), true), (Notify::Default, false));
+        assert_eq!(sending_options(SendOptions::default(), false), (Notify::Silent, false));
+    }
+
+    /// A text too big comes back with an error status and an empty message info: the send fails
+    /// with the known phrase, not with a missing message time. A sent message passes.
+    #[test]
+    fn a_push_refused_as_too_big_fails() {
+        let too_big = json!({"Status": 13, "Details": "message too big: 100476", "MessageInfo": {}});
+        assert_eq!(rejection(&too_big).as_deref(), Some(mostik_ipc::cmd::MESSAGE_TOO_LONG));
+        let other = json!({"Status": 13, "Details": "no rights", "MessageInfo": {}});
+        assert_eq!(
+            rejection(&other).as_deref(),
+            Some("Telemost rejected the request: no rights")
+        );
+        let sent = json!({"Status": 1, "MessageInfo": {"TimestampMcs": 1, "SeqNo": 2}});
+        assert_eq!(rejection(&sent), None);
+        assert!(rejection(&json!({"Status": 13})).is_some());
+    }
 
     /// Two fetches of a new direct chat may end in any order: a later one that did not learn the
     /// name leaves the name the other one recorded.

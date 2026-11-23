@@ -75,7 +75,7 @@ pub(super) fn MeMenu() -> impl IntoView {
                                     <span>{tr().pause_for}</span><Icon icon=I::ChevronRight size=14/>
                                 </button>
                                 <Show when=move || pause_open.get()>
-                                    <div class="me-submenu">
+                                    <div class="me-submenu" node_ref=super::menus::fitted_submenu()>
                                         {pauses().into_iter().map(|(secs, label)| view! {
                                             <button on:click=move |_| set(Availability::DoNotDisturb, Some(secs))>{label}</button>
                                         }).collect_view()}

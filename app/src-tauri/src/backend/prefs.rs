@@ -43,8 +43,12 @@ pub fn set_preferences(
         lang,
         sound,
         tray_icon,
+        spell_check,
     } = args;
     let english = lang == "en";
+    if let Some(main) = app.get_webview_window("main") {
+        crate::webview::spell_check(&main, spell_check);
+    }
     let mut restyle = false;
     if let Ok(mut p) = state.prefs.lock() {
         restyle = p.tray_icon != tray_icon;

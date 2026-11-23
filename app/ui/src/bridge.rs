@@ -2,11 +2,11 @@
 
 pub use mostik_core::event::LiveEvent;
 use mostik_core::{ChatId, Message, Timestamp, UnreadBadge, UserId};
-pub use mostik_ipc::cmd::ReplyRef;
 use mostik_ipc::cmd::{self, Command};
+pub use mostik_ipc::cmd::{ReplyRef, SearchFilter, SendOptions};
 pub use mostik_ipc::{
-    Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent, Threads,
-    UpdateStatus, UploadProgress,
+    Audience, Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent,
+    Threads, UpdateStatus, UploadProgress, VoiceEnded,
 };
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
@@ -152,17 +152,20 @@ pub async fn mark_thread_read(chat_id: &str, parent: Timestamp, ts: Timestamp, s
     call::<cmd::MarkThreadRead>(args).await
 }
 
+/// Sends a text message; a text longer than Telemost takes goes as several messages, in order.
 pub async fn send_message(
     chat_id: &str,
     text: &str,
     thread: Option<Timestamp>,
     reply: Option<ReplyRef>,
-) -> Result<Message, String> {
+    options: cmd::SendOptions,
+) -> Result<mostik_ipc::SentText, String> {
     let args = cmd::SendArgs {
         chat_id: ChatId(chat_id.into()),
         text: text.into(),
         thread,
         reply,
+        options,
     };
     call::<cmd::SendMessage>(args).await
 }
@@ -255,8 +258,37 @@ pub async fn set_preferences(s: &crate::settings::Settings) -> Result<(), String
             TrayIcon::White => cmd::TrayIcon::White,
             TrayIcon::App => cmd::TrayIcon::App,
         },
+        spell_check: s.spell_check,
     };
     call::<cmd::SetPreferences>(args).await
+}
+
+/// Who read own message `m` and who reacted to it.
+pub async fn message_audience(m: &Message) -> Result<Audience, String> {
+    call::<cmd::MessageAudience>(cmd::MsgArgs {
+        chat_id: m.chat_id.clone(),
+        ts: m.ts,
+        thread: m.thread_parent,
+    })
+    .await
+}
+
+/// A voice message played to its end, or that could not play: [`VoiceEnded`].
+pub const VOICE_EVENT: &str = "mostik://voice";
+
+/// Plays voice message `file_id` from `from_ms`, stopping the one playing; returns its length in
+/// milliseconds.
+pub async fn play_voice(file_id: &str, from_ms: u64) -> Result<u64, String> {
+    call::<cmd::PlayVoice>(cmd::VoiceArgs {
+        file_id: file_id.into(),
+        from_ms,
+    })
+    .await
+}
+
+/// Stops the voice message playing; returns where it stopped, in milliseconds.
+pub async fn stop_voice() -> Result<Option<u64>, String> {
+    call::<cmd::StopVoice>(()).await
 }
 
 /// Plays a notification sound (the backend plays them).
@@ -404,6 +436,7 @@ pub async fn send_files(
     paths: Vec<String>,
     text: &str,
     upload: Option<&str>,
+    options: cmd::SendOptions,
 ) -> Result<Vec<Message>, String> {
     let args = cmd::SendFilesArgs {
         chat_id: ChatId(chat_id.into()),
@@ -411,6 +444,7 @@ pub async fn send_files(
         paths,
         text: text.into(),
         upload: upload.map(str::to_owned),
+        options,
     };
     call::<cmd::SendFiles>(args).await
 }
@@ -454,10 +488,19 @@ pub async fn open_url(url: &str) -> Result<(), String> {
 }
 
 /// Server-side message search in the listed chats.
-pub async fn search_messages(query: &str, chat_ids: Vec<String>) -> Result<FoundMessages, String> {
+/// Messages with `query` that pass `filter`: in all the chats of organization `org` at once, or,
+/// without one, in each of `chat_ids`.
+pub async fn search_messages(
+    query: &str,
+    chat_ids: Vec<String>,
+    org: Option<u64>,
+    filter: SearchFilter,
+) -> Result<FoundMessages, String> {
     let args = cmd::MessageSearchArgs {
         query: query.into(),
         chat_ids: chat_ids.into_iter().map(ChatId).collect(),
+        org,
+        filter,
     };
     call::<cmd::SearchMessages>(args).await
 }

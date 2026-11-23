@@ -144,6 +144,12 @@ pub struct Ctx {
     pub custom: RwSignal<Vec<mostik_core::custom_emoji::EmojiSet>>,
     /// The "Add custom emoji" dialog, opened from the emoji picker as in Slack.
     pub adding_emoji: RwSignal<bool>,
+    /// The own message whose readers and reactions the "Who read it" window shows.
+    pub audience: RwSignal<Option<Message>>,
+    /// The voice message playing or paused.
+    pub voice: RwSignal<Option<super::voice::VoiceNow>>,
+    /// Ticks while a voice message plays, to move its player on.
+    pub voice_clock: RwSignal<f64>,
 }
 
 /// What the section name dialog does.
@@ -324,6 +330,7 @@ pub(super) fn set_locale(lang: Lang, clock24: bool) {
 /// Language, time format, theme and colour mode go onto the document root.
 pub(super) fn apply_settings(st: &Settings) {
     set_locale(st.lang, st.clock24);
+    crate::keys::set_custom(&st.shortcuts);
     if let Some(root) = document().document_element() {
         let _ = root.set_attribute("lang", st.lang.code());
         let _ = root.set_attribute("data-mode", if st.dark() { "dark" } else { "light" });
@@ -342,7 +349,7 @@ pub(super) fn apply_settings(st: &Settings) {
     }
 }
 
-/// Enter sends the message (otherwise Ctrl+Enter), as in "Preferences → Advanced".
+/// Enter sends the message (otherwise Ctrl+Enter, Cmd+Enter on macOS), as in "Preferences → Advanced".
 pub fn enter_sends() -> bool {
     use_context::<Ctx>().is_none_or(|c| c.settings.with_untracked(|s| s.enter_sends))
 }

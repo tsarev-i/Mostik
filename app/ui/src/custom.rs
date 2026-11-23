@@ -11,7 +11,18 @@ use crate::bridge;
 /// The set of the organization the user is in now.
 pub fn current(c: Ctx) -> Option<EmojiSet> {
     let org = current_org(c).map(|o| o.id);
-    c.custom.with(|sets| ce::set_for(sets, &[], org).cloned())
+    with_sets(c, |sets| ce::set_for(sets, &[], org).cloned())
+}
+
+/// Reads the emoji sets, tracked only where something tracks them: views built once (the row of a
+/// message being sent) and event handlers read them too, without the "outside a reactive tracking
+/// context" warning, as [`current_org`] does.
+fn with_sets<T>(c: Ctx, f: impl FnOnce(&Vec<EmojiSet>) -> T) -> T {
+    if leptos::reactive::graph::Observer::get().is_some() {
+        c.custom.with(f)
+    } else {
+        c.custom.with_untracked(f)
+    }
 }
 
 /// The set that applies in `chat`: its organization's, else the current one's.
@@ -20,7 +31,7 @@ pub fn for_chat(c: Ctx, chat: &ChatId) -> Option<EmojiSet> {
         .snap
         .with_untracked(|s| s.chat(chat).map(|ch| ch.organizations.clone()).unwrap_or_default());
     let org = current_org(c).map(|o| o.id);
-    c.custom.with(|sets| ce::set_for(sets, &orgs, org).cloned())
+    with_sets(c, |sets| ce::set_for(sets, &orgs, org).cloned())
 }
 
 /// The custom emoji of reaction `kind` in `chat`.

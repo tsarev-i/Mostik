@@ -140,6 +140,10 @@ pub fn subscribe(c: Ctx) {
             super::upload_progress(c, p)
         })
         .await;
+        bridge::listen(bridge::VOICE_EVENT, move |v: bridge::VoiceEnded| {
+            crate::app::voice_ended(c, &v.file_id)
+        })
+        .await;
         bridge::listen(bridge::RING_EVENT, move |ring: Option<bridge::Ring>| {
             heard.set(true);
             c.ring.set(ring)

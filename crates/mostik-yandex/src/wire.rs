@@ -93,6 +93,33 @@ pub fn importance(chat_id: &str, ts: u64, important: bool) -> Value {
     json!({ "UpdateFields": { "ChatId": chat_id, "Timestamp": ts, "ImportanceFlag": if important { 1 } else { 2 } } })
 }
 
+/// What [`list_reactions`] asks for: the web client's `ListReactionsMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListMode {
+    /// Who reacted (`ONLY_REACTIONS`).
+    Reactions = 0,
+    /// Who read it (`ONLY_READ_TIMESTAMPS`).
+    Reads = 1,
+}
+
+/// Xiva `list_reactions`: a page of up to `limit` people who reacted to or read message `ts` of
+/// `chat_id`, newest first; the next page is the one before the time of the last of them
+/// (`MaxTimestamp`). The answer has `UserReactions [{UserInfo, Type, Timestamp}]` and `UserReads
+/// [{UserInfo, Timestamp}]`.
+pub fn list_reactions(chat_id: &str, ts: u64, limit: u32, before: Option<u64>, mode: ListMode) -> Value {
+    let mut v = json!({
+        "RequestId": request_id(),
+        "ChatId": chat_id,
+        "Timestamp": ts,
+        "Limit": limit,
+        "Mode": mode as u32,
+    });
+    if let Some(before) = before {
+        v["MaxTimestamp"] = json!(before);
+    }
+    v
+}
+
 /// Marks the chat as read up to message `ts` with number `seq_no`.
 pub fn seen_marker(chat_id: &str, ts: u64, seq_no: u64) -> Value {
     json!({ "SeenMarker": { "ChatId": chat_id, "Timestamp": ts, "SeqNo": seq_no } })
@@ -122,6 +149,34 @@ pub fn plain_text(chat_id: &str, payload_id: &str, text: &str) -> Value {
         plain["MentionedUserIds"] = json!(mentioned);
     }
     json!({ "Plain": plain })
+}
+
+pub use mostik_core::split::{MESSAGE_LIMIT, TEXT_MAX};
+
+/// How the members learn of a new message: the web client's `NotificationBehaviour`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notify {
+    /// As each member's settings say (`DEFAULT`, left out).
+    Default,
+    /// A notification without a sound (`MUTED`): the "Without sound" button of the field.
+    Muted,
+    /// No notification at all (`SILENT`): the later parts of a long message.
+    Silent,
+}
+
+/// A new message from [`plain_text`], [`reply`] or [`gallery`] with how it notifies
+/// (`NotificationBehaviour`, next to `Plain`) and marked important or not (`Plain.IsImportant`),
+/// as the web client sends it.
+pub fn with_options(mut msg: Value, notify: Notify, important: bool) -> Value {
+    if important {
+        msg["Plain"]["IsImportant"] = json!(true);
+    }
+    match notify {
+        Notify::Default => {}
+        Notify::Muted => msg["NotificationBehaviour"] = json!(3),
+        Notify::Silent => msg["NotificationBehaviour"] = json!(1),
+    }
+    msg
 }
 
 /// Reply to message `source_ts` of chat `source_chat`, as the web client sends it: the original as
@@ -183,6 +238,11 @@ pub fn file_info(file_id: &str, name: &str, size: usize) -> Value {
     json!({ "Id2": file_id, "Name": name, "Size": size })
 }
 
+/// [`file_info`] of a file sent through Yandex Disk: `Source` 1, the web client's `FileSource.DISK`.
+pub fn disk_file_info(file_id: &str, name: &str, size: u64) -> Value {
+    json!({ "Id2": file_id, "Name": name, "Size": size, "Source": 1 })
+}
+
 /// Gallery item: an uploaded image of `width` × `height` pixels with its [`file_info`].
 pub fn gallery_image(width: u64, height: u64, info: Value) -> Value {
     json!({ "Image": { "Width": width, "Height": height, "FileInfo": info } })
@@ -227,6 +287,36 @@ pub fn end_ringing(ringing_id: &str, reason: EndRinging) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_reactions_pages_back_from_the_last_one() {
+        let first = list_reactions("0/0/c", 5, 50, None, ListMode::Reads);
+        assert_eq!(
+            (first["ChatId"].clone(), first["Timestamp"].clone()),
+            (json!("0/0/c"), json!(5))
+        );
+        assert_eq!((first["Limit"].clone(), first["Mode"].clone()), (json!(50), json!(1)));
+        assert!(first.get("MaxTimestamp").is_none() && first["RequestId"].is_string());
+        let next = list_reactions("0/0/c", 5, 50, Some(77), ListMode::Reactions);
+        assert_eq!(
+            (next["MaxTimestamp"].clone(), next["Mode"].clone()),
+            (json!(77), json!(0))
+        );
+    }
+
+    /// As the web client sends them: `NotificationBehaviour` next to `Plain`, `IsImportant` in it.
+    #[test]
+    fn options_go_where_the_web_client_puts_them() {
+        let plain = || plain_text("c1", "p1", "hi");
+        assert_eq!(with_options(plain(), Notify::Default, false), plain());
+        let muted = with_options(plain(), Notify::Muted, true);
+        assert_eq!(muted["NotificationBehaviour"], 3);
+        assert_eq!(muted["Plain"]["IsImportant"], true);
+        assert_eq!(muted["Plain"]["Text"]["MessageText"], "hi");
+        let silent = with_options(gallery("c1", "p1", vec![], "x"), Notify::Silent, false);
+        assert_eq!(silent["NotificationBehaviour"], 1);
+        assert!(silent["Plain"].get("IsImportant").is_none());
+    }
 
     #[test]
     fn ringing_answers_carry_the_ringing_id() {

@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+use mostik_core::event::Alert;
 use mostik_core::{ChatId, Message, Timestamp, User};
 use mostik_ipc::Threads;
 use mostik_ipc::cmd::{self, Args, Out, ThreadReadArgs};
@@ -74,7 +75,7 @@ async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
         let Ok(mut sh) = shared.lock() else { return };
         let waiting = std::mem::take(&mut sh.thread_wait);
         if fetched.is_some() {
-            for (m, _) in &waiting {
+            for (m, ..) in &waiting {
                 if let Some(key) = thread_key(m)
                     && !sh.followed.contains(&key)
                 {
@@ -91,12 +92,12 @@ async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
         threads.len()
     );
     let _ = app.emit(EVENT, &LiveEvent::Threads { threads, users });
-    for (m, author) in waiting {
+    for (m, author, alert) in waiting {
         let followed = shared
             .lock()
             .is_ok_and(|sh| thread_key(&m).is_some_and(|k| sh.followed.contains(&k)));
         if followed {
-            notify(&app, &shared, &m, author.as_ref());
+            notify(&app, &shared, &m, author.as_ref(), alert);
         }
     }
 }
@@ -113,6 +114,7 @@ pub(super) fn reply_notifies_now(
     shared: &Arc<StdMutex<Shared>>,
     m: &Message,
     author: Option<&User>,
+    alert: Alert,
 ) -> bool {
     let Some(key) = thread_key(m) else { return true };
     let Ok(mut sh) = shared.lock() else { return false };
@@ -129,7 +131,7 @@ pub(super) fn reply_notifies_now(
         return false;
     }
     let first = sh.thread_wait.is_empty();
-    sh.thread_wait.push((m.clone(), author.cloned()));
+    sh.thread_wait.push((m.clone(), author.cloned(), alert));
     if first {
         let (app, shared) = (app.clone(), shared.clone());
         tauri::async_runtime::spawn(async move { refresh_threads(app, shared).await });

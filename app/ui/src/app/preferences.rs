@@ -7,6 +7,7 @@ use mostik_core::*;
 
 use crate::i18n::{Lang, tr};
 use crate::icons::{I, Icon};
+use crate::keys::{self, Action};
 use crate::modal::Modal;
 use crate::settings::{
     ColorMode, NotifyMode, OWN_THEMES, Settings, SidebarFilter, SidebarSort, THEMES, TrayIcon, on_mac,
@@ -34,6 +35,17 @@ pub enum PrefTab {
 #[component]
 pub(super) fn PreferencesDialog() -> impl IntoView {
     let c = ctx();
+    // Opened by Ctrl+, while writing, the message field would keep the keys behind the dialog,
+    // and Enter would send. The caret goes too: text can still be put where it stays.
+    if let Some(field) = document()
+        .active_element()
+        .and_then(|el| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlElement>(el).ok())
+    {
+        let _ = field.blur();
+    }
+    if let Ok(Some(selection)) = window().get_selection() {
+        let _ = selection.remove_all_ranges();
+    }
     let tab = c.pref_tab;
     let tabs = [
         (PrefTab::Notifications, I::Bell, tr().p_notifications),
@@ -86,7 +98,7 @@ pub(super) fn PreferencesDialog() -> impl IntoView {
 fn radio<T: PartialEq + Copy + Send + Sync + 'static>(
     c: Ctx,
     name: &'static str,
-    label: &'static str,
+    label: impl Into<String>,
     value: T,
     get: fn(&Settings) -> T,
     set: fn(&mut Settings, T),
@@ -95,7 +107,7 @@ fn radio<T: PartialEq + Copy + Send + Sync + 'static>(
         <label class="pref-radio">
             <input type="radio" name=name prop:checked=move || c.settings.with(|s| get(s) == value)
                 on:change=move |_| c.settings.update(|s| set(s, value))/>
-            <span>{label}</span>
+            <span>{label.into()}</span>
         </label>
     }
 }
@@ -227,7 +239,10 @@ fn PrefAccessibility() -> impl IntoView {
                 <option value=z.to_string() selected=move || c.settings.with(|s| s.zoom == z)>{format!("{z}%")}</option>
             }).collect_view()}
         </select>
-        <p class="pref-hint">{tr().p_zoom_hint}</p>
+        <p class="pref-hint">{move || c.settings.with(|s| {
+            let key = |action| keys::shown(&s.shortcuts, action);
+            tr().zoom_hint(&key(Action::ZoomIn), &key(Action::ZoomOut), &key(Action::ZoomReset))
+        })}</p>
     }
 }
 
@@ -244,6 +259,10 @@ fn PrefLanguage() -> impl IntoView {
             <option value="en" selected=move || c.settings.with(|s| s.lang == Lang::En)>"English"</option>
         </select>
         <p class="pref-hint">{tr().p_language_hint}</p>
+        // As in Slack's "Language & region".
+        <h3 class="pref-h">{tr().p_spelling}</h3>
+        {checkbox(c, tr().p_spell_check, |s| s.spell_check, |s, v| s.spell_check = v)}
+        <p class="pref-hint">{tr().p_spell_check_hint}</p>
     }
 }
 
@@ -286,6 +305,22 @@ fn PrefMarkRead() -> impl IntoView {
 #[component]
 fn PrefUpdates() -> impl IntoView {
     let c = ctx();
+    view! {
+        <h3>{tr().p_updates}</h3>
+        {checkbox(c, tr().p_auto_update, |s| s.auto_update, |s, v| s.auto_update = v)}
+        <p class="pref-hint">{tr().p_auto_update_hint}</p>
+        <h3 class="pref-h">{tr().version(env!("CARGO_PKG_VERSION"))}</h3>
+        <UpdateActions/>
+    }
+}
+
+/// The update status with what can be done about it: "Check for updates", "Update" with the
+/// install progress. In Preferences → Updates and on the login screen (`login`), where it lets a
+/// user whose sign-in broke get a fixed version (#47); there a build that cannot update itself
+/// shows nothing. A manual check works with the background checks turned off.
+#[component]
+pub(super) fn UpdateActions(#[prop(optional)] login: bool) -> impl IntoView {
+    let c = ctx();
     // Result of the last manual check: `Some(Ok)` is "up to date", `Some(Err)` the error text.
     let checked: RwSignal<Option<Result<(), String>>> = RwSignal::new(None);
     let checking = RwSignal::new(false);
@@ -298,13 +333,14 @@ fn PrefUpdates() -> impl IntoView {
             checked.try_set(Some(result.map(|status| c.update.set(status))));
         });
     };
-    let status = move || {
+    move || {
         let status = if c.live {
             c.update.get()
         } else {
             bridge::UpdateStatus::Unsupported
         };
         match status {
+            bridge::UpdateStatus::Unsupported if login => ().into_any(),
             bridge::UpdateStatus::Unsupported => view! { <p class="pref-hint flush">{tr().update_unsupported}</p> }.into_any(),
             bridge::UpdateStatus::Available { version } => view! {
                 <p>{tr().update_available(&version)}</p>
@@ -333,13 +369,6 @@ fn PrefUpdates() -> impl IntoView {
             }
             .into_any(),
         }
-    };
-    view! {
-        <h3>{tr().p_updates}</h3>
-        {checkbox(c, tr().p_auto_update, |s| s.auto_update, |s, v| s.auto_update = v)}
-        <p class="pref-hint">{tr().p_auto_update_hint}</p>
-        <h3 class="pref-h">{tr().version(env!("CARGO_PKG_VERSION"))}</h3>
-        {status}
     }
 }
 
@@ -526,14 +555,177 @@ pub(super) fn AddEmojiDialog() -> impl IntoView {
     }
 }
 
+/// "Advanced": what Enter does in a message field, and the keyboard shortcuts of this platform,
+/// Cmd in place of Ctrl on macOS. The keys that send follow the Enter choice above them; those of
+/// the app's own actions can be changed.
 #[component]
 fn PrefAdvanced() -> impl IntoView {
     let c = ctx();
     let g = |s: &Settings| s.enter_sends;
     let set = |s: &mut Settings, v| s.enter_sends = v;
+    // The action whose new keys are awaited, and why the last ones were not taken.
+    let recording: RwSignal<Option<Action>> = RwSignal::new(None);
+    let refused: RwSignal<Option<(Action, String)>> = RwSignal::new(None);
+    let general = move || {
+        let mut rows = vec![
+            Row::Action(Action::Search),
+            Row::Action(Action::Back),
+            Row::Action(Action::Forward),
+            Row::Action(Action::Preferences),
+            Row::Fixed(tr().sc_close, "Esc".to_owned()),
+            Row::Action(Action::ZoomIn),
+            Row::Action(Action::ZoomOut),
+            Row::Action(Action::ZoomReset),
+        ];
+        // The system's own, from the app menu of macOS.
+        if on_mac() {
+            rows.push(Row::Fixed(tr().sc_hide_window, keys::label("Ctrl+W")));
+            rows.push(Row::Fixed(tr().sc_quit, keys::label("Ctrl+Q")));
+        }
+        rows
+    };
+    let field = move || {
+        let (send, newline) = keys::send_and_newline(c.settings.with(|s| s.enter_sends));
+        vec![
+            Row::Fixed(tr().sc_send, send),
+            Row::Fixed(tr().sc_newline, newline),
+            Row::Fixed(tr().sc_edit_last, "↑".to_owned()),
+            Row::Action(Action::Bold),
+            Row::Action(Action::Italic),
+            Row::Action(Action::Strike),
+            Row::Action(Action::Link),
+        ]
+    };
+    let any_own = move || c.settings.with(|s| !s.shortcuts.is_empty());
     view! {
         <h3>{tr().p_enter_to}</h3>
         {radio(c, "enter", tr().p_enter_send, true, g, set)}
-        {radio(c, "enter", tr().p_enter_newline, false, g, set)}
+        {radio(c, "enter", tr().enter_newline(&keys::label("Ctrl+Enter")), false, g, set)}
+        <h3 class="pref-h">{tr().p_shortcuts}</h3>
+        <p class="pref-hint flush">{tr().sc_change_hint}</p>
+        <div class="shortcut-group">{tr().sc_general}</div>
+        {shortcut_list(general(), recording, refused)}
+        <div class="shortcut-group">{tr().sc_message_field}</div>
+        {move || shortcut_list(field(), recording, refused)}
+        {move || any_own().then(|| view! {
+            <button class="link" on:click=move |_| {
+                recording.set(None);
+                refused.set(None);
+                c.settings.update(|s| s.shortcuts.clear());
+            }>{tr().sc_reset_all}</button>
+        })}
+    }
+}
+
+/// A row of the shortcut list: an action whose keys can be changed, or fixed keys.
+enum Row {
+    Action(Action),
+    Fixed(&'static str, String),
+}
+
+/// Actions with their keys, one per row.
+fn shortcut_list(
+    rows: Vec<Row>,
+    recording: RwSignal<Option<Action>>,
+    refused: RwSignal<Option<(Action, String)>>,
+) -> impl IntoView {
+    view! {
+        <dl class="shortcuts">
+            {rows.into_iter().map(|row| match row {
+                Row::Action(action) => view! {
+                    <dt>{action.name()}</dt>
+                    <dd><ShortcutKeys action recording refused/></dd>
+                }.into_any(),
+                Row::Fixed(name, keys) => view! {
+                    <dt>{name}</dt>
+                    <dd><kbd class="keycap">{keys}</kbd></dd>
+                }.into_any(),
+            }).collect_view()}
+        </dl>
+    }
+}
+
+/// The keys of an action: a click waits for new keys, Esc or a click elsewhere cancels; keys taken
+/// by another action or the system are refused with the reason. "Restore default" goes back to the
+/// standard keys.
+#[component]
+fn ShortcutKeys(
+    action: Action,
+    recording: RwSignal<Option<Action>>,
+    refused: RwSignal<Option<(Action, String)>>,
+) -> impl IntoView {
+    let c = ctx();
+    let button = NodeRef::<leptos::html::Button>::new();
+    let waiting = move || recording.get() == Some(action);
+    let own = move || c.settings.with(|s| s.shortcuts.contains_key(action.id()));
+    // Also on `blur`, which a button focused when "Preferences" closes gets after the list is
+    // disposed: the signals may be gone then (as in #61).
+    let stop = move || {
+        if recording.try_get_untracked() == Some(Some(action)) {
+            recording.try_set(None);
+        }
+    };
+    // The keys go to this button only: the app's own shortcuts and Esc closing "Preferences" are
+    // listened to on the window, which they do not reach.
+    let on_key = move |e: ev::KeyboardEvent| {
+        if recording.get_untracked() != Some(action) {
+            return;
+        }
+        e.prevent_default();
+        e.stop_propagation();
+        let plain = !(e.ctrl_key() || e.alt_key() || e.shift_key() || e.meta_key());
+        if e.key() == "Escape" && plain {
+            refused.set(None);
+            return stop();
+        }
+        let Some(new) = keys::Shortcut::of(&e) else {
+            return;
+        };
+        match c.settings.with_untracked(|s| keys::check(&new, action, &s.shortcuts)) {
+            Ok(()) => {
+                refused.set(None);
+                recording.set(None);
+                c.settings.update(|s| keys::assign(&mut s.shortcuts, action, &new));
+            }
+            Err(why) => refused.set(Some((action, why.text()))),
+        }
+    };
+    view! {
+        <button class="keycap edit" class:waiting=waiting node_ref=button
+            title=move || if waiting() { tr().sc_press_title } else { tr().sc_change }
+            on:click=move |_| {
+                refused.set(None);
+                recording.set(Some(action));
+                // A click does not focus a button in WebKit on macOS.
+                if let Some(el) = button.get_untracked() {
+                    let _ = el.focus();
+                }
+            }
+            on:keydown=on_key
+            on:blur=move |_| stop()>
+            {move || if waiting() {
+                tr().sc_press.to_owned()
+            } else {
+                c.settings.with(|s| keys::shown(&s.shortcuts, action))
+            }}
+        </button>
+        {move || own().then(|| view! {
+            <button class="icon-btn shortcut-reset" title=tr().sc_reset on:click=move |_| {
+                recording.set(None);
+                // Not while another action has the standard keys now: they would do nothing here.
+                match c.settings.with_untracked(|s| keys::check_restore(action, &s.shortcuts)) {
+                    Ok(()) => {
+                        refused.set(None);
+                        c.settings.update(|s| {
+                            s.shortcuts.remove(action.id());
+                        });
+                    }
+                    Err(why) => refused.set(Some((action, why.text()))),
+                }
+            }><Icon icon=I::Reply size=14/></button>
+        })}
+        {move || refused.get().filter(|(a, _)| *a == action).map(|(_, why)| view! {
+            <div class="shortcut-refused">{why}</div>
+        })}
     }
 }

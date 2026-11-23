@@ -9,7 +9,7 @@ use mostik_ipc::cmd::{
     self, Args, ChatArgs, EditArgs, ForwardArgs, HistoryArgs, ImportantArgs, MsgArgs, Out, PinArgs, ReactionArgs,
     SendArgs, UnreadArgs,
 };
-use mostik_ipc::{HistoryPage, Sent};
+use mostik_ipc::{Audience, HistoryPage, Reacted, Seen, Sent, SentText, Unsent};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::{id_pattern, shape};
 use mostik_yandex::wire::{self, HistoryRequest, request_id};
@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter};
 
 use super::events::unnamed_mentions;
 use super::files::prefetch_previews;
-use super::{AppState, EVENT, Live, fill_profiles, live, note_files, push, target_chat};
+use super::{AppState, EVENT, Live, fill_profiles, live, note_files, push, sending_options, target_chat};
 
 /// History page sizes. A page of 50 takes the server 0.5–1.5 s in a busy channel and 20 about
 /// 0.1–0.3 s, so a chat opens with a short page; older pages and threads take more at once.
@@ -27,7 +27,7 @@ const FIRST_PAGE: u32 = 20;
 const OLDER_PAGE: u32 = 40;
 const THREAD_PAGE: u32 = 50;
 /// Seconds a history page may take: twice that with the repeat, about what one wait used to be.
-const HISTORY_TIMEOUT_S: u64 = 12;
+pub(super) const HISTORY_TIMEOUT_S: u64 = 12;
 
 /// History page: the latest messages before `before` (exclusive). The page comes back at once;
 /// directory profiles of its new authors follow as [`LiveEvent::Users`].
@@ -173,7 +173,10 @@ pub async fn mark_read(
     sent
 }
 
-/// Sends a text message; with `reply`, a reply to a message of the same chat or thread.
+/// Sends a text message; with `reply`, a reply to a message of the same chat or thread. A text
+/// longer than [`wire::MESSAGE_LIMIT`] goes as several messages, one after another, as the web
+/// client sends it (see [`super::sending_options`]): the reply and the options go with the first.
+/// When a later part does not go, the ones that went are returned with the rest.
 #[tauri::command]
 pub async fn send_message(
     state: tauri::State<'_, AppState>,
@@ -184,31 +187,69 @@ pub async fn send_message(
         text,
         thread,
         reply,
+        options,
     } = args;
+    if mostik_core::split::utf16_len(&text) > wire::TEXT_MAX {
+        return Err(cmd::MESSAGE_TOO_LONG.to_owned());
+    }
     let live = live(&state).await?;
     let target = target_chat(&chat_id, thread)?;
-    let msg = match &reply {
-        Some(r) => wire::reply(&target, &request_id(), &text, &target, r.ts, r.quote.as_deref()),
-        None => wire::plain_text(&target, &request_id(), &text),
-    };
-    let sent = sent_from_reply(&push(&live, msg).await?)?;
-    Ok(Message {
-        chat_id: ChatId(chat_id),
-        ts: sent.ts,
-        author: live.me.clone(),
-        text,
-        thread_parent: thread,
-        edited: false,
-        important: false,
-        reactions: vec![],
-        thread: None,
-        seq_no: sent.seq_no,
-        attachments: vec![],
-        forwarded: vec![],
-        call: None,
-        system: None,
-        reads: None,
-    })
+    let parts = split_text(&live, &text);
+    let mut messages = Vec::with_capacity(parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let msg = match (&reply, i) {
+            (Some(r), 0) => wire::reply(&target, &request_id(), part, &target, r.ts, r.quote.as_deref()),
+            _ => wire::plain_text(&target, &request_id(), part),
+        };
+        let (notify, important) = sending_options(options, i == 0);
+        let sent = match push(&live, wire::with_options(msg, notify, important))
+            .await
+            .and_then(|r| sent_from_reply(&r))
+        {
+            Ok(sent) => sent,
+            // What has gone stays: the feed has it from the pushes.
+            Err(why) if i > 0 => {
+                let unsent = Unsent {
+                    text: parts[i..].join("\n"),
+                    why,
+                };
+                return Ok(SentText {
+                    messages,
+                    unsent: Some(unsent),
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        messages.push(Message {
+            chat_id: ChatId(chat_id.clone()),
+            ts: sent.ts,
+            author: live.me.clone(),
+            text: part.clone(),
+            thread_parent: thread,
+            edited: false,
+            important,
+            reactions: vec![],
+            thread: None,
+            seq_no: sent.seq_no,
+            attachments: vec![],
+            forwarded: vec![],
+            call: None,
+            system: None,
+            media: None,
+            reads: None,
+        });
+    }
+    Ok(SentText { messages, unsent: None })
+}
+
+/// `text` in the parts it goes in (see [`mostik_core::split::split_long`]), keeping whole the
+/// mentions of the people and chats known by name.
+pub(super) fn split_text(live: &Live, text: &str) -> Vec<String> {
+    let split = |who: &mostik_core::markup::Mentionable| mostik_core::split::split_long(text, wire::MESSAGE_LIMIT, who);
+    match live.shared.lock() {
+        Ok(sh) => super::notify::with_names(&sh, split),
+        Err(_) => split(&mostik_core::markup::Mentionable::default()),
+    }
 }
 
 /// Edits the text of a message. `whole`: the message has images, files or forwarded messages,
@@ -367,6 +408,78 @@ pub(super) fn sent_from_reply(resp: &Value) -> Result<Sent, String> {
             .ok_or("Telemost did not return the message time")?,
         seq_no: resp.pointer("/MessageInfo/SeqNo").and_then(convert::uint).unwrap_or(0),
     })
+}
+
+/// People asked for in one `list_reactions` page, as many as the web client asks for at most.
+const AUDIENCE_PAGE: u32 = 50;
+/// Pages asked for one list at most: a thousand people.
+const AUDIENCE_PAGES: usize = 20;
+
+/// Who read own message `ts` and who reacted to it (Xiva `list_reactions`, page by page), newest
+/// first, each person once.
+#[tauri::command]
+pub async fn message_audience(
+    state: tauri::State<'_, AppState>,
+    args: Args<cmd::MessageAudience>,
+) -> Result<Out<cmd::MessageAudience>, String> {
+    let MsgArgs {
+        chat_id: ChatId(chat_id),
+        ts,
+        thread,
+    } = args;
+    let live = live(&state).await?;
+    let target = target_chat(&chat_id, thread)?;
+    let mut out = Audience::default();
+    for mode in [wire::ListMode::Reads, wire::ListMode::Reactions] {
+        let mut before = None;
+        for _ in 0..AUDIENCE_PAGES {
+            let page = wire::list_reactions(&target, ts, AUDIENCE_PAGE, before, mode);
+            let v = live
+                .xiva
+                .call("list_reactions", &page, 20)
+                .await
+                .map_err(|e| e.to_string())?;
+            if v.get("Status").and_then(Value::as_u64).is_some_and(|s| s != 0) {
+                return Err(format!("Telemost did not say who read it: {}", shape(&v)));
+            }
+            let convert::AudiencePage {
+                reads,
+                reactions,
+                reads_end,
+                reactions_end,
+            } = convert::audience(&v);
+            // Counted from what came, also the entries without a person in them.
+            let end = match mode {
+                wire::ListMode::Reads => reads_end,
+                wire::ListMode::Reactions => reactions_end,
+            };
+            for (user, ts) in reads {
+                if mode == wire::ListMode::Reads && !out.reads.iter().any(|s| s.user.id == user.id) {
+                    out.reads.push(Seen { user, ts });
+                }
+            }
+            for (user, kind, ts) in reactions {
+                if mode == wire::ListMode::Reactions && !out.reactions.iter().any(|r| r.user.id == user.id) {
+                    out.reactions.push(Reacted { user, kind, ts });
+                }
+            }
+            // The page before the last entry of this one, while pages are full and move on.
+            match end.last {
+                Some(last) if end.entries >= AUDIENCE_PAGE as usize && before != Some(last) => before = Some(last),
+                _ => break,
+            }
+        }
+    }
+    if let Ok(mut sh) = live.shared.lock() {
+        let users: Vec<_> = out
+            .reads
+            .iter()
+            .map(|s| s.user.clone())
+            .chain(out.reactions.iter().map(|r| r.user.clone()))
+            .collect();
+        sh.learn_names(&users);
+    }
+    Ok(out)
 }
 
 /// Forwards message `ts` from `from_chat` (a thread reply from the thread chat) to `to_chat` with a comment.

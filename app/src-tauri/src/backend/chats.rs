@@ -1,14 +1,17 @@
 //! Chats and people: profiles, direct chats, search, channels and their members, the synced chat
 //! settings (notifications, folders, stars), browsing and joining public channels.
 
-use mostik_core::{Chat, ChatId, ChatKind, NotifyLevel, User, UserId};
+use std::collections::{BTreeMap, BTreeSet};
+
+use mostik_core::{Chat, ChatId, ChatKind, Message, NotifyLevel, Timestamp, User, UserId};
 use mostik_ipc::cmd::{
     self, Args, ChatArgs, CreateChannelArgs, DirectorySearchArgs, FoldersArgs, GuidArgs, MembersArgs,
-    MessageSearchArgs, NotifyLevelArgs, Out, PeopleSearchArgs, StarArgs, UpdateChatArgs,
+    MessageSearchArgs, NotifyLevelArgs, Out, PeopleSearchArgs, SearchFilter, StarArgs, UpdateChatArgs,
 };
 use mostik_ipc::{ChatDetails, DirectoryHits, FoundMessages};
 use mostik_yandex::clock;
 use mostik_yandex::convert;
+use mostik_yandex::wire::HistoryRequest;
 use serde_json::{Value, json};
 use tauri::AppHandle;
 
@@ -144,27 +147,50 @@ pub async fn search_people(
     Ok(convert::profiles(&v))
 }
 
-/// Message search (HTTP RPC `search`). The server searches only within one chat (`chat_id`),
-/// so the given chats are queried in parallel, at most 20.
+/// Most messages a search brings: Telemost gives one page, newest first, as long as asked.
+const FOUND_MAX: u32 = 100;
+
+/// Message search (HTTP RPC `search`). With organization `org`, one request covers all its chats
+/// (checked on 2026-11-22: without `organization_id` the search finds almost nothing, without
+/// `chat_id` it covers every chat); without one, the given chats are asked one by one, at most 20.
+/// The filter goes as the web client's `messages_filter`.
 #[tauri::command]
 pub async fn search_messages(
     state: tauri::State<'_, AppState>,
     args: Args<cmd::SearchMessages>,
 ) -> Result<Out<cmd::SearchMessages>, String> {
-    let MessageSearchArgs { query, chat_ids } = args;
+    let MessageSearchArgs {
+        query,
+        chat_ids,
+        org,
+        filter,
+    } = args;
     let live = live(&state).await?;
-    let jobs = chat_ids.into_iter().take(20).map(|chat| {
-        let mut web = live.web.clone_light();
-        let query = query.clone();
-        async move {
-            web.rpc(
-                "search",
-                json!({ "query": query, "limit": 10, "entities": ["messages"], "chat_id": chat }),
-            )
-            .await
-            .ok()
-            .filter(|v| rpc_ok(v).is_ok())
+    let mut params = json!({ "query": query, "entities": ["messages"] });
+    if let Some(f) = messages_filter(&filter) {
+        params["messages_filter"] = f;
+    }
+    let jobs: Vec<Value> = match org {
+        Some(org) => {
+            let mut p = params.clone();
+            p["limit"] = json!(FOUND_MAX);
+            p["organization_id"] = json!(org);
+            vec![p]
         }
+        None => chat_ids
+            .into_iter()
+            .take(20)
+            .map(|ChatId(chat)| {
+                let mut p = params.clone();
+                p["limit"] = json!(10);
+                p["chat_id"] = json!(chat);
+                p
+            })
+            .collect(),
+    };
+    let jobs = jobs.into_iter().map(|p| {
+        let mut web = live.web.clone_light();
+        async move { web.rpc("search", p).await.ok().filter(|v| rpc_ok(v).is_ok()) }
     });
     let (mut messages, mut users) = (Vec::new(), Vec::new());
     for v in futures_util::future::join_all(jobs).await.into_iter().flatten() {
@@ -176,8 +202,84 @@ pub async fn search_messages(
             }
         }
     }
+    if query.trim().is_empty() {
+        drop_deleted(&live, &mut messages).await;
+    }
     note_files(&state, &live.me, &messages);
     Ok(FoundMessages { messages, users })
+}
+
+/// How many messages of a chat are asked for to check what a search found in it.
+const CHECKED_PAGE: u32 = 50;
+
+/// Leaves out the messages that are deleted. Asked for a filter alone ("mine", "important" with no
+/// words), Telemost still lists deleted messages (seen on 2026-11-22; words find none of them), so
+/// each chat's history is asked for the messages up to the newest one found there. One older
+/// than that page, or in a chat whose history did not come, stays.
+async fn drop_deleted(live: &Live, messages: &mut Vec<Message>) {
+    let mut newest: BTreeMap<String, Timestamp> = BTreeMap::new();
+    for m in messages.iter() {
+        if let Ok(chat) = super::target_chat(&m.chat_id.0, m.thread_parent) {
+            let ts = newest.entry(chat).or_default();
+            *ts = (*ts).max(m.ts);
+        }
+    }
+    let pages = newest.into_iter().map(|(chat, ts)| async move {
+        let page = live
+            .xiva
+            .call(
+                "history",
+                &HistoryRequest::page(&chat, CHECKED_PAGE, Some(ts + 1)),
+                super::messages::HISTORY_TIMEOUT_S,
+            )
+            .await
+            .ok()
+            .filter(|body| body.get("Chats").is_some())?;
+        let records = page
+            .pointer("/Chats/0/Messages")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        // A page shorter than asked for goes back to the start of the chat.
+        let from = match records >= CHECKED_PAGE as usize {
+            true => convert::oldest_record(&page).unwrap_or(Timestamp::MAX),
+            false => 0,
+        };
+        let kept: BTreeSet<Timestamp> = convert::from_history(&page, Some(&live.me))
+            .messages
+            .iter()
+            .map(|m| m.ts)
+            .collect();
+        Some((chat, (from, kept)))
+    });
+    let checked: BTreeMap<String, (Timestamp, BTreeSet<Timestamp>)> = futures_util::future::join_all(pages)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    messages.retain(|m| {
+        let Ok(chat) = super::target_chat(&m.chat_id.0, m.thread_parent) else {
+            return true;
+        };
+        match checked.get(&chat) {
+            Some((from, kept)) if m.ts >= *from => kept.contains(&m.ts),
+            _ => true,
+        }
+    });
+}
+
+/// The web client's `messages_filter`: `{sender: guid, is_important: true}`, or nothing.
+fn messages_filter(filter: &SearchFilter) -> Option<Value> {
+    if filter.is_empty() {
+        return None;
+    }
+    let mut f = json!({});
+    if let Some(UserId(sender)) = &filter.sender {
+        f["sender"] = json!(sender);
+    }
+    if filter.important {
+        f["is_important"] = json!(true);
+    }
+    Some(f)
 }
 
 /// "Find a conversation" beyond the user's list: the public channels and people of organization
@@ -583,4 +685,22 @@ pub async fn join_chat(
         .ok_or_else(|| "Telemost did not return the chat".to_owned())?;
     note_chat(&live, &chat);
     Ok(chat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_filter_goes_as_the_web_client_sends_it() {
+        assert_eq!(messages_filter(&SearchFilter::default()), None);
+        let f = SearchFilter {
+            sender: Some(UserId("aaaa0001-0000-4000-8000-000000000001".into())),
+            important: true,
+        };
+        assert_eq!(
+            messages_filter(&f),
+            Some(json!({ "sender": "aaaa0001-0000-4000-8000-000000000001", "is_important": true }))
+        );
+    }
 }

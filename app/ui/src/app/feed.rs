@@ -281,8 +281,11 @@ pub(super) fn MessageList() -> impl IntoView {
         }
     });
     // A short page may not fill the list, and then there is no scrolling to load older messages:
-    // load them until the list scrolls or the history ends. Checked after every change of the list
-    // and of the loading, once laid out, however the chat was opened.
+    // load them until the list scrolls or the history ends. Likewise when a page has added next to
+    // nothing above (its records deleted, as often in a long channel) and the list still sits at
+    // its top: a wheel turned up there moves nothing and sends no scroll event, and the loading
+    // stopped for good. Checked after every change of the list and of the loading, once laid out
+    // (after `restore`, which runs in an earlier frame callback), however the chat was opened.
     Effect::new(move |_| {
         let id = c.current.get();
         messages.track();
@@ -295,7 +298,8 @@ pub(super) fn MessageList() -> impl IntoView {
             let Some(el) = list_ref.try_get_untracked().flatten() else {
                 return;
             };
-            if c.current.get_untracked() == id && el.scroll_height() <= el.client_height() {
+            let at_top = el.scroll_top() < NEAR_TOP && stick.try_get_untracked() == Some(false);
+            if c.current.get_untracked() == id && (el.scroll_height() <= el.client_height() || at_top) {
                 ops::load_older(c);
             }
         });
@@ -359,7 +363,7 @@ pub(super) fn MessageList() -> impl IntoView {
         keep.set_value(top_row(&el));
         // Older messages load as the user scrolls up near the top. Not when the list moves by itself:
         // another chat is shorter or it goes to the bottom.
-        if up && top < 200 {
+        if up && top < NEAR_TOP {
             ops::load_older(c);
         }
     };
@@ -381,6 +385,9 @@ pub(super) fn MessageList() -> impl IntoView {
         </div>
     }
 }
+
+/// How close to the top of the list, in pixels, older messages start loading.
+const NEAR_TOP: i32 = 200;
 
 /// The message at the top edge of the list's view and how far below the edge it starts (less than
 /// zero: partly hidden above it).

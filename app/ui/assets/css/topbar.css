@@ -135,3 +135,22 @@
   overflow: hidden;
   border: 1px solid rgba(var(--chrome-ink), 0.06);
 }
+
+/* Search filters: important ones, one's own, a person's. */
+.sr-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 4px; }
+.sr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.sr-chip:hover { color: var(--text-strong); background: var(--bg-hover); }
+.sr-chip.on { color: var(--accent-blue); border-color: var(--accent-blue); background: rgba(29, 155, 209, 0.12); }
+.sr-person { display: flex; align-items: center; }
+.sr-person > .sr-item { flex: 1; min-width: 0; }
+.sr-from { flex: none; margin-right: 8px; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: var(--text-muted); }
+.sr-from:hover { color: var(--text-strong); background: var(--bg-hover); }

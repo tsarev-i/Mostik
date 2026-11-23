@@ -13,6 +13,7 @@ use wasm_bindgen::JsCast;
 use crate::app::{Ctx, place_caret, scoped_window_listener, selection, wrap_selection};
 use crate::i18n::tr;
 use crate::icons::{I, Icon};
+use crate::keys::{self, Action};
 use crate::modal::Modal;
 use crate::text_edit::{LinkTarget, insert_into, paste_link};
 use crate::{bridge, editor};
@@ -81,18 +82,20 @@ impl Field {
     }
 
     /// Formatting hotkeys, as in Slack: Ctrl+B bold, Ctrl+I italic, Ctrl+Shift+X strikethrough,
-    /// Ctrl+Shift+U a link, or Ctrl+Shift+K where that does not come (see [`link_keys`]). Keys are
-    /// taken by their place, so they work in any keyboard layout. Returns whether the key was one of them.
+    /// Ctrl+Shift+U or Ctrl+Shift+K a link; Cmd in place of Ctrl on macOS, where Ctrl+B and Ctrl+I
+    /// stay the field's. Or the keys the user gave them (see [`keys`]). Returns whether the key was
+    /// one of them.
     pub fn hotkey(self, e: &ev::KeyboardEvent) -> bool {
-        if !(e.ctrl_key() || e.meta_key()) || e.alt_key() {
+        if keys::pressed(e, Action::Bold) {
+            self.wrap("**", "**");
+        } else if keys::pressed(e, Action::Italic) {
+            self.wrap("__", "__");
+        } else if keys::pressed(e, Action::Strike) {
+            self.wrap("~~", "~~");
+        } else if keys::pressed(e, Action::Link) {
+            self.open_link();
+        } else {
             return false;
-        }
-        match (e.code().as_str(), e.shift_key()) {
-            ("KeyB", false) => self.wrap("**", "**"),
-            ("KeyI", false) => self.wrap("__", "__"),
-            ("KeyX", true) => self.wrap("~~", "~~"),
-            ("KeyU" | "KeyK", true) => self.open_link(),
-            _ => return false,
         }
         e.prevent_default();
         true
@@ -138,21 +141,41 @@ pub fn FieldArea(
 ) -> impl IntoView {
     let c = expect_context::<Ctx>();
     let area = field.area;
+    // A line too long to check in time turns the spell checking off until it is gone (#18). Set
+    // on the element at once too: the attribute follows the signal only after the event.
+    let spellable = RwSignal::new(true);
+    let set_spellable = move |el: &web_sys::HtmlElement, on: bool| {
+        if on != spellable.get_untracked() {
+            spellable.set(on);
+        }
+        if !on {
+            let _ = el.set_attribute("spellcheck", "false");
+        }
+    };
     view! {
         <div class="editor" node_ref=area contenteditable="plaintext-only" role="textbox" aria-multiline="true"
+            spellcheck=move || if c.settings.with(|s| s.spell_check) && spellable.get() { "true" } else { "false" }
             aria-placeholder=move || placeholder.get()
             on:input=move |_| {
                 if let Some(el) = area.get_untracked() {
-                    on_input.run(editor::tidy(&el, &crate::custom::lookup(c)));
+                    let text = editor::tidy(&el, &crate::custom::lookup(c));
+                    set_spellable(&el, editor::spellable(&text));
+                    on_input.run(text);
                 }
             }
             on:beforeinput=move |e: ev::InputEvent| {
                 if let Some(el) = area.get_untracked() {
+                    // Before the browser puts the text in and checks the line it went into.
+                    if spellable.get_untracked() && !editor::spellable_after(&el, &e) {
+                        set_spellable(&el, false);
+                    }
                     editor::before_input(&el, &e, &crate::custom::lookup(c));
                 }
             }
+            // The window's shortcuts are not the field's: given keys like Ctrl+↑, zoom would also
+            // edit the last message.
             on:keydown=move |e: ev::KeyboardEvent| {
-                if !e.is_composing() && !field.hotkey(&e) {
+                if !e.is_composing() && !field.hotkey(&e) && !keys::window_shortcut(&e) {
                     on_key.run(e);
                 }
             }
@@ -169,16 +192,6 @@ pub fn FieldArea(
                 }
             }
         ></div>
-    }
-}
-
-/// The "Add link" hotkey that works here. On Linux Ctrl+Shift+U never reaches the page: GTK and
-/// IBus take it for typing a character by its Unicode code.
-fn link_keys() -> &'static str {
-    if crate::settings::on_linux() {
-        "Ctrl+Shift+K"
-    } else {
-        "Ctrl+Shift+U"
     }
 }
 
@@ -230,15 +243,18 @@ pub fn EmojiButton(field: Field, class: &'static str, size: u32) -> impl IntoVie
 #[component]
 pub fn FormatBar(field: Field, #[prop(optional)] emoji: bool) -> impl IntoView {
     let fmt = move |before: &'static str, after: &'static str| move |_| field.wrap(before, after);
-    let hint = |name: &str, keys: &str| format!("{name} ({keys})");
+    let c = expect_context::<Ctx>();
+    let hint = move |name: &'static str, action: Action| {
+        move || format!("{name} ({})", c.settings.with(|s| keys::shown(&s.shortcuts, action)))
+    };
     view! {
         <div class="composer-toolbar" on:mousedown=|e: ev::MouseEvent| e.prevent_default()>
-            <button class="fmt" title=hint(tr().fmt_bold, "Ctrl+B") on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
-            <button class="fmt" title=hint(tr().fmt_italic, "Ctrl+I") on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_bold, Action::Bold) on:click=fmt("**", "**")><Icon icon=I::Bold size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_italic, Action::Italic) on:click=fmt("__", "__")><Icon icon=I::Italic size=16/></button>
             <button class="fmt" title=tr().fmt_underline on:click=fmt("++", "++")><Icon icon=I::Underline size=16/></button>
-            <button class="fmt" title=hint(tr().fmt_strike, "Ctrl+Shift+X") on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_strike, Action::Strike) on:click=fmt("~~", "~~")><Icon icon=I::Strike size=16/></button>
             <span class="sep"></span>
-            <button class="fmt" title=hint(tr().fmt_link, link_keys()) on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
+            <button class="fmt" title=hint(tr().fmt_link, Action::Link) on:click=move |_| field.open_link()><Icon icon=I::Link size=16/></button>
             <span class="sep"></span>
             <button class="fmt" title=tr().fmt_code on:click=fmt("`", "`")><Icon icon=I::Code size=16/></button>
             <button class="fmt" title=tr().fmt_code_block on:click=fmt("```\n", "\n```")><Icon icon=I::CodeBlock size=16/></button>

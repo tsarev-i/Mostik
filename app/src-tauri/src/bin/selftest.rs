@@ -9,6 +9,9 @@
 //! `-- --listen` prints every raw push as JSON until stopped (read-only; includes message texts).
 //! `-- --dump [list | <chat id>]` prints the raw chat list or the latest page of a chat (read-only).
 //! `-- --buckets` prints the synced settings, `get_buckets` (read-only).
+//! `-- --search <query>` runs the global message search (no `chat_id`) in a few forms and prints
+//! how many messages each found in how many chats, and the shape of the answer, not the texts
+//! (read-only).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -131,6 +134,172 @@ async fn run() -> Res<()> {
         .await
         .ok_or("no Xiva subscription")?;
 
+    if let Some(i) = std::env::args().position(|a| a == "--search") {
+        let query = std::env::args().nth(i + 1).ok_or("--search needs a query")?;
+        let forms = [
+            (
+                "messages",
+                json!({ "query": query, "entities": ["messages"], "limit": 50 }),
+            ),
+            (
+                "messages, limit 5",
+                json!({ "query": query, "entities": ["messages"], "limit": 5 }),
+            ),
+            (
+                "messages, limit 5, page 2",
+                json!({ "query": query, "entities": ["messages"], "limit": 5, "page": 2 }),
+            ),
+            (
+                "messages + users_and_chats",
+                json!({ "query": query, "entities": ["messages", "users_and_chats"], "limit": 100 }),
+            ),
+            (
+                "important only",
+                json!({ "query": query, "entities": ["messages"], "limit": 50, "messages_filter": { "is_important": true } }),
+            ),
+        ];
+        for (name, params) in forms {
+            match web.rpc("search", params).await {
+                Ok(v) => {
+                    let items = v.pointer("/data/messages/items").and_then(Value::as_array);
+                    let chats: BTreeSet<String> = items
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|it| it.pointer("/data/ClientMessage/Plain/ChatId").and_then(Value::as_str))
+                        .map(id_pattern)
+                        .collect();
+                    let distinct = items
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|it| it.pointer("/data/ClientMessage/Plain/ChatId").and_then(Value::as_str))
+                        .collect::<BTreeSet<_>>()
+                        .len();
+                    let num = |k: &str| v.pointer(&format!("/data/messages/{k}")).cloned().unwrap_or_default();
+                    println!(
+                        "{name}: {} messages from {distinct} chats ({chats:?}); total {} page {} pages {} limit {}",
+                        items.map_or(0, Vec::len),
+                        num("total"),
+                        num("page"),
+                        num("pages"),
+                        num("limit"),
+                    );
+                }
+                Err(e) => println!("{name}: {e}"),
+            }
+        }
+        // The same search in each of the 20 latest chats, as the app does now, for comparison.
+        let list = xiva
+            .call("history", &wire::chat_list(0), 40)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut chats: Vec<(u64, &str)> = list
+            .get("Chats")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                Some((
+                    c.get("LastTimestamp").and_then(Value::as_u64).unwrap_or(0),
+                    c.get("ChatId")?.as_str()?,
+                ))
+            })
+            .collect();
+        chats.sort_unstable_by_key(|c| std::cmp::Reverse(c.0));
+        let (mut found, mut with) = (0, 0);
+        for (_, chat) in chats.iter().take(20) {
+            if let Ok(v) = web
+                .rpc(
+                    "search",
+                    json!({ "query": query, "entities": ["messages"], "limit": 10, "chat_id": chat }),
+                )
+                .await
+            {
+                let n = v
+                    .pointer("/data/messages/items")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                found += n;
+                with += usize::from(n > 0);
+            }
+        }
+        println!(
+            "per chat, 20 latest of {}: {found} messages in {with} chats",
+            chats.len()
+        );
+        // The organizations of the chats: the search of people and channels covers one only with its id.
+        let orgs: BTreeSet<u64> = list
+            .get("Chats")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.pointer("/ChatInfo/OrganizationIds").and_then(Value::as_array))
+            .flatten()
+            .filter_map(Value::as_u64)
+            .collect();
+        for org in &orgs {
+            let keys = |v: &Value| -> Vec<(String, u64)> {
+                v.pointer("/data/messages/items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|it| {
+                        let d = it.get("data")?;
+                        Some((
+                            d.pointer("/ClientMessage/Plain/ChatId")?.as_str()?.to_owned(),
+                            d.pointer("/ServerMessageInfo/Timestamp")?.as_u64()?,
+                        ))
+                    })
+                    .collect()
+            };
+            let page = |p: u64| json!({ "query": query, "entities": ["messages"], "limit": 20, "page": p, "organization_id": org });
+            if let (Ok(a), Ok(b)) = (web.rpc("search", page(1)).await, web.rpc("search", page(2)).await) {
+                let (ka, kb) = (keys(&a), keys(&b));
+                let overlap = ka.iter().filter(|k| kb.contains(k)).count();
+                let newest_first = ka.windows(2).all(|w| w[0].1 >= w[1].1);
+                let num = |v: &Value, k: &str| v.pointer(&format!("/data/messages/{k}")).cloned().unwrap_or_default();
+                println!(
+                    "org pages of 20: page 1 has {} (page {} of {}, total {}), page 2 has {} (page {}), {overlap} in both; page 1 newest first: {newest_first}",
+                    ka.len(),
+                    num(&a, "page"),
+                    num(&a, "pages"),
+                    num(&a, "total"),
+                    kb.len(),
+                    num(&b, "page")
+                );
+            }
+            for (name, params) in [
+                (
+                    "org",
+                    json!({ "query": query, "entities": ["messages"], "limit": 50, "organization_id": org }),
+                ),
+                (
+                    "org, all entities",
+                    json!({ "query": query, "entities": ["messages", "users_and_chats"], "limit": 100, "organization_id": org }),
+                ),
+                (
+                    "org, important",
+                    json!({ "query": query, "entities": ["messages"], "limit": 50, "organization_id": org, "messages_filter": { "is_important": true } }),
+                ),
+            ] {
+                if let Ok(v) = web.rpc("search", params).await {
+                    let items = v.pointer("/data/messages/items").and_then(Value::as_array);
+                    let distinct = items
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|it| it.pointer("/data/ClientMessage/Plain/ChatId").and_then(Value::as_str))
+                        .collect::<BTreeSet<_>>()
+                        .len();
+                    let total = v.pointer("/data/messages/total").cloned().unwrap_or_default();
+                    println!(
+                        "{name} #{}: {} messages from {distinct} chats, total {total}",
+                        orgs.iter().position(|o| o == org).unwrap_or(0),
+                        items.map_or(0, Vec::len)
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--dump") {
         let req: Value = match args.get(i + 1).map(String::as_str) {

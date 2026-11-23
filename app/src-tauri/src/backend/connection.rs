@@ -44,11 +44,11 @@ pub(super) struct Session {
 }
 
 impl Session {
-    fn current(&self) -> u64 {
+    pub(super) fn current(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
 
-    fn is_current(&self, generation: u64) -> bool {
+    pub(super) fn is_current(&self, generation: u64) -> bool {
         self.current() == generation
     }
 
@@ -140,6 +140,7 @@ pub async fn login(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<
 pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<Out<cmd::Logout>, String> {
     // From here on nothing of the old session is saved again or reconnected.
     let generation = state.session.renew();
+    super::voice::forget();
     let live = state.live.lock().await.take();
     // It waits for the call browser to go: not on an async worker.
     let closing = app.clone();
@@ -178,14 +179,18 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
 }
 
 /// Removes what the signed-out account left on this computer: the diagnostic probes (they name
-/// its cookies and chats), the custom emoji cache, the files allowed for sending and saving, and
-/// the cookies and caches of the main window. The UI clears its own `localStorage` keys.
+/// its cookies and chats), the custom emoji cache, the files allowed for sending and saving, the
+/// list of where its attachments were saved, and the cookies and caches of the main window. The
+/// UI clears its own `localStorage` keys.
 async fn forget_local_data(app: &AppHandle, state: &AppState) {
     if let Ok(dir) = app.path().app_data_dir()
         && let Ok(entries) = std::fs::read_dir(dir)
     {
+        // The session is renewed already: a download ending now does not write the list again.
+        let _saved = super::files::lock_saved_files();
         for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with("probe") {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with("probe") || name.starts_with(super::files::SAVED_FILES) {
                 let _ = std::fs::remove_file(e.path());
             }
         }

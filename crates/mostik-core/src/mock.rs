@@ -33,7 +33,7 @@ fn chat(id: &str, kind: ChatKind, name: &str, members: u32, unread: u32, mention
     }
 }
 
-fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
+pub(crate) fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
     Message {
         chat_id: cid(chat),
         ts,
@@ -49,6 +49,7 @@ fn msg(chat: &str, ts: Timestamp, author: &str, text: &str) -> Message {
         forwarded: vec![],
         call: None,
         system: None,
+        media: None,
         reads: None,
     }
 }
@@ -331,6 +332,7 @@ pub fn demo(now: Timestamp) -> Snapshot {
                 text: "Regression passed, filed two minor bugs.".into(),
                 attachments: vec![],
                 quote: Some("filed two minor bugs".into()),
+                media: None,
                 reply: true,
             }],
             ..msg(
@@ -339,6 +341,25 @@ pub fn demo(now: Timestamp) -> Snapshot {
                 "gleb",
                 "Minor ones go into the next patch.",
             )
+        },
+        Message {
+            media: Some(Media::Voice(Voice {
+                file_id: "demo/voice1".into(),
+                duration_ms: 14_500,
+                waveform: (0..80u32).map(|i| ((i * 7 + i * i / 3) % 13 + 2) as u8).collect(),
+                text: "Quick update from the train: the staging build is fine, I'll merge the login fix \
+                       once Anna approves it, and we can cut the release candidate this evening."
+                    .into(),
+                recognized: true,
+            })),
+            ..msg("dev", today + 66 * MIN, "boris", "")
+        },
+        Message {
+            media: Some(Media::Sticker(Sticker {
+                id: "demo/sticker1".into(),
+                set_id: "demo".into(),
+            })),
+            ..msg("general", today + 4 * MIN, "boris", "")
         },
         call("design", yesterday + 210 * MIN, "anna", true),
         call("design", yesterday + 245 * MIN, "anna", false),

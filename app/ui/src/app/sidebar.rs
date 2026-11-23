@@ -999,6 +999,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
             let face_status = face_status.get().as_ref().map(status_view);
             let count = unread_count(&ch);
             let badge = count.map(|(n, quiet)| view! { <span class="badge" class:quiet=quiet>{n}</span> });
+            let dot = unread_muted(&ch).then(|| view! { <span class="sb-dot" title=tr().unread_muted></span> });
             let live_call = live.then(|| {
                 view! { <span class="sb-call" title=tr().call_live_hint><Icon icon=I::Headphones size=13/></span> }
             });
@@ -1030,6 +1031,7 @@ fn ChatRow(id: ChatId, section: String) -> impl IntoView {
                     {live_call}
                     {pencil}
                     {badge}
+                    {dot}
                     {close}
                 </button>
             }
@@ -1050,6 +1052,12 @@ pub(super) fn unread_count(ch: &Chat) -> Option<(u32, bool)> {
         return Some((urgent, false));
     }
     (ch.unread > 0 && !ch.muted).then_some((ch.unread, true))
+}
+
+/// A muted chat has unread messages but no mention: a grey dot says so, in place of the count it
+/// does not get, as Slack marks such a channel.
+pub(super) fn unread_muted(ch: &Chat) -> bool {
+    ch.unread > 0 && unread_count(ch).is_none()
 }
 
 #[cfg(test)]
@@ -1081,6 +1089,12 @@ mod tests {
         );
         assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::All)), Some((3, false)));
         assert_eq!(unread_count(&chat(direct(), 3, 0, NotifyLevel::Nothing)), None);
+        // The grey dot: unread messages that get no count.
+        assert!(unread_muted(&chat(group(), 5, 0, NotifyLevel::Mentions)));
+        assert!(unread_muted(&chat(direct(), 3, 0, NotifyLevel::Nothing)));
+        assert!(!unread_muted(&chat(group(), 5, 0, NotifyLevel::All)));
+        assert!(!unread_muted(&chat(group(), 5, 1, NotifyLevel::Mentions)));
+        assert!(!unread_muted(&chat(group(), 0, 0, NotifyLevel::Nothing)));
     }
 
     #[test]

@@ -130,6 +130,55 @@ fn reads(sm: &Value) -> Option<Reads> {
     })
 }
 
+/// A page of Xiva `list_reactions`.
+#[derive(Debug, Default, PartialEq)]
+pub struct AudiencePage {
+    /// Who read the message and when (`UserReads [{UserInfo, Timestamp}]`).
+    pub reads: Vec<(User, Timestamp)>,
+    /// Who reacted, with what and when (`UserReactions [{UserInfo, Type, Timestamp}]`).
+    pub reactions: Vec<(User, u64, Timestamp)>,
+    /// How long each list was and where it ended, the entries left out above counted too: what the
+    /// next page goes on from.
+    pub reads_end: PageEnd,
+    pub reactions_end: PageEnd,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct PageEnd {
+    pub entries: usize,
+    /// The time of the last entry.
+    pub last: Option<Timestamp>,
+}
+
+/// A page of Xiva `list_reactions`; empty lists are left out of the answer.
+pub fn audience(v: &Value) -> AudiencePage {
+    let list = |key: &str| v.get(key).and_then(Value::as_array).into_iter().flatten();
+    let end = |key: &str| PageEnd {
+        entries: list(key).count(),
+        last: list(key).last().and_then(|r| n(r, &["Timestamp"])),
+    };
+    let reads = list("UserReads")
+        .filter_map(|r| {
+            Some((
+                r.get("UserInfo").and_then(user_from)?,
+                n(r, &["Timestamp"]).unwrap_or(0),
+            ))
+        })
+        .collect();
+    let reactions = list("UserReactions")
+        .filter_map(|r| {
+            let user = r.get("UserInfo").and_then(user_from)?;
+            Some((user, n(r, &["Type"])?, n(r, &["Timestamp"]).unwrap_or(0)))
+        })
+        .collect();
+    AudiencePage {
+        reads,
+        reactions,
+        reads_end: end("UserReads"),
+        reactions_end: end("UserReactions"),
+    }
+}
+
 /// People from `RecentUserReactions`, with the names the UI shows in the reaction tooltip.
 fn reaction_authors(sm: &Value) -> Vec<User> {
     sm.get("RecentUserReactions")
@@ -175,7 +224,8 @@ fn attachment(kind: AttachmentKind, v: &Value) -> Option<Attachment> {
     Some(Attachment {
         kind,
         file_id,
-        name: s(info, &["Name"]).unwrap_or("file").to_owned(),
+        // Shown in the card and the Files tab, and the name a download is saved under (#42).
+        name: plain_file_name(s(info, &["Name"]).unwrap_or("file")),
         size: n(info, &["Size"]).unwrap_or(0),
         width: count32(n(v, &["Width"]).unwrap_or(0)),
         height: count32(n(v, &["Height"]).unwrap_or(0)),
@@ -200,6 +250,39 @@ fn attachments(plain: &Value) -> Vec<Attachment> {
     out
 }
 
+/// What a `Plain` is besides text and attachments: a voice message
+/// (`Voice {FileInfo, Duration, Waveform, Text, WasRecognized}`, the duration in milliseconds) or a
+/// sticker (`Sticker {Id, SetId}`).
+fn media(plain: &Value) -> Option<Media> {
+    if let Some(sticker) = plain.get("Sticker") {
+        return Some(Media::Sticker(Sticker {
+            id: s(sticker, &["Id"])?.to_owned(),
+            set_id: s(sticker, &["SetId"]).unwrap_or_default().to_owned(),
+        }));
+    }
+    let voice = plain.get("Voice")?;
+    let info = voice.get("FileInfo")?;
+    let file_id = s(info, &["Id2"]).or_else(|| s(info, &["Id"]))?.to_owned();
+    Some(Media::Voice(Voice {
+        file_id,
+        duration_ms: n(voice, &["Duration"]).unwrap_or(0),
+        waveform: s(voice, &["Waveform"]).map(waveform).unwrap_or_default(),
+        text: s(voice, &["Text"]).unwrap_or_default().trim().to_owned(),
+        recognized: voice.get("WasRecognized").and_then(Value::as_bool).unwrap_or(false),
+    }))
+}
+
+/// The most loudness levels a voice message keeps: enough bars for ten minutes.
+const MAX_LEVELS: usize = 1200;
+
+/// Loudness levels (0 to 15) of `Voice.Waveform`: two to a byte, the high half first. The bytes
+/// come in base64, as JSON carries bytes; a string that is not base64 is read a byte per
+/// character, as the web client reads it.
+fn waveform(text: &str) -> Vec<u8> {
+    let bytes = base64(text).unwrap_or_else(|| text.chars().map(|c| u8::try_from(c).unwrap_or(u8::MAX)).collect());
+    bytes.iter().flat_map(|b| [b >> 4, b & 0x0F]).take(MAX_LEVELS).collect()
+}
+
 /// Feed text of a `Plain`. For images and files it is the caption (may be empty).
 fn plain_text(plain: &Value) -> String {
     if let Some(t) = s(plain, &["Text", "MessageText"]) {
@@ -211,11 +294,13 @@ fn plain_text(plain: &Value) -> String {
     if plain.get("Gallery").is_some() || plain.get("Image").is_some() || plain.get("MiscFile").is_some() {
         return String::new();
     }
+    // Shown as a picture (see `media`).
     if plain.get("Sticker").is_some() {
-        return "Sticker".to_owned();
+        return String::new();
     }
+    // Shown as a player with its text (see `media`).
     if plain.get("Voice").is_some() {
-        return "🎤 Voice message".to_owned();
+        return String::new();
     }
     "Message (this type is not supported yet)".to_owned()
 }
@@ -297,6 +382,7 @@ fn parse_server_message(sm: &Value, chat_hint: Option<&str>, me: Option<&UserId>
         forwarded,
         call: None,
         system: None,
+        media: media(plain),
         reads: reads(sm),
     }))
 }
@@ -388,6 +474,7 @@ fn system_note(chat: &str, ts: Timestamp, info: &Value) -> Message {
         forwarded: vec![],
         call: None,
         system: None,
+        media: None,
         reads: None,
     }
 }
@@ -434,6 +521,7 @@ fn chat_note(sm: &Value) -> Option<Message> {
     };
     Some(Message {
         system: Some(note),
+        media: None,
         reads: None,
         ..system_note(s(sys, &["ChatId"])?, n(info, &["Timestamp"])?, info)
     })
@@ -506,6 +594,7 @@ fn forwarded(sm: &Value) -> Vec<Forwarded> {
                 chat_id: chat.map(|c| ChatId(c.to_owned())),
                 text: if gone { String::new() } else { plain_text(payload) },
                 attachments: if gone { vec![] } else { attachments(payload) },
+                media: if gone { None } else { media(payload) },
                 reply: list.len() == 1 && (quote.is_some() || (chat.is_some() && chat == own_chat)),
                 quote,
             })
@@ -586,6 +675,8 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
             muted: chat.get("Muted").and_then(Value::as_bool).unwrap_or(false),
             last_ts,
             peer_seen_ts: n(chat, &["LastSeenTsMcs"]).unwrap_or(0),
+            last_seq: n(chat, &["LastSeqNo"]).unwrap_or(0),
+            seen_seq: Some(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0)),
             pinned: n(chat, &["PinnedMessageInfo", "PinnedMessageTs"]).filter(|ts| *ts > 0),
             organizations: info
                 .get("OrganizationIds")
@@ -654,6 +745,7 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
             unread: count32(last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0))),
             last_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
             last_seq,
+            seen_seq: Some(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0)),
             parent: *parent,
         });
     }
@@ -662,7 +754,7 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
 }
 
 /// UI event built from a Xiva push; the type is shared with the UI.
-pub use mostik_core::event::LiveEvent;
+pub use mostik_core::event::{Alert, LiveEvent};
 
 /// Parses the body of a `delivery` push. `None` means the event is not of interest yet.
 pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
@@ -739,6 +831,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
             author: sm.pointer("/ServerMessageInfo/From").and_then(user_from),
             mentioned: mentioned_users(sm),
             message,
+            alert: Alert::from_code(n(cm, &["NotificationBehaviour"]).unwrap_or(0)),
         }),
         Parsed::Deleted {
             chat_id,
@@ -873,11 +966,17 @@ fn chat_mutings(value: &Value) -> Vec<(ChatId, NotifyLevel)> {
         .collect()
 }
 
-/// A chat from a `get_chats_info` item: `{chat_id, name, description, is_public, members_count,
-/// organization_ids}`. Counters and times are left for the messages to fill in.
+/// A chat from a `get_chats_info` item: `{chat_id, name, description, public, members_count,
+/// organization_ids}`. Counters and times are left for the messages to fill in. The flag is
+/// `public` (seen 2026-11-20); reading `is_public` made every chat that came this way, such as a
+/// channel just created or one the user was added to, look private.
 pub fn chat_from_info(info: &Value, me: Option<&UserId>) -> Option<Chat> {
     let id = s(info, &["chat_id"])?;
-    let kind = chat_kind(id, me, info.get("is_public").and_then(Value::as_bool).unwrap_or(false));
+    let public = ["public", "is_public"]
+        .into_iter()
+        .find_map(|key| info.get(key).and_then(Value::as_bool))
+        .unwrap_or(false);
+    let kind = chat_kind(id, me, public);
     // Like the history, direct chats belong to no organization: they show in all of them.
     let organizations = match kind {
         ChatKind::Direct { .. } | ChatKind::Notes => vec![],
@@ -1348,7 +1447,7 @@ mod tests {
     #[test]
     fn chat_from_chats_info() {
         let me = UserId("aa".into());
-        let group = json!({"chat_id": "0/0/x", "name": "dev", "description": "", "is_public": true,
+        let group = json!({"chat_id": "0/0/x", "name": "dev", "description": "", "public": true,
             "members_count": 19, "organization_ids": [7]});
         let ch = chat_from_info(&group, Some(&me)).unwrap();
         assert_eq!(ch.kind, ChatKind::Group { public: true });
@@ -1367,6 +1466,11 @@ mod tests {
             }
         );
         assert!(ch.organizations.is_empty());
+        let private = json!({"chat_id": "0/0/y", "name": "ops", "public": false, "members_count": 3});
+        assert_eq!(
+            chat_from_info(&private, Some(&me)).unwrap().kind,
+            ChatKind::Group { public: false }
+        );
         assert_eq!(ch.home_section(), "dms");
         let meeting = json!({"chat_id": "0/22/m", "name": "Sync"});
         assert_eq!(chat_from_info(&meeting, Some(&me)).unwrap().home_section(), "meetings");
@@ -1957,13 +2061,14 @@ mod tests {
     fn gallery_attachments() {
         let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Gallery": {"Text": "caption", "Items": [
             {"Image": {"FileInfo": {"Id2": "disk/x1", "Name": "a.png", "Size": 10}, "Width": 800, "Height": 600}},
-            {"Image": {"FileInfo": {"Id2": "disk/x2", "Name": "b.png", "Size": 20}, "Width": 10, "Height": 10}}]}}},
+            {"Image": {"FileInfo": {"Id2": "disk/x2", "Name": "b\u{202E}gnp.exe", "Size": 20}, "Width": 10, "Height": 10}}]}}},
             "ServerMessageInfo": {"Timestamp": 1, "From": {"Guid": "u"}}});
         match from_push(&v, None) {
             Some(LiveEvent::Upsert { message, .. }) => {
                 assert_eq!(message.text, "caption");
                 assert_eq!(message.attachments.len(), 2);
                 assert_eq!(message.attachments[0].file_id, "disk/x1");
+                assert_eq!(message.attachments[1].name, "b_gnp.exe");
                 assert_eq!(
                     (message.attachments[0].width, message.attachments[0].height),
                     (800, 600)
@@ -1989,6 +2094,108 @@ mod tests {
         };
         assert_eq!((message.ts, message.seq_no), (MAX_SAFE_INTEGER, MAX_SAFE_INTEGER));
         assert_eq!(message.attachments[0].size, MAX_SAFE_INTEGER);
+    }
+
+    /// A voice message: its file, length, bars and text, with no text of its own in the feed; the
+    /// same in a message that forwards it.
+    #[test]
+    fn a_voice_message_has_its_player() {
+        let voice = json!({"FileInfo": {"Id2": "disk/v1", "Name": "voice.ogg", "Size": 9000},
+            "Duration": 14_500, "Waveform": "EvA=", "Text": " hello there ", "WasRecognized": true});
+        let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Voice": voice}},
+            "ServerMessageInfo": {"Timestamp": 5, "SeqNo": 1, "From": {"Guid": "u"}},
+            "ForwardedMessages": [{"Payload": {"ChatId": "d", "Voice": voice},
+                "ServerMessageInfo": {"Timestamp": 3, "From": {"Guid": "w"}}}]});
+        let Some(LiveEvent::Upsert { message, .. }) = from_push(&v, None) else {
+            panic!("not a message")
+        };
+        let expected = Media::Voice(Voice {
+            file_id: "disk/v1".into(),
+            duration_ms: 14_500,
+            waveform: vec![1, 2, 15, 0],
+            text: "hello there".into(),
+            recognized: true,
+        });
+        assert_eq!(message.text, "");
+        assert_eq!(message.media.as_ref(), Some(&expected));
+        assert_eq!(message.forwarded[0].media.as_ref(), Some(&expected));
+        assert_eq!(message.forwarded[0].text, "");
+        // Bars read a byte per character when the string is not base64, as the web client does.
+        assert_eq!(waveform("\u{12}\u{f0}"), [1, 2, 15, 0]);
+        assert_eq!(waveform(""), Vec::<u8>::new());
+    }
+
+    /// `list_reactions`: who read the message and who reacted, as the web client reads them.
+    #[test]
+    fn who_read_and_reacted() {
+        let v = json!({
+            "UserReads": [{"UserInfo": {"Guid": "aaaa0001-0000-4000-8000-000000000001", "DisplayName": "Anna Smirnova"},
+                "Timestamp": 9}, {"Timestamp": 8}],
+            "UserReactions": [{"UserInfo": {"Guid": "aaaa0001-0000-4000-8000-000000000002", "DisplayName": "Boris"},
+                "Type": 100_101, "Timestamp": 7}],
+        });
+        let AudiencePage {
+            reads,
+            reactions,
+            reads_end,
+            ..
+        } = audience(&v);
+        assert_eq!(reads.len(), 1);
+        // The entry without a person counts for the next page.
+        assert_eq!(
+            reads_end,
+            PageEnd {
+                entries: 2,
+                last: Some(8)
+            }
+        );
+        assert_eq!((reads[0].0.display_name.as_str(), reads[0].1), ("Anna Smirnova", 9));
+        assert_eq!(
+            (reactions[0].0.display_name.as_str(), reactions[0].1, reactions[0].2),
+            ("Boris", 100_101, 7)
+        );
+        // Empty lists are left out of the answer.
+        assert_eq!(audience(&json!({})), AudiencePage::default());
+    }
+
+    /// A sticker is a picture, with no text of its own.
+    #[test]
+    fn a_sticker_is_a_picture() {
+        let v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Sticker": {"Id": "st/1", "SetId": "pack"}}},
+            "ServerMessageInfo": {"Timestamp": 5, "SeqNo": 1, "From": {"Guid": "u"}}});
+        let Some(LiveEvent::Upsert { message, .. }) = from_push(&v, None) else {
+            panic!("not a message")
+        };
+        assert_eq!(message.text, "");
+        assert_eq!(
+            message.media,
+            Some(Media::Sticker(Sticker {
+                id: "st/1".into(),
+                set_id: "pack".into(),
+            }))
+        );
+    }
+
+    /// "Without sound" from another client: the members get a notification with no sound; the
+    /// later parts of a long message, none.
+    #[test]
+    fn a_push_says_how_its_message_notifies() {
+        let alert = |behaviour: Option<u64>| {
+            let mut v = json!({"ClientMessage": {"Plain": {"ChatId": "c", "Text": {"MessageText": "hi"}}},
+                "ServerMessageInfo": {"Timestamp": 5, "SeqNo": 1, "From": {"Guid": "u"}}});
+            if let Some(b) = behaviour {
+                v["ClientMessage"]["NotificationBehaviour"] = json!(b);
+            }
+            match from_push(&v, None) {
+                Some(LiveEvent::Upsert { alert, .. }) => alert,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(alert(None), Alert::Default);
+        assert_eq!(alert(Some(0)), Alert::Default);
+        assert_eq!(alert(Some(1)), Alert::Silent);
+        assert_eq!(alert(Some(2)), Alert::Default);
+        assert_eq!(alert(Some(3)), Alert::Quiet);
     }
 
     #[test]

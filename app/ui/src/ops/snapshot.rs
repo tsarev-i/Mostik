@@ -125,6 +125,22 @@ pub(super) fn add_new(s: &mut Snapshot, m: &Message, viewing: bool, start: Optio
         }
     } else if let Some(ch) = s.chats.iter_mut().find(|ch| ch.id == m.chat_id) {
         ch.last_ts = ch.last_ts.max(m.ts);
+        ch.last_seq = ch.last_seq.max(m.seq_no);
+        // Not counted, so no unread one to delete later (see `Snapshot::among_unread`): the user's
+        // own moves the read position past it, as Telemost does; one seen as it came in the open
+        // chat is noted apart, since unread ones from before may still be above the position.
+        if !m.edited && m.seq_no > 0 {
+            if mine {
+                let seen = ch.seen_seq.unwrap_or(0).max(m.seq_no);
+                ch.seen_seq = Some(seen);
+                ch.uncounted.retain(|n| *n > seen);
+            } else if viewing && !ch.uncounted.contains(&m.seq_no) {
+                // Not bounded: a number dropped early would make its message an unread one. The
+                // list empties when the chat is read and loses a number when its message is
+                // deleted.
+                ch.uncounted.push(m.seq_no);
+            }
+        }
         if counts {
             ch.unread = ch.unread.saturating_add(1);
             if mentioned {
@@ -193,6 +209,7 @@ const DELETED_KEPT: usize = 100;
 
 /// Removes a deleted message. A reply lowers its thread's reply count even when the replies
 /// are not loaded; a deleted parent takes its thread along, from the list and the thread pane.
+/// An unread one lowers the unread count of its chat or thread, and its mention the mentions.
 /// Each deletion counts once: the user's own comes back from Telemost as a push.
 pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timestamp>) {
     let key = (chat.clone(), ts);
@@ -216,7 +233,40 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
     let mut was_loaded = false;
     // Its thread's reply field, its editor and replies to it have nothing to go to now.
     crate::app::drafts::forget_message(c, chat, ts);
+    // A reply that was unread in its followed thread, for the thread's count below.
+    let mut unread_reply = false;
     c.snap.update(|s| {
+        // An unread message deleted after it came leaves the counts: the chat would stay unread,
+        // or keep a mention, with nothing to read in it.
+        if let Some(m) = s.messages.iter().find(|m| &m.chat_id == chat && m.ts == ts) {
+            match m.thread_parent {
+                None => {
+                    let mentioned = s.mentions_me(&m.text);
+                    let (unread, seen, uncounted) = s
+                        .chat(chat)
+                        .map_or((0, None, vec![]), |ch| (ch.unread, ch.seen_seq, ch.uncounted.clone()));
+                    let counted = s.among_unread(chat, None, ts, unread, seen, &uncounted);
+                    let seq = m.seq_no;
+                    if let Some(ch) = s.chats.iter_mut().find(|ch| &ch.id == chat) {
+                        if counted {
+                            ch.unread = ch.unread.saturating_sub(1);
+                            if mentioned {
+                                ch.mentions = ch.mentions.saturating_sub(1);
+                            }
+                        }
+                        ch.uncounted.retain(|n| *n != seq);
+                    }
+                }
+                Some(p) => {
+                    let (unread, seen) = c.threads.with_untracked(|list| {
+                        list.iter()
+                            .find(|t| &t.parent.chat_id == chat && t.parent.ts == p)
+                            .map_or((0, None), |t| (t.unread, t.seen_seq))
+                    });
+                    unread_reply = s.among_unread(chat, Some(p), ts, unread, seen, &[]);
+                }
+            }
+        }
         let removed = s
             .messages
             .iter()
@@ -258,6 +308,9 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
                 .position(|t| &t.parent.chat_id == chat && t.parent.ts == parent)
             {
                 let t = &mut list[i];
+                if unread_reply {
+                    t.unread = t.unread.saturating_sub(1);
+                }
                 if let Some(th) = t.parent.thread.as_mut() {
                     th.reply_count = th.reply_count.saturating_sub(1);
                     if th.reply_count == 0 {

@@ -69,6 +69,33 @@ pub fn value(el: &HtmlElement) -> String {
     out
 }
 
+/// The longest line, in characters, a field keeps its spell checking with. WebKitGTK checks a
+/// line again in full at every change, in time that grows faster than its length: after a pasted
+/// line of 100 000 characters each typed key took 25 s, a line of 10 000 costs nothing seen (#18).
+pub const SPELL_LINE_MAX: usize = 10_000;
+
+/// The length, in characters, of the longest line of `text`.
+pub fn longest_line(text: &str) -> usize {
+    text.split('\n').map(|line| line.chars().count()).max().unwrap_or(0)
+}
+
+/// Whether a field may check the spelling of `text`: no line of it is longer than
+/// [`SPELL_LINE_MAX`].
+pub fn spellable(text: &str) -> bool {
+    longest_line(text) <= SPELL_LINE_MAX
+}
+
+/// Whether the field may still check spelling once `ev` has put its text in: the longest line of
+/// the field and of the text together are within [`SPELL_LINE_MAX`]. An upper bound, as the
+/// text need not go into that line.
+pub fn spellable_after(el: &HtmlElement, ev: &web_sys::InputEvent) -> bool {
+    let added = ev
+        .data()
+        .or_else(|| ev.data_transfer().and_then(|d| d.get_data("text/plain").ok()))
+        .map_or(0, |d| longest_line(&d));
+    longest_line(&value(el)) + added <= SPELL_LINE_MAX
+}
+
 /// Offset in the text of a DOM position inside the field.
 fn offset_of(el: &HtmlElement, node: &Node, offset: u32) -> Option<u32> {
     if !el.contains(Some(node)) {
@@ -600,5 +627,16 @@ mod tests {
                 ("f-link f-url".to_owned(), "https://x.ru".to_owned(), false)
             ]
         );
+    }
+
+    /// Spell checking stops for a line longer than the limit, counted in characters, whatever the
+    /// length of the whole text (#18).
+    #[test]
+    fn a_line_too_long_turns_spelling_off() {
+        assert_eq!(longest_line(""), 0);
+        assert_eq!(longest_line("ab\nабв\n"), 3);
+        assert!(spellable(&"я".repeat(SPELL_LINE_MAX)));
+        assert!(!spellable(&"[".repeat(SPELL_LINE_MAX + 1)));
+        assert!(spellable(&format!("{}\n", "a".repeat(SPELL_LINE_MAX)).repeat(10)));
     }
 }

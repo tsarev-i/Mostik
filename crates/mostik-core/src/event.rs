@@ -8,6 +8,31 @@ use crate::{
     Timestamp, User, UserId,
 };
 
+/// How the sender of a message wants the members told of it (`NotificationBehaviour`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Alert {
+    /// As each member's settings say.
+    #[default]
+    Default,
+    /// A notification without a sound (`MUTED`): "Without sound" by the field.
+    Quiet,
+    /// No notification at all (`SILENT`): the later parts of a long message.
+    Silent,
+}
+
+impl Alert {
+    /// From `NotificationBehaviour`: `SILENT` 1, `MUTED` 3; the rest (`DEFAULT` 0, `IGNORE_MUTES`
+    /// 2) notify as usual.
+    pub fn from_code(code: u64) -> Self {
+        match code {
+            1 => Self::Silent,
+            3 => Self::Quiet,
+            _ => Self::Default,
+        }
+    }
+}
+
 /// A live event, built from a Telemost push (`mostik_yandex::convert::from_push`) or by the
 /// backend itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +44,9 @@ pub enum LiveEvent {
         message: Box<Message>,
         author: Option<User>,
         mentioned: Vec<User>,
+        /// How the sender wants the members told of it.
+        #[serde(default)]
+        alert: Alert,
     },
     /// A message was deleted; `thread_parent` is set for a thread reply.
     Deleted {
@@ -208,6 +236,7 @@ mod tests {
             message: Box::new(message),
             author,
             mentioned: vec![],
+            alert: Alert::Quiet,
         });
         assert_eq!(json["type"], "upsert");
         round_trip(LiveEvent::Mutings {

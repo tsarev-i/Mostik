@@ -25,12 +25,13 @@ const MAX_LEN: usize = 200;
 /// The longest extension kept apart when a name is shortened or numbered.
 const MAX_EXT: usize = 16;
 
-/// The name to save an attachment under: one plain file name, see the module docs.
+/// The name to save an attachment under: one plain file name, see the module docs. Bidi controls
+/// go too: `invoice<U+202E>fdp.exe` would show in the file manager as `invoiceexe.pdf` (#42).
 pub fn safe_name(name: &str) -> String {
     let replaced: String = name
         .chars()
         .map(|c| {
-            if c.is_control() || FORBIDDEN.contains(&c) {
+            if c.is_control() || FORBIDDEN.contains(&c) || mostik_core::is_bidi_control(c) {
                 '_'
             } else {
                 c
@@ -253,6 +254,8 @@ mod tests {
     fn characters_windows_refuses_go() {
         assert_eq!(safe_name("a<b>c\"d|e?f*g.txt"), "a_b_c_d_e_f_g.txt");
         assert_eq!(safe_name("tab\there\u{0}.txt"), "tab_here_.txt");
+        assert_eq!(safe_name("invoice\u{202E}fdp.exe"), "invoice_fdp.exe");
+        assert_eq!(safe_name("a\u{2066}b\u{2069}.txt"), "a_b_.txt");
     }
 
     #[test]

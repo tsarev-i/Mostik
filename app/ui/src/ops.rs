@@ -46,7 +46,16 @@ fn report(c: Ctx, e: String) {
 
 /// Shows "`what`: `e`" in the error bar and the console: the action `what` failed with `e`.
 pub fn failed(c: Ctx, what: &str, e: impl std::fmt::Display) {
-    report(c, format!("{what}: {e}"));
+    report(c, format!("{what}: {}", in_own_words(&e.to_string())));
+}
+
+/// A failure the backend names with a known phrase (see `mostik_ipc::cmd`), in the words of the
+/// interface; any other as it came.
+pub fn in_own_words(why: &str) -> String {
+    if why == mostik_ipc::cmd::MESSAGE_TOO_LONG {
+        return crate::i18n::tr().message_too_long.to_owned();
+    }
+    why.to_owned()
 }
 
 /// Now, in the microseconds of message times.
@@ -129,6 +138,7 @@ mod tests {
             forwarded: vec![],
             call: None,
             system: None,
+            media: None,
             reads: None,
         }
     }
@@ -181,6 +191,40 @@ mod tests {
         // Not in a chat the user is looking at.
         assert!(add_new(&mut s, &message(1100, "@all more"), true, None));
         assert_eq!(counters(&s), (1, 1));
+    }
+
+    #[test]
+    fn a_new_message_deleted_after_it_came_is_unread_no_more() {
+        let general = ChatId("general".into());
+        let numbered = |ts, seq_no, text| Message {
+            seq_no,
+            ..message(ts, text)
+        };
+        let mut s = snapshot(vec![numbered(700, 7, "read")]);
+        // Read up to the loaded message.
+        s.read_chat(&general);
+        assert_eq!(s.chat(&general).and_then(|ch| ch.seen_seq), Some(7));
+        assert!(add_new(&mut s, &numbered(1000, 8, "@all news"), false, None));
+        assert!(add_new(&mut s, &numbered(1100, 9, "more"), false, None));
+        assert_eq!(counters(&s), (2, 1));
+        // What `snapshot::remove` asks before taking a message out of the counts.
+        let unread = counters(&s).0;
+        let ch = |s: &Snapshot| s.chat(&general).cloned().unwrap();
+        let seen = ch(&s).seen_seq;
+        assert!(s.among_unread(&general, None, 1000, unread, seen, &[]));
+        assert!(s.among_unread(&general, None, 1100, unread, seen, &[]));
+        assert!(!s.among_unread(&general, None, 700, unread, seen, &[]));
+        assert_eq!(ch(&s).last_seq, 9);
+        // One that comes while the chat is in view is not counted and is no unread one to delete,
+        // and the two before it stay unread ones.
+        assert!(add_new(&mut s, &numbered(1200, 10, "seen"), true, None));
+        let (seen, uncounted) = (ch(&s).seen_seq, ch(&s).uncounted);
+        assert_eq!((counters(&s), seen, uncounted.as_slice()), ((2, 1), Some(7), &[10][..]));
+        assert!(!s.among_unread(&general, None, 1200, unread, seen, &uncounted));
+        assert!(s.among_unread(&general, None, 1000, unread, seen, &uncounted));
+        // Read to the end: nothing is held apart any more.
+        s.read_chat(&general);
+        assert_eq!((ch(&s).seen_seq, ch(&s).uncounted.len()), (Some(10), 0));
     }
 
     #[test]

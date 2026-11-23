@@ -8,13 +8,13 @@ use mostik_core::{ChatId, Message, Timestamp, UserId};
 use mostik_ipc::cmd::{self, Args, FileArgs, Out, PathArgs, SendFilesArgs, UploadFileArgs, UrlArgs};
 use mostik_yandex::convert::{self, LiveEvent};
 use mostik_yandex::diag::id_pattern;
-use mostik_yandex::web::{WebClient, percent_decode};
+use mostik_yandex::web::{DiskFile, WebClient, WebError, percent_decode};
 use mostik_yandex::wire::{self, request_id};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
 
 use super::messages::sent_from_reply;
-use super::{AppState, Live, PendingFile, allow_files, live, push, service, target_chat, text};
+use super::{AppState, Live, PendingFile, allow_files, live, push, sending_options, service, target_chat, text};
 use crate::call;
 
 /// In-memory attachment cache: showing an image again does not hit the network.
@@ -108,6 +108,114 @@ impl KnownFiles {
     pub(super) fn clear(&mut self) {
         self.owner = None;
         self.files.clear();
+    }
+}
+
+/// Where the attachments saved to "Downloads" went, kept over restarts: a second click on a file
+/// shows the copy saved before instead of downloading another one. For one account; the latest
+/// [`SAVED_FILES_KEPT`] saves.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SavedFiles {
+    owner: String,
+    files: Vec<SavedFile>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedFile {
+    id: String,
+    name: String,
+    path: std::path::PathBuf,
+}
+
+/// The file in the app data dir that holds [`SavedFiles`]. A copy being written is named after
+/// it too, so the sign-out removes both by this prefix.
+pub(super) const SAVED_FILES: &str = "saved-files.json";
+
+const SAVED_FILES_KEPT: usize = 200;
+
+/// Held while [`SAVED_FILES`] is changed or removed: two downloads ending at once keep both
+/// entries, and a download that outlived the sign-out does not write the file back after it.
+static SAVED_FILES_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Taken by the sign-out while it removes [`SAVED_FILES`]: see [`SAVED_FILES_LOCK`].
+pub(super) fn lock_saved_files() -> std::sync::MutexGuard<'static, ()> {
+    SAVED_FILES_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Account `me` of session `generation` has saved file `id` named `name` at `path`. Not kept
+/// once the session has ended: the sign-out has removed the list or is about to.
+fn remember_saved(
+    app: &AppHandle,
+    state: &AppState,
+    generation: u64,
+    me: &UserId,
+    id: &str,
+    name: &str,
+    path: std::path::PathBuf,
+) {
+    let _one = lock_saved_files();
+    if !state.session.is_current(generation) {
+        return;
+    }
+    let mut saved = SavedFiles::load(app);
+    saved.add(me, id, name, path);
+    saved.store(app);
+}
+
+impl SavedFiles {
+    fn load(app: &AppHandle) -> Self {
+        let Ok(dir) = app.path().app_data_dir() else {
+            return Self::default();
+        };
+        std::fs::read(dir.join(SAVED_FILES))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Replaces the file at once, through a copy of this process's own: a reader never sees it
+    /// half-written, nor does another Mostik writing it at the same time.
+    fn store(&self, app: &AppHandle) {
+        if let Ok(dir) = app.path().app_data_dir()
+            && let Ok(json) = serde_json::to_vec(self)
+        {
+            let _ = std::fs::create_dir_all(&dir);
+            let part = dir.join(format!("{SAVED_FILES}.{}.part", std::process::id()));
+            if std::fs::write(&part, json).is_err() || std::fs::rename(&part, dir.join(SAVED_FILES)).is_err() {
+                let _ = std::fs::remove_file(&part);
+            }
+        }
+    }
+
+    /// Where account `me` saved file `id` named `name`, if that file is still there.
+    fn find(&self, me: &UserId, id: &str, name: &str) -> Option<std::path::PathBuf> {
+        if self.owner != me.0 {
+            return None;
+        }
+        self.files
+            .iter()
+            .rev()
+            .find(|f| f.id == id && f.name == name)
+            .map(|f| f.path.clone())
+            .filter(|p| p.is_file())
+    }
+
+    /// Account `me` has saved file `id` named `name` at `path`.
+    fn add(&mut self, me: &UserId, id: &str, name: &str, path: std::path::PathBuf) {
+        if self.owner != me.0 {
+            *self = Self {
+                owner: me.0.clone(),
+                files: Vec::new(),
+            };
+        }
+        self.files.retain(|f| !(f.id == id && f.name == name));
+        self.files.push(SavedFile {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            path,
+        });
+        let extra = self.files.len().saturating_sub(SAVED_FILES_KEPT);
+        self.files.drain(..extra);
     }
 }
 
@@ -293,6 +401,8 @@ pub async fn save_file(
     if !mostik_yandex::web::valid_file_id(&file_id) {
         return Err("bad file identifier".into());
     }
+    // Read before the connection: a sign-out taking it away has renewed the session first.
+    let generation = state.session.current();
     let live = live(&state).await?;
     let rule = state
         .known_files
@@ -300,7 +410,11 @@ pub async fn save_file(
         .ok()
         .and_then(|known| known.rule(&live.me, &file_id, &name))
         .ok_or("not a file from a message")?;
-    let path = match rule.saved.filter(|p| p.is_file()) {
+    let before = rule
+        .saved
+        .filter(|p| p.is_file())
+        .or_else(|| SavedFiles::load(&app).find(&live.me, &file_id, &name));
+    let path = match before {
         Some(path) => path,
         None => {
             let _saving = Saving::start(&state.saving).ok_or_else(|| {
@@ -320,6 +434,7 @@ pub async fn save_file(
             if let Ok(mut known) = state.known_files.lock() {
                 known.saved(&file_id, &name, path.clone());
             }
+            remember_saved(&app, &state, generation, &live.me, &file_id, &name, path.clone());
             path
         }
     };
@@ -552,12 +667,14 @@ pub(super) struct Uploads {
     sent: std::collections::HashMap<String, SentParts>,
 }
 
-/// The parts of a sending that have gone: its text (alone or as the caption of the gallery) and
-/// its files.
+/// The parts of a sending that have gone: how many parts of its text (alone or the first as the
+/// caption of the gallery) and its files. The text's parts are kept as first cut: cut again, with
+/// other names known by then, they could fall apart elsewhere and the count would not fit them.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct SentParts {
-    text: bool,
+    texts: usize,
     paths: std::collections::BTreeSet<String>,
+    parts: Option<Vec<String>>,
 }
 
 /// Records a part of sending `upload` that has gone.
@@ -586,9 +703,11 @@ pub fn cancel_upload(state: tauri::State<'_, AppState>, args: Args<cmd::CancelUp
 }
 
 /// Uploads the files and sends them: images as one gallery with a caption, the rest one by one.
-/// For non-images the caption goes as a separate text message before them. With `upload` the UI
-/// gets the progress of each file and may cancel a file; a cancelled file is left out, and with
-/// every file cancelled only the caption goes, if there is one.
+/// For non-images the caption goes as a separate text message before them. A caption longer than
+/// [`wire::MESSAGE_LIMIT`] goes in parts, as a text does (see `send_message`): the first with the
+/// gallery, the rest after it without a sound. With `upload` the UI gets the progress of each file
+/// and may cancel a file; a cancelled file is left out, and with every file cancelled only the
+/// caption goes, if there is one.
 #[tauri::command]
 pub async fn send_files(
     app: AppHandle,
@@ -601,7 +720,11 @@ pub async fn send_files(
         paths,
         text,
         upload,
+        options,
     } = args;
+    if mostik_core::split::utf16_len(&text) > wire::TEXT_MAX {
+        return Err(cmd::MESSAGE_TOO_LONG.to_owned());
+    }
     let live = live(&state).await?;
     let allowed = state.allowed_files.lock().map(|a| a.clone()).unwrap_or_default();
     if let Some(bad) = paths.iter().find(|p| !allowed.contains(*p)) {
@@ -619,19 +742,6 @@ pub async fn send_files(
         let all = state.kept_files.lock().map_err(|e| e.to_string())?;
         to_send.iter().map(|p| all.get(*p).cloned()).collect()
     };
-    // Telemost refuses a file over its limit only once all of it has gone: none goes then.
-    for (path, kept) in to_send.iter().zip(&kept) {
-        let size = match kept {
-            Some(bytes) => bytes.len() as u64,
-            None => tokio::fs::metadata(path)
-                .await
-                .map_err(|e| format!("{path}: {e}"))?
-                .len(),
-        };
-        if size > cmd::MAX_UPLOAD {
-            return Err(format!("{}: {}", file_name(path), cmd::FILE_TOO_LARGE));
-        }
-    }
     // Files are read and uploaded a few at a time, the first failure stops the rest at once; the
     // gallery keeps their order.
     let uploads: Vec<_> = to_send
@@ -680,34 +790,49 @@ pub async fn send_files(
         }
     }
     let mut sent = Vec::new();
-    let text = if done.text {
-        String::new()
-    } else {
-        text.trim().to_owned()
+    let parts = match done.parts {
+        Some(parts) => parts,
+        None => super::messages::split_text(&live, text.trim()),
     };
-    if !text.is_empty() && images.is_empty() {
-        sent.push(
-            send_plain(
-                &live,
-                &chat_id,
-                thread,
-                wire::plain_text(&target, &request_id(), &text),
-                &text,
-            )
-            .await?,
-        );
-        mark_sent(&state, upload.as_ref(), |s| s.text = true);
-    }
+    mark_sent(&state, upload.as_ref(), |s| {
+        s.parts.get_or_insert_with(|| parts.clone());
+    });
+    // The next part of the text to go: an earlier try may have sent some.
+    let mut next = done.texts;
+    // Only the first message of the sending goes as the user chose (see `sending_options`).
+    let mut first = !options.follows && done.texts == 0 && done.paths.is_empty();
+    let mut how = || {
+        let how = sending_options(options, first);
+        first = false;
+        how
+    };
+    // The gallery, with the first part as its caption, goes before the rest of the text; files
+    // go after it. Images still to send mean the gallery has not gone.
     if !images.is_empty() {
-        let msg = wire::gallery(&target, &gallery_id, images, &text);
-        sent.push(send_plain(&live, &chat_id, thread, msg, &text).await?);
+        let caption = if next == 0 {
+            parts.first().map_or("", String::as_str)
+        } else {
+            ""
+        };
+        let (notify, important) = how();
+        let msg = wire::with_options(wire::gallery(&target, &gallery_id, images, caption), notify, important);
+        sent.push(send_plain(&live, &chat_id, thread, msg, caption).await?);
+        next = next.max(usize::from(!parts.is_empty()));
         mark_sent(&state, upload.as_ref(), |s| {
-            s.text = true;
+            s.texts = next;
             s.paths.extend(image_paths);
         });
     }
+    for (i, part) in parts.iter().enumerate().skip(next) {
+        let (notify, important) = how();
+        let msg = wire::with_options(wire::plain_text(&target, &request_id(), part), notify, important);
+        sent.push(send_plain(&live, &chat_id, thread, msg, part).await?);
+        mark_sent(&state, upload.as_ref(), |s| s.texts = i + 1);
+    }
     for (path, payload, info) in files {
         let msg = json!({ "Plain": { "ChatId": target, "PayloadId": payload, "MiscFile": { "FileInfo": info } } });
+        let (notify, important) = how();
+        let msg = wire::with_options(msg, notify, important);
         sent.push(send_plain(&live, &chat_id, thread, msg, "").await?);
         mark_sent(&state, upload.as_ref(), |s| {
             s.paths.insert(path);
@@ -781,9 +906,9 @@ async fn upload_tracked(app: AppHandle, upload: Option<String>, file: Upload) ->
         let (app, key, progress) = (app.clone(), key.clone(), progress.clone());
         move |sent: u64, total: u64| {
             let Ok(mut p) = progress.lock() else { return };
-            if sent != p.sent || total != p.total {
-                (p.sent, p.total, p.moved) = (sent, total, std::time::Instant::now());
-            }
+            // Every call is a sign of life: bytes have gone, or Yandex Disk said it is still
+            // taking the file in.
+            (p.sent, p.total, p.moved) = (sent, total, std::time::Instant::now());
             let due = sent >= total || p.reported.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY);
             if let Some((upload, path)) = &key
                 && due
@@ -835,7 +960,8 @@ fn file_name(path: &str) -> String {
 }
 
 /// Reads a file without blocking the runtime (unless its contents are `kept` in memory) and
-/// uploads it to the Messenger storage, telling `progress` how many of how many bytes have gone.
+/// uploads it to the Messenger storage, or one over [`cmd::MAX_UPLOAD`] to Yandex Disk, telling
+/// `progress` how many of how many bytes have gone.
 async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>) -> Result<Uploaded, String> {
     let Upload {
         mut web,
@@ -846,12 +972,24 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
     } = file;
     let path = path.as_str();
     let p = std::path::Path::new(path);
+    let name = file_name(path);
+    let mime = mime_guess::from_path(p).first_or_octet_stream();
+    let on_disk = match &kept {
+        Some(bytes) => bytes.len() as u64,
+        None => tokio::fs::metadata(p).await.map_err(|e| format!("{path}: {e}"))?.len(),
+    };
+    if on_disk > cmd::MAX_UPLOAD {
+        let file = match kept {
+            Some(bytes) => DiskFile::Memory(bytes),
+            None => DiskFile::Path(p.to_owned()),
+        };
+        let video = mime.type_() == "video";
+        return upload_to_disk(&mut web, &target, &name, video, file, on_disk, progress).await;
+    }
     let bytes = match kept {
         Some(bytes) => bytes,
         None => tokio::fs::read(p).await.map_err(|e| format!("{path}: {e}"))?.into(),
     };
-    let name = file_name(path);
-    let mime = mime_guess::from_path(p).first_or_octet_stream();
     let size = bytes.len();
     progress(0, size as u64);
     let dims = (mime.type_() == "image")
@@ -875,6 +1013,33 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
         Some(d) => Uploaded::Image(wire::gallery_image(d.width as u64, d.height as u64, info)),
         None => Uploaded::File(payload, info),
     })
+}
+
+/// Uploads a file over [`cmd::MAX_UPLOAD`] through the user's Yandex Disk, as the web client
+/// does: Telemost gives an address on the Disk, the file goes there as it is read, then it is
+/// added to chat `target`. It is sent as a file, an image too.
+async fn upload_to_disk(
+    web: &mut WebClient,
+    target: &str,
+    name: &str,
+    video: bool,
+    file: DiskFile,
+    size: u64,
+    progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
+) -> Result<Uploaded, String> {
+    let failed = |e: WebError| match e {
+        WebError::DiskFull => format!("{name}: {}", cmd::DISK_FULL),
+        WebError::DiskTooLarge => format!("{name}: {}", cmd::DISK_FILE_TOO_LARGE),
+        e => format!("{name}: {e}"),
+    };
+    progress(0, size);
+    let url = web.disk_upload_url(target, name, size, video).await.map_err(&failed)?;
+    let location = web
+        .disk_put(&url, &file, size, Arc::new(move |sent| progress(sent, size)))
+        .await
+        .map_err(&failed)?;
+    let id = web.add_disk_file(target, &location).await.map_err(&failed)?;
+    Ok(Uploaded::File(request_id(), wire::disk_file_info(&id, name, size)))
 }
 
 /// Sends a ready `ClientMessage` and returns the feed message (with its attachments).
@@ -905,6 +1070,35 @@ mod tests {
     use mostik_core::{Attachment, AttachmentKind, Forwarded, UserId};
 
     use super::*;
+
+    /// A file saved before a restart is found again while it is in its place, for its account
+    /// only; saving it again keeps one entry, and the oldest go past the limit.
+    #[test]
+    fn a_saved_file_is_found_after_a_restart() {
+        let dir = std::env::temp_dir().join(format!("mostik-saved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Cargo.toml");
+        std::fs::write(&path, "x").unwrap();
+        let (me, other) = (UserId("u1".into()), UserId("u2".into()));
+        let mut saved = SavedFiles::default();
+        saved.add(&me, "file/1", "Cargo.toml", path.clone());
+        let again: SavedFiles = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(again.find(&me, "file/1", "Cargo.toml"), Some(path.clone()));
+        assert_eq!(again.find(&me, "file/1", "other.toml"), None);
+        assert_eq!(again.find(&other, "file/1", "Cargo.toml"), None);
+        saved.add(&me, "file/1", "Cargo.toml", path.clone());
+        assert_eq!(saved.files.len(), 1);
+        for i in 0..SAVED_FILES_KEPT {
+            saved.add(&me, &format!("file/x{i}"), "a", dir.join("a"));
+        }
+        assert_eq!(saved.files.len(), SAVED_FILES_KEPT);
+        assert_eq!(saved.find(&me, "file/1", "Cargo.toml"), None);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(again.find(&me, "file/1", "Cargo.toml"), None);
+        saved.add(&other, "file/2", "b", dir.join("b"));
+        assert_eq!((saved.owner.as_str(), saved.files.len()), ("u2", 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn file(id: &str, name: &str, size: u64) -> Attachment {
         Attachment {
@@ -938,10 +1132,12 @@ mod tests {
                 text: String::new(),
                 attachments: forwarded,
                 quote: None,
+                media: None,
                 reply: false,
             }],
             call: None,
             system: None,
+            media: None,
             reads: None,
         }
     }
@@ -1009,14 +1205,21 @@ mod tests {
     fn sent_parts_are_kept_by_sending() {
         let state = AppState::default();
         let id = "up1".to_owned();
-        mark_sent(&state, None, |s| s.text = true);
+        mark_sent(&state, None, |s| s.texts = 1);
         assert!(state.uploads.lock().unwrap().sent.is_empty());
-        mark_sent(&state, Some(&id), |s| s.text = true);
+        mark_sent(&state, Some(&id), |s| s.texts = 1);
         mark_sent(&state, Some(&id), |s| {
             s.paths.insert("/tmp/a.pdf".into());
         });
+        // The text keeps the parts it was first cut into.
+        for cut in [["first", "cut"], ["other", "cut"]] {
+            mark_sent(&state, Some(&id), |s| {
+                s.parts.get_or_insert_with(|| cut.map(String::from).to_vec());
+            });
+        }
         let sent = state.uploads.lock().unwrap().sent.get(&id).cloned().unwrap();
-        assert!(sent.text);
+        assert_eq!(sent.parts.as_deref(), Some(&["first".to_owned(), "cut".to_owned()][..]));
+        assert_eq!(sent.texts, 1);
         assert_eq!(sent.paths.into_iter().collect::<Vec<_>>(), ["/tmp/a.pdf"]);
     }
 
