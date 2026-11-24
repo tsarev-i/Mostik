@@ -610,6 +610,9 @@ pub struct HistoryData {
     pub messages: Vec<Message>,
     /// The last `(Timestamp, SeqNo)` of every chat, for read markers.
     pub last: BTreeMap<String, (Timestamp, u64)>,
+    /// How the senders of these messages wanted the members told of them, by `(chat, time)`; only
+    /// the ones other than [`Alert::Default`].
+    pub alerts: BTreeMap<(String, Timestamp), Alert>,
 }
 
 /// The time of the oldest record of a `history` page. Deleted messages and service records count
@@ -657,6 +660,10 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
             }
             if let Parsed::Message(m) = parse_server_message(sm, Some(id), me) {
                 last_ts = last_ts.max(m.ts);
+                let alert = Alert::from_code(n(sm, &["ClientMessage", "NotificationBehaviour"]).unwrap_or(0));
+                if alert != Alert::Default {
+                    out.alerts.insert((id.to_owned(), m.ts), alert);
+                }
                 out.messages.push(*m);
             }
         }
@@ -2196,6 +2203,30 @@ mod tests {
         assert_eq!(alert(Some(1)), Alert::Silent);
         assert_eq!(alert(Some(2)), Alert::Default);
         assert_eq!(alert(Some(3)), Alert::Quiet);
+    }
+
+    /// The chat list keeps how its messages notify, for the ones that came while the connection
+    /// was down (the bot of the owner's organization sends `SILENT`).
+    #[test]
+    fn the_chat_list_says_how_its_messages_notify() {
+        let item = |chat: &str, ts: u64, behaviour: Option<u64>| {
+            let mut v = json!({"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": chat, "Text": {"MessageText": "hi"}}},
+                "ServerMessageInfo": {"Timestamp": ts, "SeqNo": 1, "From": {"Guid": "u"}}}});
+            if let Some(b) = behaviour {
+                v["ServerMessage"]["ClientMessage"]["NotificationBehaviour"] = json!(b);
+            }
+            v
+        };
+        let list = json!({"Chats": [
+            {"ChatId": "0/0/c", "LastSeqNo": 1, "ChatInfo": {"Name": "c"}, "Messages": [item("0/0/c", 5, Some(1))]},
+            {"ChatId": "0/0/d", "LastSeqNo": 1, "ChatInfo": {"Name": "d"}, "Messages": [item("0/0/d", 6, None)]},
+        ]});
+        let data = from_history(&list, None);
+        assert_eq!(data.messages.len(), 2);
+        assert_eq!(
+            data.alerts.into_iter().collect::<Vec<_>>(),
+            [(("0/0/c".to_owned(), 5), Alert::Silent)]
+        );
     }
 
     #[test]

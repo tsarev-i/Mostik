@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::chats::chat_info_raw;
 use super::connection::{probing, reconnect_loop};
-use super::notify::{may_ring, notify};
+use super::notify::{Gap, may_ring, notify};
 use super::threads::reply_notifies_now;
 use super::{AppState, EVENT, Live, Shared, fill_profiles, live, note_files, service};
 
@@ -133,6 +133,19 @@ pub(super) fn handle_incoming(
         }
         Incoming::Text(_) => {}
         Incoming::Closed => {
+            // What this connection saw, for the next one to notify of what came meanwhile. The
+            // first drop counts: the connections of a storm that never got ready saw nothing.
+            if let Ok(sh) = shared.lock()
+                && sh.ready
+                && let Ok(mut gap) = app.state::<AppState>().gap.lock()
+                && gap.as_ref().is_none_or(|g| g.generation != generation)
+            {
+                *gap = Some(Gap {
+                    generation,
+                    since: mostik_yandex::clock::now_mcs(),
+                    last: sh.last.clone(),
+                });
+            }
             let _ = app.emit(EVENT, &LiveEvent::Connection { online: false });
             let app = app.clone();
             tauri::async_runtime::spawn(async move { reconnect_loop(app, generation).await });

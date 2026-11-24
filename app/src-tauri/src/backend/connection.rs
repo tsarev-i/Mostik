@@ -26,7 +26,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::events::handle_incoming;
 use super::presence::start_heartbeat;
-use super::{AppState, Boot, EVENT, Live, SIGNED_OUT_EVENT, SNAPSHOT_EVENT, Shared, fill_profiles, service, text};
+use super::{
+    AppState, Boot, EVENT, Live, SIGNED_OUT_EVENT, SNAPSHOT_EVENT, Shared, fill_profiles, notify, service, text,
+};
 use crate::{call, login, store};
 
 /// Turns on the connection diagnostics (`probe*.json`, `probe-events.jsonl`) in a release build.
@@ -246,6 +248,10 @@ async fn connect(
             if !install(app, state, generation, live).await {
                 return Ok(Boot::NeedLogin { reason: None });
             }
+            // The UI starts afresh with this chat list: nothing in it is news to notify of.
+            if let Ok(mut gap) = state.gap.lock() {
+                *gap = None;
+            }
             Ok(Boot::Ready {
                 snapshot: Box::new(snapshot),
             })
@@ -325,11 +331,13 @@ async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
             // Its close went to a reconnection that this loop turned away: try again.
             Ok((_, live)) if live.xiva.is_closed() => eprintln!("reconnect: the new connection closed at once"),
             Ok((snapshot, live)) => {
+                let shared = live.shared.clone();
                 if !install(app, state, generation, live).await {
                     return false;
                 }
                 let _ = app.emit(EVENT, &LiveEvent::Connection { online: true });
                 let _ = app.emit(SNAPSHOT_EVENT, &snapshot);
+                notify_missed(app, &shared);
                 return true;
             }
             Err(ConnectError::Unauthorized) => {
@@ -346,6 +354,27 @@ async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
             }
             Err(ConnectError::Other(e)) => eprintln!("reconnect failed: {e}"),
         }
+    }
+}
+
+/// Notifies of the messages that came while the connection was down (`Shared::missed`), after the
+/// UI has the chat list they are in. The gap is closed: the next drop starts one of its own.
+fn notify_missed(app: &AppHandle, shared: &StdMutex<Shared>) {
+    if let Ok(mut gap) = app.state::<AppState>().gap.lock() {
+        *gap = None;
+    }
+    let missed = shared
+        .lock()
+        .map(|mut sh| std::mem::take(&mut sh.missed))
+        .unwrap_or_default();
+    if !missed.is_empty() {
+        eprintln!(
+            "reconnect: {} chats got messages while the connection was down",
+            missed.len()
+        );
+    }
+    for (m, alert) in missed {
+        notify::notify(app, shared, &m, None, alert);
     }
 }
 
@@ -526,6 +555,7 @@ async fn connect_inner(
         probe["notes"] = json!("exists");
     }
     let last = std::mem::take(&mut data.last);
+    let alerts = std::mem::take(&mut data.alerts);
     // The snapshot and the connection need an ID even for a user nothing named: one that
     // matches nobody.
     let me_id = known_me.clone().unwrap_or_else(|| UserId("me".into()));
@@ -601,6 +631,15 @@ async fn connect_inner(
         sh.learn_names(&snapshot.users);
         sh.channels = snapshot.mention_channels();
         sh.ready = true;
+        // What came while the connection before this one was down notifies once this one is in
+        // place (see `notify_missed`). The gap stays until then: a connection that closes at once
+        // leaves it to the next one.
+        if let Ok(gap) = state.gap.lock()
+            && let Some(gap) = gap.as_ref().filter(|g| g.generation == generation)
+        {
+            sh.missed = notify::missed(gap, &snapshot.chats, &snapshot.messages, &alerts, known_me.as_ref());
+            probe["missed"] = json!(sh.missed.len());
+        }
     }
     probe["snapshot"] = json!({
         "chats": snapshot.chats.len(),

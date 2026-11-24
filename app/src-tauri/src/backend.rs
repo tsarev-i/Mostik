@@ -98,6 +98,9 @@ struct Shared {
     service_chats: Vec<service::ServiceChat>,
     /// The user's organizations.
     orgs: Vec<u64>,
+    /// Messages that came while the connection before this one was down (see
+    /// [`notify::missed`]): they notify once this connection is in place.
+    missed: Vec<(Message, mostik_core::event::Alert)>,
 }
 
 impl Shared {
@@ -248,6 +251,8 @@ pub struct AppState {
     heartbeat_running: AtomicBool,
     diag_events: Arc<AtomicUsize>,
     pub service: service::State,
+    /// What the connection that went down had seen, until a new one is up (see [`notify::Gap`]).
+    gap: StdMutex<Option<notify::Gap>>,
 }
 
 async fn live(state: &AppState) -> Result<Arc<Live>, String> {
