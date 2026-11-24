@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-app"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3068,7 +3068,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emojis",
  "serde",
@@ -3077,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-ipc"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "mostik-core",
  "serde",
@@ -3086,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-ui"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "console_error_panic_hook",
  "emojis",
@@ -3104,7 +3104,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-yandex"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytes",
  "cookie",
