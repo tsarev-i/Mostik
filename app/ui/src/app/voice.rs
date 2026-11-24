@@ -94,7 +94,7 @@ fn play(c: Ctx, file_id: String, duration_ms: u64, from_ms: u64) {
         return started(c, duration_ms);
     }
     spawn_local(async move {
-        let result = bridge::play_voice(&id, from_ms).await;
+        let result = bridge::play_voice(&id, from_ms, duration_ms).await;
         // A pause, another message or another request to play meanwhile wins.
         if c.voice
             .with_untracked(|v| v.as_ref().is_none_or(|v| v.file_id != id || v.state != state))

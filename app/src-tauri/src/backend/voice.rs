@@ -1,4 +1,4 @@
-//! Voice messages: downloaded, decoded and played here (see `crate::voice`), one at a time.
+//! Voice messages: downloaded, decoded apart and played here (see `crate::voice`), one at a time.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,11 +14,18 @@ use crate::voice::{self, Audio};
 pub const VOICE_EVENT: &str = "mostik://voice";
 
 /// The largest voice message file downloaded: ten minutes of Opus speech is a few megabytes.
-const VOICE_LIMIT: u64 = 32 * 1024 * 1024;
+const VOICE_LIMIT: u64 = voice::FILE_LIMIT;
 
 /// How many decoded voice messages are kept, so a pause, a seek or a second listen does not
 /// download them again.
 const KEPT: usize = 4;
+
+/// How many samples the kept ones may take together, the latest always kept: about 64 MB, two
+/// ten-minute messages (#63).
+const KEPT_SAMPLES: usize = 32 * 1024 * 1024;
+
+/// Held while a voice message decodes: one at a time, each in a process of its own (#63).
+static DECODING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The decoded voice messages, the latest used last, each with the session it was downloaded in.
 static KEPT_AUDIO: Mutex<Vec<(u64, String, Arc<Audio>)>> = Mutex::new(Vec::new());
@@ -46,6 +53,10 @@ fn keep(generation: u64, file_id: &str, audio: Arc<Audio>) {
         all.push((generation, file_id.to_owned(), audio));
         let over = all.len().saturating_sub(KEPT);
         all.drain(..over);
+        // The oldest go until the rest fit, the one just kept stays.
+        while all.len() > 1 && all.iter().map(|(.., a)| a.samples.len()).sum::<usize>() > KEPT_SAMPLES {
+            all.remove(0);
+        }
     }
 }
 
@@ -68,7 +79,11 @@ pub async fn play_voice(
     state: tauri::State<'_, AppState>,
     args: Args<cmd::PlayVoice>,
 ) -> Result<Out<cmd::PlayVoice>, String> {
-    let VoiceArgs { file_id, from_ms } = args;
+    let VoiceArgs {
+        file_id,
+        from_ms,
+        duration_ms,
+    } = args;
     let click = CLICKS.fetch_add(1, Ordering::SeqCst) + 1;
     // The one playing stops now, not once this one has come.
     voice::stop();
@@ -83,7 +98,13 @@ pub async fn play_voice(
                 .fetch_file(&file_id, None, VOICE_LIMIT)
                 .await
                 .map_err(|e| web_error(&app, e))?;
-            let audio = tauri::async_runtime::spawn_blocking(move || voice::decode(&bytes))
+            // No more than the message says it lasts, with a margin; ten minutes if it says nothing.
+            let max_ms = match duration_ms {
+                0 => voice::MAX_MS,
+                ms => ms.saturating_add(2_000).min(voice::MAX_MS),
+            };
+            let _one = DECODING.lock().await;
+            let audio = tauri::async_runtime::spawn_blocking(move || voice::decode_apart(bytes, max_ms))
                 .await
                 .map_err(|e| e.to_string())??;
             (Arc::new(audio), true)
@@ -122,12 +143,7 @@ mod tests {
 
     #[test]
     fn the_latest_voice_messages_are_kept() {
-        let audio = || {
-            Arc::new(Audio {
-                channels: 1,
-                samples: vec![],
-            })
-        };
+        let audio = || Arc::new(Audio { samples: vec![] });
         for i in 0..KEPT {
             keep(1, &format!("f{i}"), audio());
         }
@@ -142,5 +158,15 @@ mod tests {
         assert!(kept(2, "new").is_none());
         forget();
         assert!(kept(1, "new").is_none());
+        // Long ones push the oldest out sooner; the latest stays even alone over the budget.
+        let long = |n| Arc::new(Audio { samples: vec![0; n] });
+        keep(1, "a", long(KEPT_SAMPLES / 2));
+        keep(1, "b", long(KEPT_SAMPLES / 2));
+        keep(1, "c", long(1));
+        assert!(kept(1, "a").is_none() && kept(1, "b").is_some() && kept(1, "c").is_some());
+        keep(1, "huge", long(KEPT_SAMPLES + 1));
+        assert!(kept(1, "huge").is_some());
+        assert_eq!(KEPT_AUDIO.lock().unwrap().len(), 1);
+        forget();
     }
 }

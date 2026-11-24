@@ -195,6 +195,10 @@ pub struct UrlArgs {
 pub struct VoiceArgs {
     pub file_id: String,
     pub from_ms: u64,
+    /// Its length as the message says (`Voice.Duration`), 0 if it does not: no more of the file
+    /// than that is decoded.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 /// A file taken off the message, as [`crate::PendingFile::path`].

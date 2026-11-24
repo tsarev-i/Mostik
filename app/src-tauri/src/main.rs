@@ -205,6 +205,10 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    // Started again as the voice message decoder (see `voice::decode_apart`): no app, no window.
+    if let Some(code) = voice::child_main() {
+        std::process::exit(code);
+    }
     // Before Tauri starts any thread: it sets an environment variable for enchant.
     #[cfg(target_os = "linux")]
     spelling::install();

@@ -276,12 +276,13 @@ pub async fn message_audience(m: &Message) -> Result<Audience, String> {
 /// A voice message played to its end, or that could not play: [`VoiceEnded`].
 pub const VOICE_EVENT: &str = "mostik://voice";
 
-/// Plays voice message `file_id` from `from_ms`, stopping the one playing; returns its length in
-/// milliseconds.
-pub async fn play_voice(file_id: &str, from_ms: u64) -> Result<u64, String> {
+/// Plays voice message `file_id` of `duration_ms` (as the message says) from `from_ms`, stopping
+/// the one playing; returns its length in milliseconds.
+pub async fn play_voice(file_id: &str, from_ms: u64, duration_ms: u64) -> Result<u64, String> {
     call::<cmd::PlayVoice>(cmd::VoiceArgs {
         file_id: file_id.into(),
         from_ms,
+        duration_ms,
     })
     .await
 }

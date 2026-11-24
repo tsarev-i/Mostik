@@ -42,9 +42,10 @@ mostik-yandex.workspace = true
 # GStreamer, which the AppImage does not carry, and may hold back audio of a hidden window.
 rodio = { version = "0.23.0", default-features = false, features = ["playback", "wav"] }
 # Voice messages are Ogg Opus: read here and played through rodio, for the same reason. Pure Rust,
-# no libopus to build or bundle on each system.
+# no libopus to build or bundle on each system. opus-rs is young and full of `unsafe`: pinned, and
+# run only in a decoder process of its own (see voice.rs, #64); a new version is taken on purpose.
 ogg = "0.9"
-opus-rs = "0.1.42"
+opus-rs = "=0.1.42"
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
