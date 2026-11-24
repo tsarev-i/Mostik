@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::{SidebarFilter, SidebarSort};
 
+/// A piece of a note about the chat (see [`Tr::chat_note_parts`]): words, or a person it
+/// adds or removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotePart {
+    Text(String),
+    Person(UserId),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Lang {
     #[default]
@@ -1734,32 +1742,75 @@ impl Tr {
     }
 
     /// What a note about the chat says after the name of its author, as in Slack's "joined
-    /// #channel"; `name` names the people it adds or removes. Russian names are not declined,
-    /// so they follow a colon.
+    /// #channel"; `name` names the people it adds or removes.
     pub fn chat_note(&self, note: &SystemNote, author: &UserId, name: impl Fn(&UserId) -> String) -> String {
-        let list = |ids: &[UserId]| self.list(&ids.iter().map(&name).collect::<Vec<_>>());
+        self.chat_note_parts(note, author)
+            .into_iter()
+            .map(|part| match part {
+                NotePart::Text(text) => text,
+                NotePart::Person(id) => name(&id),
+            })
+            .collect()
+    }
+
+    /// [`Self::chat_note`] in parts, so that the feed can show each person it adds or removes as a
+    /// name that opens their profile. Russian names are not declined, so they follow a colon.
+    pub fn chat_note_parts(&self, note: &SystemNote, author: &UserId) -> Vec<NotePart> {
+        let text = |s: &str| NotePart::Text(s.to_owned());
         let only_author = |ids: &[UserId]| ids == std::slice::from_ref(author);
         let ru = self.lang == Lang::Ru;
         match note {
-            SystemNote::Created { name } => match (ru, mostik_core::split_chat_icon(name).1) {
+            SystemNote::Created { name } => vec![NotePart::Text(match (ru, mostik_core::split_chat_icon(name).1) {
                 (true, "") => "создал(а) канал".to_owned(),
                 (true, name) => format!("создал(а) канал #{name}"),
                 (false, "") => "created the channel".to_owned(),
                 (false, name) => format!("created #{name}"),
-            },
-            SystemNote::Joined => self.chat_joined(),
-            SystemNote::Left => self.chat_left(),
-            SystemNote::Members { added, removed } if removed.is_empty() && only_author(added) => self.chat_joined(),
-            SystemNote::Members { added, removed } if added.is_empty() && only_author(removed) => self.chat_left(),
-            SystemNote::Members { added, removed } => match (ru, added.is_empty(), removed.is_empty()) {
-                (true, false, true) => format!("добавил(а) в канал: {}", list(added)),
-                (true, true, _) => format!("удалил(а) из канала: {}", list(removed)),
-                (true, false, false) => format!("добавил(а) в канал: {}; удалил(а): {}", list(added), list(removed)),
-                (false, false, true) => format!("added {}", list(added)),
-                (false, true, _) => format!("removed {}", list(removed)),
-                (false, false, false) => format!("added {} and removed {}", list(added), list(removed)),
-            },
+            })],
+            SystemNote::Joined => vec![NotePart::Text(self.chat_joined())],
+            SystemNote::Left => vec![NotePart::Text(self.chat_left())],
+            SystemNote::Members { added, removed } if removed.is_empty() && only_author(added) => {
+                vec![NotePart::Text(self.chat_joined())]
+            }
+            SystemNote::Members { added, removed } if added.is_empty() && only_author(removed) => {
+                vec![NotePart::Text(self.chat_left())]
+            }
+            SystemNote::Members { added, removed } => {
+                let (start, middle, removed_only) = match ru {
+                    true => ("добавил(а) в канал: ", "; удалил(а): ", "удалил(а) из канала: "),
+                    false => ("added ", " and removed ", "removed "),
+                };
+                let mut parts = Vec::new();
+                if added.is_empty() {
+                    parts.push(text(removed_only));
+                } else {
+                    parts.push(text(start));
+                    parts.extend(self.list_people(added));
+                    if !removed.is_empty() {
+                        parts.push(text(middle));
+                    }
+                }
+                parts.extend(self.list_people(removed));
+                parts
+            }
         }
+    }
+
+    /// People in a sentence, as [`Self::list`] joins names: "Anna, Boris and Vera".
+    fn list_people(&self, ids: &[UserId]) -> Vec<NotePart> {
+        let and = match self.lang {
+            Lang::Ru => " и ",
+            Lang::En => " and ",
+        };
+        let mut parts = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            match ids.len() - i {
+                _ if i == 0 => {}
+                1 => parts.push(NotePart::Text(and.to_owned())),
+                _ => parts.push(NotePart::Text(", ".to_owned())),
+            }
+            parts.push(NotePart::Person(id.clone()));
+        }
+        parts
     }
 
     fn chat_joined(&self) -> String {
@@ -2013,6 +2064,41 @@ mod tests {
             name: "⚠️|Test".into()
         };
         assert_eq!(EN.chat_note(&created, &me, name), "created #Test");
+        assert_eq!(
+            EN.chat_note(&members(&[], &["b", "c"]), &me, name),
+            "removed <b> and <c>"
+        );
+    }
+
+    /// Each person a note adds or removes is a part of their own, for the feed to make a name to
+    /// click.
+    #[test]
+    fn chat_note_people_are_parts() {
+        use super::NotePart::{Person, Text};
+        let id = |s: &str| UserId(s.into());
+        let note = SystemNote::Members {
+            added: vec![id("b"), id("c")],
+            removed: vec![id("d")],
+        };
+        assert_eq!(
+            RU.chat_note_parts(&note, &id("a")),
+            [
+                Text("добавил(а) в канал: ".into()),
+                Person(id("b")),
+                Text(" и ".into()),
+                Person(id("c")),
+                Text("; удалил(а): ".into()),
+                Person(id("d")),
+            ]
+        );
+        let joined = SystemNote::Members {
+            added: vec![id("a")],
+            removed: vec![],
+        };
+        assert_eq!(
+            EN.chat_note_parts(&joined, &id("a")),
+            [Text("joined the channel".into())]
+        );
     }
 
     #[test]
