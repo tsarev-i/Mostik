@@ -93,6 +93,10 @@ struct Shared {
     /// that the fetched list did not have yet: their replies notify as followed ones. A list that
     /// has one takes it over into `followed`.
     joined: BTreeSet<(String, Timestamp)>,
+    /// Threads Telemost said the user stopped following (`you_removed_from_thread`) on this
+    /// connection. No fetched list brings them back, since it may have gone out before; only
+    /// Telemost's word does: the user's own reply or a mention there, or `you_added_to_thread`.
+    left: BTreeSet<(String, Timestamp)>,
     /// Replies in threads of unknown standing that wait for the list to be fetched again, to
     /// notify about the ones the user turns out to follow.
     thread_wait: Vec<(Message, Option<User>, mostik_core::event::Alert)>,
@@ -357,7 +361,7 @@ pub(crate) async fn with_profile(app: &AppHandle, user: User) -> User {
 /// `AvatarId`, and `From` may hold only the GUID. Returns how many photos were filled in.
 async fn fill_profiles(web: &WebClient, users: &mut [User]) -> usize {
     let guids: Vec<String> = users.iter().map(|u| u.id.0.clone()).collect();
-    apply_profiles(users, &fetch_profiles(web, &guids).await)
+    apply_profiles(users, &fetch_profiles(web, &guids).await.0)
 }
 
 /// [`fill_profiles`] for the snapshot of a connection of session `generation`: the people the
@@ -375,19 +379,24 @@ async fn fill_profiles_cached(state: &AppState, generation: u64, web: &WebClient
             };
         }
         cache.fetched.retain(|_, (at, _)| now.duration_since(*at) < PROFILE_TTL);
+        cache.absent.retain(|_, at| now.duration_since(*at) < PROFILE_TTL);
         for u in users.iter() {
             match cache.fetched.get(&u.id.0) {
                 Some((_, p)) => known.push(p.clone()),
+                None if cache.absent.contains_key(&u.id.0) => {}
                 None => missing.push(u.id.0.clone()),
             }
         }
     }
-    let fetched = fetch_profiles(web, &missing).await;
+    let (fetched, answered) = fetch_profiles(web, &missing).await;
     if let Ok(mut cache) = state.profiles.lock()
         && cache.generation == generation
     {
         for p in &fetched {
             cache.fetched.insert(p.id.0.clone(), (now, p.clone()));
+        }
+        for guid in answered.into_iter().filter(|g| !fetched.iter().any(|p| &p.id.0 == g)) {
+            cache.absent.insert(guid, now);
         }
     }
     known.extend(fetched);
@@ -403,20 +412,34 @@ const PROFILE_TTL: Duration = Duration::from_secs(30 * 60);
 struct ProfileCache {
     generation: u64,
     fetched: std::collections::HashMap<String, (std::time::Instant, mostik_core::UserProfile)>,
+    /// People the directory answered about without a record (a lone one gets a 404): asked
+    /// again only after [`PROFILE_TTL`], not at every reconnection.
+    absent: std::collections::HashMap<String, std::time::Instant>,
 }
 
-/// The directory records of `guids`, a few requests at once.
-async fn fetch_profiles(web: &WebClient, guids: &[String]) -> Vec<mostik_core::UserProfile> {
+/// The directory records of `guids`, a few requests at once, and the GUIDs the directory
+/// answered about, with a record or without: a reply with `"status": "ok"`, or the 404 a request
+/// for unknown people only gets. Any other failure answers nothing.
+async fn fetch_profiles(web: &WebClient, guids: &[String]) -> (Vec<mostik_core::UserProfile>, Vec<String>) {
     let jobs = guids.chunks(convert::PROFILES_PER_REQUEST).map(|chunk| {
         let mut web = web.clone_light();
-        async move { web.rpc("get_users_data", json!({ "guids": chunk })).await }
+        async move { (chunk, web.rpc("get_users_data", json!({ "guids": chunk })).await) }
     });
-    futures_util::future::join_all(jobs)
-        .await
-        .into_iter()
-        .flatten()
-        .flat_map(|v| convert::profiles(&v))
-        .collect()
+    let mut profiles = Vec::new();
+    let mut answered = Vec::new();
+    for (chunk, result) in futures_util::future::join_all(jobs).await {
+        match result {
+            Ok(v) if v.get("status").and_then(Value::as_str) == Some("ok") => profiles.extend(convert::profiles(&v)),
+            Ok(v) => {
+                profiles.extend(convert::profiles(&v));
+                continue;
+            }
+            Err(WebError::NotFound { .. }) => {}
+            Err(_) => continue,
+        }
+        answered.extend(chunk.iter().cloned());
+    }
+    (profiles, answered)
 }
 
 /// Fills in what `users` lack from their directory records. Returns how many photos were filled in.

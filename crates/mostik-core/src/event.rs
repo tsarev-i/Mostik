@@ -118,8 +118,16 @@ pub enum LiveEvent {
         users: Vec<User>,
     },
     /// Telemost made the user follow the thread of message `parent` (`you_added_to_thread`),
-    /// for a mention, say. For the backend: the UI gets the thread list fetched again.
+    /// for a mention, say. Its replies notify; the UI gets the thread list fetched again and
+    /// lets the thread back into it if the user had left it.
     ThreadJoined {
+        chat_id: ChatId,
+        parent: Timestamp,
+    },
+    /// Telemost made the user stop following the thread of message `parent`
+    /// (`you_removed_from_thread`): they unfollowed it elsewhere, or their only reply there was
+    /// deleted. Its replies no longer notify, and the thread leaves the thread list.
+    ThreadLeft {
         chat_id: ChatId,
         parent: Timestamp,
     },
@@ -318,6 +326,13 @@ mod tests {
                 "type": "meeting", "chat_id": "c1", "url": "https://telemost.yandex.ru/j/1",
                 "started": 100, "participants": 2, "ended": false,
             }),
+        );
+        pinned(
+            LiveEvent::ThreadLeft {
+                chat_id: chat("c1"),
+                parent: 42,
+            },
+            json!({ "type": "thread_left", "chat_id": "c1", "parent": 42 }),
         );
         pinned(
             LiveEvent::Paused { pause: None },

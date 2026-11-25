@@ -879,8 +879,8 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
 
 /// A `StateSync` push: `Data` is base64 JSON `{"type": …, "data": {…}}`, a change of the
 /// user's chats, synced settings or calls. Types seen: `you_added`, `you_removed`,
-/// `chat_info_changed`, `members_changed_v2`, `user_bucket`, `meeting_updated`; `roles_changed`
-/// is not used.
+/// `chat_info_changed`, `members_changed_v2`, `user_bucket`, `meeting_updated`, `roles_changed`,
+/// `you_added_to_thread`, `you_removed_from_thread`.
 fn state_sync(sync: &Value) -> Option<LiveEvent> {
     let data: Value = serde_json::from_slice(&base64(s(sync, &["Data"])?)?).ok()?;
     let d = &data["data"];
@@ -910,6 +910,15 @@ fn state_sync(sync: &Value) -> Option<LiveEvent> {
         "you_added_to_thread" => {
             let (chat, parent) = thread_parent(s(d, &["thread_id"])?)?;
             Some(LiveEvent::ThreadJoined {
+                chat_id: ChatId(chat),
+                parent,
+            })
+        }
+        // `{thread_id, chat_member: {version, rights}}`: unfollowed elsewhere, or the user's only
+        // reply in the thread was deleted.
+        "you_removed_from_thread" => {
+            let (chat, parent) = thread_parent(s(d, &["thread_id"])?)?;
+            Some(LiveEvent::ThreadLeft {
                 chat_id: ChatId(chat),
                 parent,
             })
@@ -2588,6 +2597,17 @@ mod tests {
         assert_eq!(
             from_push(&thread, Some(&me)),
             Some(LiveEvent::ThreadJoined {
+                chat_id: ChatId("0/0/a".into()),
+                parent: 42
+            })
+        );
+        let left = sync_push(
+            json!({"type": "you_removed_from_thread", "data": {"thread_id": "100/0/a_42",
+            "chat_member": {"version": 4, "rights": []}}}),
+        );
+        assert_eq!(
+            from_push(&left, Some(&me)),
+            Some(LiveEvent::ThreadLeft {
                 chat_id: ChatId("0/0/a".into()),
                 parent: 42
             })

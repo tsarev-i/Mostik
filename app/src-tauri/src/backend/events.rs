@@ -204,12 +204,24 @@ fn sync_shared(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, ev: &LiveEvent) 
         LiveEvent::ThreadJoined { chat_id, parent } => {
             let key = (chat_id.0.clone(), *parent);
             sh.not_followed.remove(&key);
+            sh.left.remove(&key);
             // Unless replies already wait for a fetch.
             if !sh.followed.contains(&key) && sh.joined.insert(key) && sh.ready && sh.thread_wait.is_empty() {
                 let (app, shared) = (app.clone(), shared.clone());
                 tauri::async_runtime::spawn(async move { refresh_threads(app, shared).await });
             }
-            false
+            // The UI lets the thread back into its list (it may have left it).
+            true
+        }
+        // Its replies stop notifying (unless they mention the user), and the UI drops it from
+        // the thread list.
+        LiveEvent::ThreadLeft { chat_id, parent } => {
+            let key = (chat_id.0.clone(), *parent);
+            sh.followed.remove(&key);
+            sh.joined.remove(&key);
+            sh.not_followed.insert(key.clone());
+            sh.left.insert(key);
+            true
         }
         LiveEvent::Paused { pause } => {
             sh.paused = *pause;

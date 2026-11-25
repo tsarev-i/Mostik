@@ -643,7 +643,9 @@ async fn connect_inner(
         if let Ok(gap) = state.gap.lock()
             && let Some(gap) = gap.as_ref().filter(|g| g.generation == generation)
         {
-            sh.followed.extend(gap.followed.iter().cloned());
+            // Not the threads left since this connection came up.
+            let followed: Vec<_> = gap.followed.iter().filter(|k| !sh.left.contains(*k)).cloned().collect();
+            sh.followed.extend(followed);
             sh.not_followed.extend(gap.not_followed.iter().cloned());
             sh.missed = notify::missed(gap, &snapshot.chats, &snapshot.messages, &alerts, known_me.as_ref());
             probe["missed"] = json!(sh.missed.len());

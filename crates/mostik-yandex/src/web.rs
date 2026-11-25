@@ -27,6 +27,10 @@ pub enum WebError {
     MissingParam(&'static str),
     #[error("bad server response: {0}")]
     BadResponse(String),
+    /// An API call answered 404 with no JSON: `get_users_data` does so when it knows none of
+    /// the people asked about.
+    #[error("{method}: not found (HTTP 404)")]
+    NotFound { method: String },
     /// A gateway or server error (5xx): Telemost is overloaded or restarting.
     #[error("{method}: Telemost is not responding (HTTP {status})")]
     Unavailable { method: String, status: u16 },
@@ -833,6 +837,11 @@ impl WebClient {
                 self.invalidate_csrf(&csrf);
                 retried = true;
                 continue;
+            }
+            if status == StatusCode::NOT_FOUND && parsed.is_err() {
+                return Err(WebError::NotFound {
+                    method: method.to_owned(),
+                });
             }
             if status.is_server_error() && parsed.is_err() {
                 return Err(WebError::Unavailable {

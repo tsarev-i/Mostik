@@ -41,11 +41,12 @@ pub async fn followed_threads(
 }
 
 /// Parses the followed threads and records them as the ones whose replies notify, and their
-/// attachments as ones the UI may save.
+/// attachments as ones the UI may save. Threads the user left meanwhile stay out.
 fn remember_threads(state: &AppState, live: &Live, v: &Value) -> (Vec<mostik_core::FollowedThread>, Vec<User>) {
     let (mut threads, users) = convert::followed_threads(v, Some(&live.me));
     if let Ok(mut sh) = live.shared.lock() {
         threads.retain(|t| !sh.service.contains(&t.parent.chat_id.0));
+        threads.retain(|t| !sh.left.contains(&(t.parent.chat_id.0.clone(), t.parent.ts)));
         sh.followed = threads
             .iter()
             .map(|t| (t.parent.chat_id.0.clone(), t.parent.ts))
@@ -106,7 +107,15 @@ pub(super) async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>
         waiting.len(),
         threads.len()
     );
-    let _ = app.emit(EVENT, &LiveEvent::Threads { threads, users });
+    // Checked again and sent under the lock: a departure handled meanwhile either keeps its
+    // thread out of this list or reaches the UI after it.
+    if let Ok(sh) = shared.lock() {
+        let threads: Vec<_> = threads
+            .into_iter()
+            .filter(|t| !sh.left.contains(&(t.parent.chat_id.0.clone(), t.parent.ts)))
+            .collect();
+        let _ = app.emit(EVENT, &LiveEvent::Threads { threads, users });
+    }
     for (m, author, alert) in waiting {
         let followed = shared
             .lock()
@@ -134,13 +143,28 @@ pub(super) fn reply_notifies_now(
     let Some(key) = thread_key(m) else { return true };
     let Ok(mut sh) = shared.lock() else { return false };
     if sh.me.as_ref() == Some(&m.author) {
+        // An edit is no new reply: it subscribes no one.
+        if m.edited {
+            return false;
+        }
         // Telemost subscribes the user to a thread they reply in.
         sh.not_followed.remove(&key);
+        let revived = sh.left.remove(&key);
         sh.followed.insert(key);
+        // The UI dropped a thread the user left and cannot bring it back without its parent:
+        // it gets the list fetched again.
+        if revived && sh.ready && sh.thread_wait.is_empty() {
+            let (app, shared) = (app.clone(), shared.clone());
+            tauri::async_runtime::spawn(async move { refresh_threads(app, shared).await });
+        }
         return false;
     }
     if sh.follows(&key) {
         return true;
+    }
+    if !m.edited && mentions_me(&sh, m) {
+        // Telemost subscribes the user to a thread they are mentioned in, left or not.
+        sh.left.remove(&key);
     }
     if m.edited || !sh.ready || (sh.not_followed.contains(&key) && !mentions_me(&sh, m)) {
         return false;

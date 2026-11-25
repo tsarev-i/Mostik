@@ -12,7 +12,7 @@ use super::messages::set_pinned;
 use super::people::{LAST_HEARTBEAT, apply_presence};
 use super::sidebar::apply_starred;
 use super::snapshot::{remove, sort_sections, upsert, with_call_length};
-use super::threads::merge_threads;
+use super::threads::{leave_thread, merge_threads, rejoin_thread};
 
 thread_local! {
     /// Role changes of chats the UI does not have yet: the snapshot is on its way (at the start,
@@ -155,8 +155,11 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             c.snap.update(|s| learn_users(s, users));
             merge_threads(c, threads);
         }
-        // The backend normally swallows them: it sends `ChatAdded` and `Threads` instead.
-        LiveEvent::Joined { .. } | LiveEvent::ThreadJoined { .. } => {}
+        // The backend normally swallows it: it sends `ChatAdded` instead.
+        LiveEvent::Joined { .. } => {}
+        // The list itself comes as `Threads`, fetched again.
+        LiveEvent::ThreadJoined { chat_id, parent } => rejoin_thread(chat_id, parent),
+        LiveEvent::ThreadLeft { chat_id, parent } => leave_thread(c, chat_id, parent),
         LiveEvent::RoleChanged { chat_id, role } => {
             c.snap.update(|s| match s.chats.iter_mut().find(|ch| ch.id == chat_id) {
                 Some(ch) => {
