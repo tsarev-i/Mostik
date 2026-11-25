@@ -349,7 +349,9 @@ fn event_chat(ev: &LiveEvent) -> Option<(&str, bool)> {
         | LiveEvent::Pinned { chat_id, .. }
         | LiveEvent::Joined { chat_id }
         | LiveEvent::ChatRemoved { chat_id }
-        | LiveEvent::ChatChanged { chat_id, .. } => (chat_id.0.as_str(), false),
+        | LiveEvent::ChatChanged { chat_id, .. }
+        | LiveEvent::RoleChanged { chat_id, .. }
+        | LiveEvent::ThreadJoined { chat_id, .. } => (chat_id.0.as_str(), false),
         LiveEvent::ChatAdded { chat, .. } => (chat.id.0.as_str(), false),
         LiveEvent::Meeting(m) => (m.chat_id.0.as_str(), false),
         _ => return None,

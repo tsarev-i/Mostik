@@ -70,6 +70,13 @@ pub(super) fn MessageRow(
     let attachments = Memo::new(move |_| msg.with(|m| m.attachments.clone()));
     let media = Memo::new(move |_| msg.with(|m| m.media.clone()));
     let reactions = Memo::new(move |_| msg.with(|m| m.reactions.clone()));
+    // What the user may do in the chat, as far as known: a channel they only read takes no
+    // reactions, say. It may change while the message shows.
+    let role = {
+        let id = chat_id.clone();
+        Memo::new(move |_| c.snap.with(|s| s.chat(&id).and_then(|ch| ch.role)))
+    };
+    let can = move |right: Right| role.get().is_none_or(|r| r.can(right));
     let thread = Memo::new(move |_| msg.with(|m| m.thread.clone().filter(|t| !in_thread && t.reply_count > 0)));
     let mentions_me = {
         let (me_id, me_name) = (me_id.clone(), me_name.clone());
@@ -220,14 +227,14 @@ pub(super) fn MessageRow(
                             };
                             view! {
                                 <button class=if r.mine { "reaction mine" } else { "reaction" }
-                                    title=title disabled=detached
+                                    title=title disabled=detached || !can(Right::SendReactions)
                                     on:click=move |_| msg.with_untracked(|m| ops::toggle_reaction(c, m, kind))>
                                     {glyph}
                                     <span class="count">{r.count}</span>
                                 </button>
                             }
                         }).collect_view()}
-                        {(!detached).then(|| view! {
+                        {(!detached && can(Right::SendReactions)).then(|| view! {
                             <button class="reaction add" title=tr().add_reaction on:click=move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }>
                                 <Icon icon=I::SmilePlus size=16/>
                             </button>
@@ -270,7 +277,11 @@ pub(super) fn MessageRow(
         }
     };
     let reply_btn = (!in_thread && threads_supported(&chat_id)).then(|| {
-        view! { <button title=tr().reply_in_thread on:click=open_thread><Icon icon=I::Threads size=16/></button> }
+        view! {
+            <Show when=move || can(Right::WriteToThread)>
+                <button title=tr().reply_in_thread on:click=open_thread><Icon icon=I::Threads size=16/></button>
+            </Show>
+        }
     });
     let picker_open = {
         let key = key.clone();
@@ -338,15 +349,19 @@ pub(super) fn MessageRow(
             </div>
             {(!detached).then(|| view! {
                 <div class="msg-actions">
-                    <button title=tr().reaction on:click={
-                        let key = key.clone();
-                        move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }
-                    }><Icon icon=I::SmilePlus size=16/></button>
+                    <Show when=move || can(Right::SendReactions)>
+                        <button title=tr().reaction on:click={
+                            let key = key.clone();
+                            move |e| { c.picker_at.set(crate::emoji::anchor_of(&e)); c.picker.set(Some(key.clone())) }
+                        }><Icon icon=I::SmilePlus size=16/></button>
+                    </Show>
                     {reply_btn}
-                    <button title=move || if important.get() { tr().unmark_important } else { tr().mark_important }
-                        on:click=move |_| msg.with_untracked(|m| ops::toggle_important(c, m))>
-                        <Icon icon=I::Bookmark size=16/>
-                    </button>
+                    <Show when=move || can(Right::MarkAsImportant)>
+                        <button title=move || if important.get() { tr().unmark_important } else { tr().mark_important }
+                            on:click=move |_| msg.with_untracked(|m| ops::toggle_important(c, m))>
+                            <Icon icon=I::Bookmark size=16/>
+                        </button>
+                    </Show>
                     // "More" is the same menu as the right click, under the button; at the window edge it opens upwards.
                     // Pressing it keeps the text selected in the message, for "Quote selection".
                     <button title=tr().more on:mousedown=|e: ev::MouseEvent| e.prevent_default() on:click=move |e: ev::MouseEvent| {
@@ -797,11 +812,16 @@ pub(super) fn message_menu_items(
     );
     let in_thread = msg.thread_parent.is_some();
     let pinned = c.snap.with_untracked(|s| s.chat(&msg.chat_id).and_then(|ch| ch.pinned)) == Some(msg.ts);
+    // A reply goes to the field it is opened in: the thread's in the pane.
+    let (may_reply, may_edit) = c.snap.with_untracked(|s| {
+        s.chat(&msg.chat_id)
+            .map_or((true, true), |ch| (ch.can_post(in_pane), ch.can(Right::EditMessage)))
+    });
     let copy = |text: String| {
         let _ = window().navigator().clipboard().write_text(&text);
     };
     // Replies go to messages, not to notes; as in Telemost, they lead the menu.
-    let replies = (!msg.is_note()).then(|| {
+    let replies = (!msg.is_note() && may_reply).then(|| {
         let (m_reply, m_quote) = (msg.clone(), msg.clone());
         let selected = quote.clone();
         view! {
@@ -857,11 +877,13 @@ pub(super) fn message_menu_items(
         })}
         {mine.then(|| view! {
             <div class="menu-sep"></div>
-            <button class="menu-icon-item" on:click=move |_| {
-                close_menus(c);
-                c.editing_in_thread.set(in_pane);
-                c.editing.set(Some(m_edit.clone()));
-            }>{menu_item(I::Pencil, tr().edit)}</button>
+            {may_edit.then(|| view! {
+                <button class="menu-icon-item" on:click=move |_| {
+                    close_menus(c);
+                    c.editing_in_thread.set(in_pane);
+                    c.editing.set(Some(m_edit.clone()));
+                }>{menu_item(I::Pencil, tr().edit)}</button>
+            })}
             <button class="menu-icon-item danger" on:click=move |_| {
                 close_menus(c);
                 c.confirm_delete.set(Some(m_del.clone()));

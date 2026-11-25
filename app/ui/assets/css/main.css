@@ -337,6 +337,20 @@
 
 .composer-wrap { flex: none; padding: 0 20px 6px; }
 .composer-wrap.in-thread { padding: 0 16px 6px; }
+/* In place of the field where the user may only read. */
+.read-only-note {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 20px 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+.read-only-note.in-thread { margin: 0 16px 12px; }
 
 .composer {
   position: relative;

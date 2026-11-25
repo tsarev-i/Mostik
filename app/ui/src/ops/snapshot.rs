@@ -192,7 +192,14 @@ pub(super) fn sort_sections(s: &mut Snapshot) {
 /// A channel the user has just joined or created goes on top of "Channels". The push about it
 /// may have brought it a moment earlier, without messages and so at the bottom: this one takes
 /// its place.
-pub fn add_channel(s: &mut Snapshot, chat: Chat) {
+pub fn add_channel(s: &mut Snapshot, mut chat: Chat) {
+    super::events::apply_held_roles(std::slice::from_mut(&mut chat));
+    // The push may have brought the chat's role already, newer than the command's (none).
+    if let Some(known) = s.chat(&chat.id).and_then(|ch| ch.role)
+        && chat.role.is_none_or(|r| r.version < known.version)
+    {
+        chat.role = Some(known);
+    }
     let id = chat.id.clone();
     s.chats.retain(|ch| ch.id != id);
     s.chats.push(chat);

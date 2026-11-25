@@ -50,6 +50,10 @@ fn remember_threads(state: &AppState, live: &Live, v: &Value) -> (Vec<mostik_cor
             .iter()
             .map(|t| (t.parent.chat_id.0.clone(), t.parent.ts))
             .collect();
+        // Joined by a push: the list takes over those it has; the others it may not have yet.
+        let listed = std::mem::take(&mut sh.followed);
+        sh.joined.retain(|k| !listed.contains(k));
+        sh.followed = listed;
     }
     note_files(state, &live.me, threads.iter().map(|t| &t.parent));
     (threads, users)
@@ -59,7 +63,7 @@ fn remember_threads(state: &AppState, live: &Live, v: &Value) -> (Vec<mostik_cor
 /// have (several replies wait for one fetch): Telemost may have subscribed the user to it,
 /// for example for a mention. The UI gets the new list, and the waiting replies notify if
 /// their thread is followed now.
-async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
+pub(super) async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let fetched = match live(&app.state::<AppState>()).await {
         Ok(live) if Arc::ptr_eq(&live.shared, &shared) => live
@@ -77,7 +81,7 @@ async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
         if fetched.is_some() {
             for (m, ..) in &waiting {
                 if let Some(key) = thread_key(m)
-                    && !sh.followed.contains(&key)
+                    && !sh.follows(&key)
                 {
                     sh.not_followed.insert(key);
                 }
@@ -85,7 +89,18 @@ async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
         }
         waiting
     };
-    let Some((threads, users)) = fetched else { return };
+    let Some((threads, users)) = fetched else {
+        // Without the list only the threads Telemost said the user joined are known to notify.
+        for (m, author, alert) in waiting {
+            if shared
+                .lock()
+                .is_ok_and(|sh| thread_key(&m).is_some_and(|k| sh.follows(&k)))
+            {
+                notify(&app, &shared, &m, author.as_ref(), alert);
+            }
+        }
+        return;
+    };
     eprintln!(
         "threads fetched again for {} replies: {} followed",
         waiting.len(),
@@ -95,7 +110,7 @@ async fn refresh_threads(app: AppHandle, shared: Arc<StdMutex<Shared>>) {
     for (m, author, alert) in waiting {
         let followed = shared
             .lock()
-            .is_ok_and(|sh| thread_key(&m).is_some_and(|k| sh.followed.contains(&k)));
+            .is_ok_and(|sh| thread_key(&m).is_some_and(|k| sh.follows(&k)));
         if followed {
             notify(&app, &shared, &m, author.as_ref(), alert);
         }
@@ -124,7 +139,7 @@ pub(super) fn reply_notifies_now(
         sh.followed.insert(key);
         return false;
     }
-    if sh.followed.contains(&key) {
+    if sh.follows(&key) {
         return true;
     }
     if m.edited || !sh.ready || (sh.not_followed.contains(&key) && !mentions_me(&sh, m)) {

@@ -89,6 +89,10 @@ struct Shared {
     followed: BTreeSet<(String, Timestamp)>,
     /// Threads the list did not have when it was last fetched: their replies need no new fetch.
     not_followed: BTreeSet<(String, Timestamp)>,
+    /// Threads Telemost says the user follows now (`you_added_to_thread`, for a mention, say)
+    /// that the fetched list did not have yet: their replies notify as followed ones. A list that
+    /// has one takes it over into `followed`.
+    joined: BTreeSet<(String, Timestamp)>,
     /// Replies in threads of unknown standing that wait for the list to be fetched again, to
     /// notify about the ones the user turns out to follow.
     thread_wait: Vec<(Message, Option<User>, mostik_core::event::Alert)>,
@@ -101,6 +105,9 @@ struct Shared {
     /// Messages that came while the connection before this one was down (see
     /// [`notify::missed`]): they notify once this connection is in place.
     missed: Vec<(Message, mostik_core::event::Alert)>,
+    /// The latest `ReactionsVersion` per message, `(chat, ts)`: a push with the reactions of an
+    /// older one, come late, does not undo the newer ones (see `events::sync_shared`).
+    reactions_seen: BTreeMap<(String, Timestamp), u64>,
 }
 
 impl Shared {
@@ -127,6 +134,11 @@ impl Shared {
         if public && !chat.name.is_empty() && !self.channels.contains(&chat.name) {
             self.channels.push(chat.name.clone());
         }
+    }
+
+    /// Whether the user follows thread `key`: by the list, or by Telemost's word since it was fetched.
+    fn follows(&self, key: &(String, Timestamp)) -> bool {
+        self.followed.contains(key) || self.joined.contains(key)
     }
 
     /// Forgets the title of a chat the user has left, and its name among the `@channel` mentions.
@@ -253,6 +265,8 @@ pub struct AppState {
     pub service: service::State,
     /// What the connection that went down had seen, until a new one is up (see [`notify::Gap`]).
     gap: StdMutex<Option<notify::Gap>>,
+    /// The people the snapshots fetched lately (see [`fill_profiles_cached`]).
+    profiles: StdMutex<ProfileCache>,
 }
 
 async fn live(state: &AppState) -> Result<Arc<Live>, String> {
@@ -340,24 +354,82 @@ pub(crate) async fn with_profile(app: &AppHandle, user: User) -> User {
 /// `AvatarId`, and `From` may hold only the GUID. Returns how many photos were filled in.
 async fn fill_profiles(web: &WebClient, users: &mut [User]) -> usize {
     let guids: Vec<String> = users.iter().map(|u| u.id.0.clone()).collect();
-    let mut filled = 0;
+    apply_profiles(users, &fetch_profiles(web, &guids).await)
+}
+
+/// [`fill_profiles`] for the snapshot of a connection of session `generation`: the people the
+/// session's connections fetched in the last [`PROFILE_TTL`] are not fetched again. Telemost
+/// drops the connection a few times an hour, and each new one would fetch the same people.
+async fn fill_profiles_cached(state: &AppState, generation: u64, web: &WebClient, users: &mut [User]) -> usize {
+    let now = std::time::Instant::now();
+    let mut known = Vec::new();
+    let mut missing = Vec::new();
+    if let Ok(mut cache) = state.profiles.lock() {
+        if cache.generation != generation {
+            *cache = ProfileCache {
+                generation,
+                ..ProfileCache::default()
+            };
+        }
+        cache.fetched.retain(|_, (at, _)| now.duration_since(*at) < PROFILE_TTL);
+        for u in users.iter() {
+            match cache.fetched.get(&u.id.0) {
+                Some((_, p)) => known.push(p.clone()),
+                None => missing.push(u.id.0.clone()),
+            }
+        }
+    }
+    let fetched = fetch_profiles(web, &missing).await;
+    if let Ok(mut cache) = state.profiles.lock()
+        && cache.generation == generation
+    {
+        for p in &fetched {
+            cache.fetched.insert(p.id.0.clone(), (now, p.clone()));
+        }
+    }
+    known.extend(fetched);
+    apply_profiles(users, &known)
+}
+
+/// How long a person's directory record serves the snapshots of later connections.
+const PROFILE_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// The directory records the snapshots of session `generation` fetched, with when (see
+/// [`fill_profiles_cached`]).
+#[derive(Default)]
+struct ProfileCache {
+    generation: u64,
+    fetched: std::collections::HashMap<String, (std::time::Instant, mostik_core::UserProfile)>,
+}
+
+/// The directory records of `guids`, a few requests at once.
+async fn fetch_profiles(web: &WebClient, guids: &[String]) -> Vec<mostik_core::UserProfile> {
     let jobs = guids.chunks(convert::PROFILES_PER_REQUEST).map(|chunk| {
         let mut web = web.clone_light();
         async move { web.rpc("get_users_data", json!({ "guids": chunk })).await }
     });
-    for v in futures_util::future::join_all(jobs).await.into_iter().flatten() {
-        for p in convert::profiles(&v) {
-            if let Some(u) = users.iter_mut().find(|u| u.id == p.id) {
-                if u.avatar.is_none() && p.avatar.is_some() {
-                    u.avatar = p.avatar.clone();
-                    filled += 1;
-                }
-                if u.title.is_none() {
-                    u.title = p.position.clone();
-                }
-                if !p.display_name.is_empty() && !u.has_name() {
-                    u.display_name = p.display_name.clone();
-                }
+    futures_util::future::join_all(jobs)
+        .await
+        .into_iter()
+        .flatten()
+        .flat_map(|v| convert::profiles(&v))
+        .collect()
+}
+
+/// Fills in what `users` lack from their directory records. Returns how many photos were filled in.
+fn apply_profiles(users: &mut [User], profiles: &[mostik_core::UserProfile]) -> usize {
+    let mut filled = 0;
+    for p in profiles {
+        if let Some(u) = users.iter_mut().find(|u| u.id == p.id) {
+            if u.avatar.is_none() && p.avatar.is_some() {
+                u.avatar = p.avatar.clone();
+                filled += 1;
+            }
+            if u.title.is_none() {
+                u.title = p.position.clone();
+            }
+            if !p.display_name.is_empty() && !u.has_name() {
+                u.display_name = p.display_name.clone();
             }
         }
     }

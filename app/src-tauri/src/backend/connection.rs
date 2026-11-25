@@ -27,7 +27,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::events::handle_incoming;
 use super::presence::start_heartbeat;
 use super::{
-    AppState, Boot, EVENT, Live, SIGNED_OUT_EVENT, SNAPSHOT_EVENT, Shared, fill_profiles, notify, service, text,
+    AppState, Boot, EVENT, Live, SIGNED_OUT_EVENT, SNAPSHOT_EVENT, Shared, fill_profiles_cached, notify, service, text,
 };
 use crate::{call, login, store};
 
@@ -182,8 +182,8 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
 
 /// Removes what the signed-out account left on this computer: the diagnostic probes (they name
 /// its cookies and chats), the custom emoji cache, the files allowed for sending and saving, the
-/// list of where its attachments were saved, and the cookies and caches of the main window. The
-/// UI clears its own `localStorage` keys.
+/// list of where its attachments were saved, the people it fetched, and the cookies and caches of
+/// the main window. The UI clears its own `localStorage` keys.
 async fn forget_local_data(app: &AppHandle, state: &AppState) {
     if let Ok(dir) = app.path().app_data_dir()
         && let Ok(entries) = std::fs::read_dir(dir)
@@ -206,6 +206,9 @@ async fn forget_local_data(app: &AppHandle, state: &AppState) {
     }
     if let Ok(mut known) = state.known_files.lock() {
         known.clear();
+    }
+    if let Ok(mut profiles) = state.profiles.lock() {
+        *profiles = super::ProfileCache::default();
     }
     if let Some(main) = app.get_webview_window("main") {
         crate::webview::forget_site_data(&main, crate::webview::SiteData::CookiesAndCaches);
@@ -378,11 +381,13 @@ fn notify_missed(app: &AppHandle, shared: &StdMutex<Shared>) {
     }
 }
 
-/// The pause before reconnection attempt `attempt` (from 0): 2, 4, 8 … 60 s, each stretched by
+/// The pause before reconnection attempt `attempt` (from 0): 4, 8, 16 … 60 s, each stretched by
 /// up to a half at random (`random` is any number), so that clients cut off together (a
-/// Telemost restart, a network change at an office) do not come back all at once.
+/// Telemost restart, a network change at an office) do not come back all at once. Not less than
+/// 4 s at first: after Telemost drops the connection, the network to it often stays broken for
+/// 2–3 s more, and an attempt that early failed one time in four.
 fn reconnect_pause(attempt: u32, random: u64) -> Duration {
-    let base = 2_000u64.saturating_mul(1 << attempt.min(5)).min(60_000);
+    let base = 4_000u64.saturating_mul(1 << attempt.min(4)).min(60_000);
     Duration::from_millis(base + random % (base / 2 + 1))
 }
 
@@ -595,7 +600,7 @@ async fn connect_inner(
             })
         })
         .collect();
-    let filled = fill_profiles(&web, &mut snapshot.users).await;
+    let filled = fill_profiles_cached(state, generation, &web, &mut snapshot.users).await;
     probe["profiles_filled"] = json!(filled);
     match web.buckets().await {
         Ok(b) => {
@@ -633,10 +638,13 @@ async fn connect_inner(
         sh.ready = true;
         // What came while the connection before this one was down notifies once this one is in
         // place (see `notify_missed`). The gap stays until then: a connection that closes at once
-        // leaves it to the next one.
+        // leaves it to the next one. What it knew of the threads carries over too, until the UI
+        // fetches their list again.
         if let Ok(gap) = state.gap.lock()
             && let Some(gap) = gap.as_ref().filter(|g| g.generation == generation)
         {
+            sh.followed.extend(gap.followed.iter().cloned());
+            sh.not_followed.extend(gap.not_followed.iter().cloned());
             sh.missed = notify::missed(gap, &snapshot.chats, &snapshot.messages, &alerts, known_me.as_ref());
             probe["missed"] = json!(sh.missed.len());
         }
@@ -675,11 +683,11 @@ mod tests {
         let ms = |attempt, random| reconnect_pause(attempt, random).as_millis();
         assert_eq!(
             [0, 1, 2, 3, 4, 5, 40].map(|a| ms(a, 0)),
-            [2000, 4000, 8000, 16000, 32000, 60000, 60000]
+            [4000, 8000, 16000, 32000, 60000, 60000, 60000]
         );
         // Up to a half more, at random.
-        assert_eq!(ms(0, 1000), 3000);
-        assert_eq!(ms(0, 1001), 2000);
+        assert_eq!(ms(0, 2000), 6000);
+        assert_eq!(ms(0, 2001), 4000);
         assert_eq!(ms(5, u64::MAX), 60000 + u128::from(u64::MAX % 30001));
         assert!(reconnect_pause(40, u64::MAX) <= Duration::from_secs(90));
     }

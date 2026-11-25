@@ -60,7 +60,8 @@ pub fn message_user(c: Ctx, user: UserId) {
 /// until the next start. A name or photo the directory did not give comes from the profile the
 /// user opened the chat from. Returns the chat's id.
 pub(super) fn add_direct_chat(c: Ctx, dm: mostik_ipc::DirectChat) -> ChatId {
-    let mostik_ipc::DirectChat { chat, mut peer } = dm;
+    let mostik_ipc::DirectChat { mut chat, mut peer } = dm;
+    super::events::apply_held_roles(std::slice::from_mut(&mut chat));
     if let Some(p) = c.profiles.with_untracked(|m| m.get(&peer.id).cloned()) {
         if !peer.has_name() && !p.display_name.is_empty() {
             peer.display_name = p.display_name;

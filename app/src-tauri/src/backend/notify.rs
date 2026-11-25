@@ -1,7 +1,7 @@
 //! Notifications: which messages notify, mentions of the user, the notification itself with its
 //! icon and sound.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex as StdMutex;
 
 use mostik_core::event::Alert;
@@ -46,10 +46,17 @@ const NOTICED_LATE_MCS: Timestamp = 3 * 60 * 1_000_000;
 /// one is up, and their messages come with its chat list instead, which notifies of nothing:
 /// [`missed`] finds them there. Telemost drops the connection now and then, in storms on a
 /// shaky network.
+///
+/// It also hands the next connection what it knew of the threads (`Shared::followed` and
+/// `Shared::not_followed`): without that, the first reply after each reconnection in a thread
+/// the user does not follow fetched the thread list again, a few times an hour.
+#[derive(Default)]
 pub(super) struct Gap {
     pub generation: u64,
     pub since: Timestamp,
     pub last: BTreeMap<String, (Timestamp, u64)>,
+    pub followed: BTreeSet<(String, Timestamp)>,
+    pub not_followed: BTreeSet<(String, Timestamp)>,
 }
 
 /// The messages to notify of after a reconnection: the last message of each chat in the new chat
@@ -320,6 +327,7 @@ mod tests {
             generation: 1,
             since,
             last: BTreeMap::from([("a".into(), (since - 5 * MIN, 1)), ("b".into(), (since - MIN, 1))]),
+            ..Gap::default()
         };
         let me = UserId("me".into());
         let chats = [

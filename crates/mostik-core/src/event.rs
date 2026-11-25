@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Chat, ChatFolder, ChatId, FollowedThread, Meeting, Message, NotifyLevel, Pause, PresenceInfo, Reaction, Reads,
-    Timestamp, User, UserId,
+    Chat, ChatFolder, ChatId, FollowedThread, Meeting, Message, MyRole, NotifyLevel, Pause, PresenceInfo, Reaction,
+    Reads, Timestamp, User, UserId,
 };
 
 /// How the sender of a message wants the members told of it (`NotificationBehaviour`).
@@ -65,6 +65,9 @@ pub enum LiveEvent {
         ts: Timestamp,
         reactions: Vec<Reaction>,
         users: Vec<User>,
+        /// `ReactionsVersion`: one more with every reaction to the message; 0 if not reported.
+        #[serde(default)]
+        version: u64,
     },
     /// The user read the chat (possibly on another device).
     Seen {
@@ -114,6 +117,12 @@ pub enum LiveEvent {
         threads: Vec<FollowedThread>,
         users: Vec<User>,
     },
+    /// Telemost made the user follow the thread of message `parent` (`you_added_to_thread`),
+    /// for a mention, say. For the backend: the UI gets the thread list fetched again.
+    ThreadJoined {
+        chat_id: ChatId,
+        parent: Timestamp,
+    },
     /// The user is in a new chat: created it, was added to it, or someone started a direct chat.
     /// For the backend: it normally swallows this one, fetches the chat and sends
     /// [`LiveEvent::ChatAdded`] instead. The UI ignores it if it gets through.
@@ -130,6 +139,11 @@ pub enum LiveEvent {
         name: Option<String>,
         description: Option<String>,
         member_count: Option<u32>,
+    },
+    /// The user's role or rights in the chat changed (`roles_changed`).
+    RoleChanged {
+        chat_id: ChatId,
+        role: MyRole,
     },
     /// The chat folders of every organization, after a change on any device.
     Folders {
@@ -219,6 +233,20 @@ mod tests {
             json!({
                 "type": "chat_changed", "chat_id": "c1", "name": "dev", "description": null,
                 "member_count": 3,
+            }),
+        );
+        pinned(
+            LiveEvent::RoleChanged {
+                chat_id: chat("c1"),
+                role: MyRole {
+                    admin: false,
+                    rights: 12,
+                    version: 5,
+                },
+            },
+            json!({
+                "type": "role_changed", "chat_id": "c1",
+                "role": { "admin": false, "rights": 12, "version": 5 },
             }),
         );
         pinned(

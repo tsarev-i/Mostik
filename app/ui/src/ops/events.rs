@@ -14,6 +14,44 @@ use super::sidebar::apply_starred;
 use super::snapshot::{remove, sort_sections, upsert, with_call_length};
 use super::threads::merge_threads;
 
+thread_local! {
+    /// Role changes of chats the UI does not have yet: the snapshot is on its way (at the start,
+    /// after a reconnection), or the chat is being fetched. They apply when the chat comes, if
+    /// still newer than its role there.
+    static HELD_ROLES: std::cell::RefCell<std::collections::HashMap<ChatId, MyRole>> = Default::default();
+}
+
+/// How many chats [`HELD_ROLES`] holds role changes for; then it starts afresh.
+const HELD_ROLES_MAX: usize = 200;
+
+fn hold_role(chat_id: ChatId, role: MyRole) {
+    HELD_ROLES.with_borrow_mut(|held| {
+        if held.len() >= HELD_ROLES_MAX {
+            held.clear();
+        }
+        let newer = held.get(&chat_id).is_none_or(|old| old.version <= role.version);
+        if newer {
+            held.insert(chat_id, role);
+        }
+    });
+}
+
+/// Applies to `chats` the role changes held for them (see [`HELD_ROLES`]).
+pub(super) fn apply_held_roles(chats: &mut [Chat]) {
+    HELD_ROLES.with_borrow_mut(|held| {
+        if held.is_empty() {
+            return;
+        }
+        for ch in chats.iter_mut() {
+            if let Some(role) = held.remove(&ch.id)
+                && ch.role.is_none_or(|r| r.version < role.version)
+            {
+                ch.role = Some(role);
+            }
+        }
+    });
+}
+
 pub fn handle_event(c: Ctx, ev: LiveEvent) {
     match ev {
         LiveEvent::Upsert {
@@ -38,6 +76,7 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             ts,
             reactions,
             users,
+            ..
         } => {
             let mut loaded = false;
             c.snap.update(|s| {
@@ -85,7 +124,12 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
         }
         LiveEvent::Status(p) => apply_presence(c, vec![p]),
         LiveEvent::Pinned { chat_id, ts } => set_pinned(c, &chat_id, ts),
-        LiveEvent::ChatAdded { chat, section, users } => c.snap.update(|s| {
+        LiveEvent::ChatAdded {
+            mut chat,
+            section,
+            users,
+        } => c.snap.update(|s| {
+            apply_held_roles(std::slice::from_mut(&mut chat));
             learn_users(s, users);
             if s.chat(&chat.id).is_some() {
                 return;
@@ -111,8 +155,18 @@ pub fn handle_event(c: Ctx, ev: LiveEvent) {
             c.snap.update(|s| learn_users(s, users));
             merge_threads(c, threads);
         }
-        // The backend normally swallows it and sends `ChatAdded` instead.
-        LiveEvent::Joined { .. } => {}
+        // The backend normally swallows them: it sends `ChatAdded` and `Threads` instead.
+        LiveEvent::Joined { .. } | LiveEvent::ThreadJoined { .. } => {}
+        LiveEvent::RoleChanged { chat_id, role } => {
+            c.snap.update(|s| match s.chats.iter_mut().find(|ch| ch.id == chat_id) {
+                Some(ch) => {
+                    if ch.role.is_none_or(|old| old.version <= role.version) {
+                        ch.role = Some(role);
+                    }
+                }
+                None => hold_role(chat_id, role),
+            })
+        }
         LiveEvent::ChatRemoved { chat_id } => drop_chat(c, &chat_id),
         LiveEvent::ChatChanged {
             chat_id,

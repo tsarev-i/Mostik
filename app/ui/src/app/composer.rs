@@ -204,8 +204,38 @@ fn reveal_editor(area: &web_sys::HtmlElement) {
     }
 }
 
+/// The message field of the open chat, or with `thread` of its open thread; in a chat where the
+/// user may not write (a channel they only read), a line that says so instead. It is not a
+/// `composer-wrap`, so files dropped there are not taken either.
 #[component]
 pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
+    let c = ctx();
+    let may_post = Memo::new(move |_| {
+        let id = c.current.get();
+        c.snap.with(|s| s.chat(&id).is_none_or(|ch| ch.can_post(thread)))
+    });
+    move || {
+        if may_post.get() {
+            view! { <MessageField thread/> }.into_any()
+        } else {
+            let text = if thread {
+                tr().read_only_threads
+            } else {
+                tr().read_only_chat
+            };
+            view! {
+                <div class=if thread { "read-only-note in-thread" } else { "read-only-note" }>
+                    <Icon icon=I::Lock size=14/>
+                    <span>{text}</span>
+                </div>
+            }
+            .into_any()
+        }
+    }
+}
+
+#[component]
+fn MessageField(thread: bool) -> impl IntoView {
     let c = ctx();
     let (draft, set_draft) = signal(String::new());
     let sending = RwSignal::new(false);
@@ -230,8 +260,15 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     });
     let can_important = Memo::new(move |_| {
         let id = c.current.get();
+        c.snap.with(|s| {
+            s.chat(&id)
+                .is_some_and(|ch| ch.kind != ChatKind::Broadcast && ch.can(Right::MarkAsImportant))
+        })
+    });
+    let can_attach = Memo::new(move |_| {
+        let id = c.current.get();
         c.snap
-            .with(|s| s.chat(&id).is_some_and(|ch| ch.kind != ChatKind::Broadcast))
+            .with(|s| s.chat(&id).is_none_or(|ch| ch.can(Right::SendAttachments)))
     });
 
     // The field shows the draft: a restored draft, a sent message clearing it, formatting. Typing
@@ -484,6 +521,10 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 let chat = c.current.get_untracked();
                 let tp = parent();
                 let last = c.snap.with_untracked(|s| {
+                    // Not where Telemost does not let the user edit.
+                    if !s.chat(&chat).is_none_or(|ch| ch.can(Right::EditMessage)) {
+                        return None;
+                    }
                     s.messages
                         .iter()
                         .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && !m.is_note())
@@ -604,19 +645,21 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     </div>
                 </Show>
                 <div class="composer-bottom">
-                    <button class="cb round" title=tr().attach on:click=move |_| {
-                        if !c.live {
-                            return c.error.set(Some(tr().only_in_app_files.into()));
-                        }
-                        // The files go to the chat or thread the dialog was opened in.
-                        let (chat, thread_parent) = (c.current.get_untracked(), parent());
-                        spawn_local(async move {
-                            match bridge::pick_files().await {
-                                Ok(files) => ops::attach_files(c, chat, thread_parent, files),
-                                Err(e) => c.error.set(Some(e)),
+                    <Show when=move || can_attach.get()>
+                        <button class="cb round" title=tr().attach on:click=move |_| {
+                            if !c.live {
+                                return c.error.set(Some(tr().only_in_app_files.into()));
                             }
-                        });
-                    }><Icon icon=I::Plus size=16/></button>
+                            // The files go to the chat or thread the dialog was opened in.
+                            let (chat, thread_parent) = (c.current.get_untracked(), parent());
+                            spawn_local(async move {
+                                match bridge::pick_files().await {
+                                    Ok(files) => ops::attach_files(c, chat, thread_parent, files),
+                                    Err(e) => c.error.set(Some(e)),
+                                }
+                            });
+                        }><Icon icon=I::Plus size=16/></button>
+                    </Show>
                     <crate::compose::EmojiButton field class="cb" size=18/>
                     // Pressing them keeps the caret in the field.
                     <Show when=move || can_silent.get()>

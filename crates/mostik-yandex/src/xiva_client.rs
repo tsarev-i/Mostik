@@ -68,6 +68,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How often Xiva pings until its first ping says (`server-interval-sec`).
 const DEFAULT_PING_INTERVAL_MS: u64 = 60_000;
 
+/// The least time a socket must have been silent for an unanswered request to count it dead
+/// (see [`Liveness::check_unanswered`]): shorter timeouts can just be a slow answer.
+const UNANSWERED_SILENCE_MS: u64 = 15_000;
+
 /// Finds a connection that died without closing (sleep, a network change, a dropped NAT
 /// mapping): requests on it would wait for their timeouts and pushes would stop for good.
 /// Xiva sends a text ping every `server-interval-sec`; a connection that has been silent for
@@ -96,6 +100,24 @@ impl Liveness {
         }
     }
 
+    /// Drops the connection if a request has had no answer for `waited_ms` and nothing at all
+    /// has come in meanwhile. Seen before Telemost's resets: the socket goes silent, our
+    /// heartbeat waits its 20 s in vain, and the reset comes a minute later, which the ping
+    /// check above would wait 90 s for. A live socket brings something every second or two
+    /// (other people's heartbeats), and the answer itself would have been a frame.
+    fn check_unanswered(&self, waited_ms: u64) {
+        let silent = now_ms().saturating_sub(self.last_frame.load(Ordering::SeqCst));
+        if !self.closed.load(Ordering::SeqCst) && dead_after_unanswered(silent, waited_ms) {
+            eprintln!(
+                "xiva: no answer and nothing received for {} s, the connection is dropped",
+                silent / 1000
+            );
+            self.kill.notify_one();
+        } else {
+            self.check();
+        }
+    }
+
     /// Checks the connection every few seconds until it closes.
     fn watch(self) {
         tokio::spawn(async move {
@@ -105,6 +127,12 @@ impl Liveness {
             }
         });
     }
+}
+
+/// Whether a socket silent for `silent_ms` while a request waited `waited_ms` for its answer in
+/// vain is dead: silent all the wait, and for long enough not to be a slow answer.
+fn dead_after_unanswered(silent_ms: u64, waited_ms: u64) -> bool {
+    silent_ms >= waited_ms.max(UNANSWERED_SILENCE_MS)
 }
 
 /// Xiva connection: one writer, one background reader task.
@@ -358,7 +386,7 @@ impl XivaClient {
                 );
                 self.forget(seq);
                 // Maybe the connection is dead: then it is dropped and made again.
-                self.liveness.check();
+                self.liveness.check_unanswered(timeout_s.saturating_mul(1000));
                 Err(XivaError::Timeout(method.to_owned(), timeout_s))
             }
         }
@@ -429,6 +457,18 @@ mod tests {
         })
         .await
         .expect("timed out");
+    }
+
+    #[test]
+    fn an_unanswered_request_on_a_silent_socket_means_it_is_dead() {
+        // Silent all the 20 s a heartbeat waited.
+        assert!(dead_after_unanswered(20_000, 20_000));
+        assert!(dead_after_unanswered(25_000, 20_000));
+        // Something came in meanwhile: only the answer is late.
+        assert!(!dead_after_unanswered(19_000, 20_000));
+        // A short wait in vain can be a slow answer, however silent the socket.
+        assert!(!dead_after_unanswered(5_000, 5_000));
+        assert!(dead_after_unanswered(15_000, 5_000));
     }
 
     #[tokio::test]

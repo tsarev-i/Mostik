@@ -17,7 +17,8 @@ use super::threads::{load_thread, load_threads};
 
 pub fn apply_boot(c: Ctx, boot: Result<bridge::Boot, String>) {
     match boot {
-        Ok(bridge::Boot::Ready { snapshot }) => {
+        Ok(bridge::Boot::Ready { mut snapshot }) => {
+            super::events::apply_held_roles(&mut snapshot.chats);
             forget_gone_chats(c, &snapshot);
             let first = snapshot.sections.iter().flat_map(|s| s.chats.first()).next().cloned();
             c.snap.set(*snapshot);
@@ -205,6 +206,15 @@ fn reconnected(c: Ctx, mut fresh: Snapshot) {
             }
         }
         learn_users(&mut fresh, std::mem::take(&mut s.users));
+        // A role change that came while the snapshot was on its way is newer than the snapshot's.
+        super::events::apply_held_roles(&mut fresh.chats);
+        for ch in &mut fresh.chats {
+            if let Some(known) = s.chat(&ch.id).and_then(|k| k.role)
+                && ch.role.is_none_or(|r| r.version < known.version)
+            {
+                ch.role = Some(known);
+            }
+        }
         let mut messages: Vec<Message> = fresh.messages.into_iter().map(|m| keep_known(m, &old)).collect();
         for m in old {
             if !messages.iter().any(|x| x.chat_id == m.chat_id && x.ts == m.ts) {
