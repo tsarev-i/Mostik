@@ -53,6 +53,45 @@ fn open_from_notification(app: &AppHandle) {
     });
 }
 
+/// Whether the tray icon can bring the main window back: there is one, and on Linux a panel shows
+/// it. There the icon is a StatusNotifier item, and without a host for it (GNOME without the
+/// AppIndicator extension) it is built all the same but seen nowhere.
+fn tray_shown(app: &AppHandle) -> bool {
+    app.tray_by_id("main").is_some() && status_notifier_host()
+}
+
+/// Whether a panel shows StatusNotifier items: the watcher's `IsStatusNotifierHostRegistered`.
+/// No watcher, or no `gdbus` to ask, counts as no.
+#[cfg(target_os = "linux")]
+fn status_notifier_host() -> bool {
+    use std::process::{Command, Stdio};
+    let mut ask = Command::new("gdbus");
+    ask.args([
+        "call",
+        "--session",
+        "--timeout",
+        "2",
+        "--dest",
+        "org.kde.StatusNotifierWatcher",
+        "--object-path",
+        "/StatusNotifierWatcher",
+        "--method",
+        "org.freedesktop.DBus.Properties.Get",
+        "org.kde.StatusNotifierWatcher",
+        "IsStatusNotifierHostRegistered",
+    ])
+    .stdin(Stdio::null())
+    .stderr(Stdio::null());
+    appimage::outside(&mut ask);
+    ask.output()
+        .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("true"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn status_notifier_host() -> bool {
+    true
+}
+
 /// Tray icon with "Open" and "Quit"; a left click shows the main window.
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(
@@ -254,7 +293,7 @@ fn main() {
         .on_window_event(|window, event| {
             // On macOS closing the main window (Cmd+W, the red button) hides it, as in Slack:
             // Mostik stays in the Dock and keeps notifying; a click on its Dock icon shows the
-            // window again, Cmd+Q quits. Elsewhere closing it quits.
+            // window again, Cmd+Q quits. Elsewhere closing it quits, unless the user chose otherwise.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event
                 && cfg!(target_os = "macos")
                 && window.label() == "main"
@@ -267,6 +306,23 @@ fn main() {
                 } else {
                     let _ = window.hide();
                 }
+                return;
+            }
+            // Elsewhere, with "Close to the tray" on, it hides the same way: the tray icon shows
+            // it again, its "Quit" quits. Not without a tray icon in sight, which alone could
+            // bring it back.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == "main"
+                && window
+                    .app_handle()
+                    .state::<backend::AppState>()
+                    .prefs
+                    .lock()
+                    .is_ok_and(|p| p.close_to_tray)
+                && tray_shown(window.app_handle())
+            {
+                api.prevent_close();
+                let _ = window.hide();
                 return;
             }
             if let tauri::WindowEvent::Resized(_) = event

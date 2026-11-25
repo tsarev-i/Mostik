@@ -44,6 +44,7 @@ pub fn set_preferences(
         sound,
         tray_icon,
         spell_check,
+        close_to_tray,
     } = args;
     let english = lang == "en";
     if let Some(main) = app.get_webview_window("main") {
@@ -58,6 +59,7 @@ pub fn set_preferences(
             english,
             sound,
             tray_icon,
+            close_to_tray,
         };
     }
     if restyle {

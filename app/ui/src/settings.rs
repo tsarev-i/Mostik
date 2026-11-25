@@ -88,6 +88,8 @@ pub struct Settings {
     pub tray_icon: TrayIcon,
     /// Underline misspelled words in the message fields (#50).
     pub spell_check: bool,
+    /// Closing the window hides it to the tray (Linux and Windows; macOS always does).
+    pub close_to_tray: bool,
     /// The user's own keys of shortcuts, by [`crate::keys::Action::id`]; an action without an
     /// entry has its standard keys.
     pub shortcuts: BTreeMap<String, String>,
@@ -160,6 +162,7 @@ impl Default for Settings {
             auto_update: true,
             tray_icon: TrayIcon::default(),
             spell_check: true,
+            close_to_tray: false,
             shortcuts: BTreeMap::new(),
         }
     }

@@ -175,6 +175,8 @@ pub struct Prefs {
     pub sound: String,
     /// The tray icon on Linux and Windows (see [`crate::badge`]).
     pub tray_icon: TrayIcon,
+    /// Closing the main window hides it to the tray (Linux and Windows).
+    pub close_to_tray: bool,
 }
 
 impl Default for Prefs {
@@ -192,6 +194,7 @@ impl Default for Prefs {
             } else {
                 TrayIcon::App
             },
+            close_to_tray: false,
         }
     }
 }

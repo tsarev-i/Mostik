@@ -190,6 +190,8 @@ fn PrefAppearance() -> impl IntoView {
                     </button>
                 }).collect_view()}
             </div>
+            {checkbox(c, tr().p_close_to_tray, |s| s.close_to_tray, |s, v| s.close_to_tray = v)}
+            <p class="pref-hint">{tr().p_close_to_tray_hint}</p>
         })}
     }
 }
