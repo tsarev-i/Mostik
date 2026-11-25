@@ -231,8 +231,9 @@ pub async fn focus(app: &AppHandle) {
     }
 }
 
-/// Ends the call at once and removes what it left on disk, the browser profile with the session
-/// cookies: at sign-out and when Mostik exits. Returns when that is done.
+/// Ends the call, so that the meeting sees the user leave, and removes what it left on disk, the
+/// browser profile with the session cookies: at sign-out and when Mostik exits. Returns when
+/// that is done, within a few seconds.
 pub fn shutdown(app: &AppHandle) {
     let active = app.state::<CallState>().active.lock().ok().and_then(|mut a| a.take());
     if let Some(active) = active {
@@ -541,17 +542,44 @@ mod imp {
 
     pub fn close(_app: &AppHandle, h: &Handle) {
         let cdp = h.cdp.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = cdp.send("Browser.close", json!({}), None).await;
-        });
+        let target = h.target.clone();
+        tauri::async_runtime::spawn(async move { leave(&cdp, &target).await });
     }
 
     pub fn alive(_app: &AppHandle, h: &Handle) -> bool {
         !h.cdp.is_closed()
     }
 
+    /// Leaves the meeting first (see [`leave`]), then makes sure the browser and its profile are
+    /// gone. Runs outside the async workers (the exit of the app, `spawn_blocking`).
     pub fn shutdown(_app: &AppHandle, h: &Handle) {
+        tauri::async_runtime::block_on(leave(&h.cdp, &h.target));
         h.browser.dispose();
+    }
+
+    /// How long the meeting page has to unload and the browser to exit after its window closes.
+    const LEAVE_WAIT: Duration = Duration::from_secs(3);
+
+    /// Closes the call window as its "×" does, and so leaves the meeting the way a closed browser
+    /// tab does: the page unloads (its `pagehide` handlers run, its WebSocket closes with "going
+    /// away"), and the browser exits once its only window is gone. `Browser.close` skips the
+    /// page's unload handlers and killing the browser cuts its connections dead: the meeting then
+    /// kept the user in it, and after a restart they were there twice. If the window does not go,
+    /// the browser is told to close.
+    pub(super) async fn leave(cdp: &Cdp, target: &str) {
+        let gone = tokio::time::timeout(LEAVE_WAIT, async {
+            let _ = cdp
+                .send("Target.closeTarget", json!({ "targetId": target }), None)
+                .await;
+            while !cdp.is_closed() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !gone {
+            let _ = tokio::time::timeout(Duration::from_secs(1), cdp.send("Browser.close", json!({}), None)).await;
+        }
     }
 
     /// Removes call profiles left by Mostik processes that are gone (a crash, a killed process).
@@ -1079,6 +1107,69 @@ b{{color:#f8f8f8;font-size:17px}}
             rx.recv_timeout(Duration::from_secs(10)).expect("browser did not exit");
             let _ = child.wait();
             let _ = std::fs::remove_dir_all(&profile);
+        }
+
+        /// Leaving unloads the meeting page: its `pagehide` handler gets to tell the server, as
+        /// when a browser tab closes. Needs Chromium or Chrome: `cargo test -- --ignored`.
+        #[tokio::test]
+        #[ignore]
+        async fn leaving_lets_the_page_say_goodbye() {
+            use std::io::{Read, Write};
+            let Some(browser) = find_browser() else {
+                eprintln!("no Chromium-based browser, skipped");
+                return;
+            };
+            // The page, and a beacon from its `pagehide`.
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = server.local_addr().unwrap().port();
+            let (bye_tx, bye) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let page = "<p>In a call</p><script>addEventListener('pagehide', \
+                    () => navigator.sendBeacon('/bye', 'x'))</script>";
+                for stream in server.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let mut buf = [0u8; 4096];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let body = if request.starts_with("GET / ") { page } else { "" };
+                    if request.starts_with("POST /bye ") {
+                        let _ = bye_tx.send(());
+                    }
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            });
+            let profile = tempdir().join("leave");
+            std::fs::create_dir_all(&profile).unwrap();
+            let (pipe, mut child) = spawn(&browser, &profile, "about:blank", &["--headless=new"]).unwrap();
+            let (cdp, _events) = Cdp::start(pipe.0, pipe.1, || {});
+            let target = page_target(&cdp).await.unwrap();
+            let s = cdp
+                .send(
+                    "Target.attachToTarget",
+                    json!({ "targetId": target, "flatten": true }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let s = s["sessionId"].as_str().unwrap().to_owned();
+            cdp.send(
+                "Page.navigate",
+                json!({ "url": format!("http://127.0.0.1:{port}/") }),
+                Some(&s),
+            )
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            leave(&cdp, &target).await;
+            let said = bye.recv_timeout(Duration::from_secs(2)).is_ok();
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&profile);
+            assert!(said, "the page did not unload before the browser went");
         }
 
         fn tempdir() -> PathBuf {

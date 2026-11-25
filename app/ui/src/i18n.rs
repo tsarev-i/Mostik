@@ -358,7 +358,6 @@ pub struct Tr {
     pub p_show_example: &'static str,
     pub p_tray: &'static str,
     pub p_close_to_tray: &'static str,
-    pub p_close_to_tray_hint: &'static str,
     /// Names of [`crate::settings::TrayIcon::ALL`].
     pub tray_icon_names: [&'static str; 2],
     pub p_color_mode: &'static str,
@@ -825,7 +824,6 @@ pub static RU: Tr = Tr {
     p_show_example: "Показать пример",
     p_tray: "Значок в трее",
     p_close_to_tray: "Сворачивать в трей при закрытии окна",
-    p_close_to_tray_hint: "Мостик остаётся работать и присылать уведомления. Окно открывается щелчком по значку в трее, «Выйти» в его меню закрывает приложение.",
     tray_icon_names: ["Белый", "Как у приложения"],
     p_color_mode: "Цветовой режим",
     p_mode_light: "Светлый",
@@ -1290,7 +1288,6 @@ pub static EN: Tr = Tr {
     p_show_example: "Show me an example",
     p_tray: "Tray icon",
     p_close_to_tray: "Minimize to the tray when the window is closed",
-    p_close_to_tray_hint: "Mostik keeps running and notifying. A click on the tray icon opens the window; “Quit” in its menu closes the app.",
     tray_icon_names: ["White", "App icon"],
     p_color_mode: "Color mode",
     p_mode_light: "Light",

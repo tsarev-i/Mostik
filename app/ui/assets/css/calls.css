@@ -34,7 +34,9 @@
   border-radius: 50%;
   background: var(--online);
   color: #fff;
-  animation: call-pulse 2s ease-out infinite;
+  /* A few pulses, not endless: WebKitGTK repaints the page every frame of a shadow animation,
+     about two thirds of a core for the whole call. */
+  animation: call-pulse 2s ease-out 3;
 }
 @keyframes call-pulse {
   0% { box-shadow: 0 0 0 0 rgba(43, 172, 118, 0.5); }
