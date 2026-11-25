@@ -659,12 +659,7 @@ mod imp {
         // The user has asked for the call, so the meeting page gets the camera and the
         // microphone without another prompt, as in a native app.
         for origin in origins() {
-            cdp.send(
-                "Browser.grantPermissions",
-                json!({ "origin": origin, "permissions": ["audioCapture", "videoCapture"] }),
-                None,
-            )
-            .await?;
+            allow_camera(cdp, &origin).await?;
         }
         cdp.send(
             "Page.addScriptToEvaluateOnNewDocument",
@@ -874,6 +869,37 @@ mod imp {
     /// Origins that get the camera and microphone: the Telemost hosts only.
     pub(super) fn origins() -> Vec<String> {
         MEETING_HOSTS.iter().map(|h| format!("https://{h}")).collect()
+    }
+
+    /// Gives `origin` the camera and the microphone and leaves its other permissions as the
+    /// browser has them. `Browser.grantPermissions` would deny all the rest: the meeting then
+    /// could not keep the screen on (wake lock) or copy its link. A browser without
+    /// `Browser.setPermission` gets `grantPermissions` after all.
+    pub(super) async fn allow_camera(cdp: &Cdp, origin: &str) -> Result<(), String> {
+        let mut set = Ok(());
+        for name in ["camera", "microphone"] {
+            set = cdp
+                .send(
+                    "Browser.setPermission",
+                    json!({ "origin": origin, "permission": { "name": name }, "setting": "granted" }),
+                    None,
+                )
+                .await
+                .map(|_| ());
+            if set.is_err() {
+                break;
+            }
+        }
+        if set.is_ok() {
+            return Ok(());
+        }
+        cdp.send(
+            "Browser.grantPermissions",
+            json!({ "origin": origin, "permissions": ["audioCapture", "videoCapture"] }),
+            None,
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Dark "connecting" page shown until the meeting loads, in the colours of the Slack huddle window.
@@ -1170,6 +1196,66 @@ b{{color:#f8f8f8;font-size:17px}}
             let _ = child.wait();
             let _ = std::fs::remove_dir_all(&profile);
             assert!(said, "the page did not unload before the browser went");
+        }
+
+        /// The meeting gets the camera and the microphone and keeps the screen awake: granting
+        /// the first two must not deny the rest. Needs Chromium or Chrome: `cargo test -- --ignored`.
+        #[tokio::test]
+        #[ignore]
+        async fn the_meeting_keeps_its_other_permissions() {
+            use std::io::{Read, Write};
+            let Some(browser) = find_browser() else {
+                eprintln!("no Chromium-based browser, skipped");
+                return;
+            };
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = server.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                for stream in server.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let _ = stream.read(&mut [0u8; 4096]);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    );
+                }
+            });
+            let origin = format!("http://127.0.0.1:{port}");
+            let profile = tempdir().join("permissions");
+            std::fs::create_dir_all(&profile).unwrap();
+            let (pipe, mut child) = spawn(&browser, &profile, "about:blank", &["--headless=new"]).unwrap();
+            let (cdp, _events) = Cdp::start(pipe.0, pipe.1, || {});
+            let target = page_target(&cdp).await.unwrap();
+            let s = cdp
+                .send(
+                    "Target.attachToTarget",
+                    json!({ "targetId": target, "flatten": true }),
+                    None,
+                )
+                .await
+                .unwrap();
+            let s = s["sessionId"].as_str().unwrap().to_owned();
+            allow_camera(&cdp, &origin).await.unwrap();
+            cdp.send("Page.navigate", json!({ "url": format!("{origin}/") }), Some(&s))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let states = cdp
+                .send(
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": "Promise.all(['camera', 'microphone', 'screen-wake-lock']\
+                            .map(n => navigator.permissions.query({name: n}).then(p => p.state)))",
+                        "awaitPromise": true,
+                        "returnByValue": true,
+                    }),
+                    Some(&s),
+                )
+                .await
+                .map(|v| v["result"]["value"].clone());
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_dir_all(&profile);
+            assert_eq!(states.unwrap(), json!(["granted", "granted", "granted"]));
         }
 
         fn tempdir() -> PathBuf {
