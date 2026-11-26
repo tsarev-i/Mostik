@@ -413,18 +413,51 @@ fn page_script(title: &str) -> String {
     }}
   }}, true);
 
-  // "Chat" and "Invite to the meeting" only tell the messenger around the page (a JSON string
-  // posted to the parent window, here the page itself): Mostik answers them instead.
+  // The page's Redux store, from the `store` of react-redux's `Provider` in React's tree. The
+  // page takes the messenger's answers only in a frame of the messenger, which the call window
+  // is not, so what the messenger would answer goes straight to the store.
+  let store = null;
+  const pageStore = () => {{
+    if (store) return store;
+    for (const el of document.querySelectorAll("body, body > div")) {{
+      const key = Object.keys(el).find(k => k.startsWith("__reactContainer$"));
+      if (!key) continue;
+      // The marker may be the root fiber of the first render: the mounted tree is its root's
+      // `current`.
+      const marker = el[key];
+      const stack = [marker, marker && marker.alternate, marker && marker.stateNode && marker.stateNode.current];
+      for (let n = 0; stack.length && n < 20000; n++) {{
+        const f = stack.pop();
+        if (!f) continue;
+        const s = f.memoizedProps && f.memoizedProps.store;
+        if (s && typeof s.dispatch === "function" && typeof s.getState === "function") return (store = s);
+        if (f.sibling) stack.push(f.sibling);
+        if (f.child) stack.push(f.child);
+      }}
+    }}
+    return null;
+  }};
+  const dispatch = action => {{
+    try {{ const s = pageStore(); if (s) s.dispatch(action); }} catch {{}}
+  }};
+
+  // "Chat", "Invite to the meeting" and "Settings" only tell the messenger around the page (a
+  // JSON string posted to the parent window, here the page itself). Mostik opens the chat or
+  // adds people; the settings are the page's own dialog, which it shows when not in the messenger.
   const asks = {{ CHAT_OPEN: "chat", ADD_USERS_EVENT: "invite" }};
   window.addEventListener("message", e => {{
     if (e.source !== window || typeof e.data !== "string") return;
     let m;
     try {{ m = JSON.parse(e.data); }} catch {{ return; }}
+    if (m && m.event === "OPEN_SETTINGS") return dispatch({{ type: "settingsModal/setIsOpened", payload: true }});
     const ask = m && Object.hasOwn(asks, m.event) ? asks[m.event] : null;
     if (!ask) return;
     const call = window[{binding}];
     if (typeof call === "function") call(ask);
     else window.open({action_url} + ask, "_blank");
+    // Until the messenger answers that the chat is open, the page keeps a spinner on "Chat" and
+    // takes no other click on it.
+    if (ask === "chat") dispatch({{ type: "chat/setIsChatLoading", payload: false }});
   }});
 
   const Native = window.RTCPeerConnection;
@@ -1221,9 +1254,13 @@ b{{color:#f8f8f8;font-size:17px}}
             }
             assert!(seen, "no Page.frameNavigated for the main frame");
             // "Chat" and "Invite" of the meeting page, posted to the messenger around it, reach
-            // Mostik; other messages do not.
-            let page = "data:text/html,<p>In a call</p><script>for (const event of ['CHAT_OPEN', 'SET_THEME', \
-                'ADD_USERS_EVENT', 'toString']) postMessage(JSON.stringify({event}), '*')</script>";
+            // Mostik; other messages do not. What the messenger would answer goes to the page's
+            // store, found in React's tree: "Chat" stops its spinner, "Settings" opens the dialog.
+            let page = "data:text/html,<p>In a call</p><div id=root></div><script>window.acts = [];\
+                const store = {dispatch: a => acts.push(a.type + '=' + a.payload), getState: () => ({})};\
+                root['__reactContainer$x'] = {child: null, stateNode: {current: {child: {sibling: {memoizedProps: {store}}}}}};\
+                for (const event of ['CHAT_OPEN', 'SET_THEME', 'ADD_USERS_EVENT', 'toString', 'OPEN_SETTINGS'])\
+                postMessage(JSON.stringify({event}), '*')</script>";
             cdp.send("Page.navigate", json!({ "url": page }), Some(&s))
                 .await
                 .unwrap();
@@ -1237,6 +1274,10 @@ b{{color:#f8f8f8;font-size:17px}}
                 }
             }
             assert_eq!(asked, ["chat", "invite"]);
+            assert_eq!(
+                eval("acts.join()").await,
+                "chat/setIsChatLoading=false,settingsModal/setIsOpened=true"
+            );
             // A page that showed something and went blank, with no WebRTC connection: the call is over.
             let page =
                 "data:text/html,<p>In a call</p><script>setTimeout(()=>{document.body.textContent=''},1200)</script>";
