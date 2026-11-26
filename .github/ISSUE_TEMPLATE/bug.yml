@@ -1,46 +1,29 @@
-# "Report a bug" in Mostik's profile menu opens this form with `version` and `system` filled in
-# from the link (app/src-tauri/src/backend/report.rs). Copies already installed keep that link:
-# keep the file name and these two ids. The link also carries the issue as plain text headed by
-# the field labels, for a GitHub without this form: change a label there too.
-name: Ошибка / Bug report
-description: Что-то в Мостике работает не так / Something in Mostik does not work
+# "Report a bug" in Mostik's profile menu opens this form (bug-en.yml in the English UI) with
+# `version` and `system` filled in from the link (app/src-tauri/src/backend/report.rs). Copies
+# already installed keep that link: keep the file names, those two ids and their labels.
+name: Ошибка
+description: Что-то в Мостике работает не так
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: |
-        Issue видят все: не прикладывайте переписку, имена коллег и другие личные данные. Скриншот можно перетащить в любое поле.
-
-        Issues are public: leave out messages, names and other personal data. Drop a screenshot into any field.
+      value: Отчёт будет публичным. Не добавляйте переписку, имена коллег и другие личные данные.
   - type: textarea
     id: what
     attributes:
-      label: Что случилось / What happened
+      label: Описание
+      placeholder: Что произошло? Как повторить ошибку? Что вы ожидали?
     validations:
       required: true
-  - type: textarea
-    id: steps
-    attributes:
-      label: Как повторить / Steps to reproduce
-      placeholder: |
-        1.
-        2.
-        3.
-  - type: textarea
-    id: expected
-    attributes:
-      label: Что ожидалось / Expected behavior
   - type: input
     id: version
     attributes:
-      label: Версия Мостика / Mostik version
-      description: «О программе» в верхней панели / "About" in the top bar
+      label: Версия Мостика
     validations:
       required: true
   - type: textarea
     id: system
     attributes:
-      label: Система / System
-      description: ОС, рабочий стол, движок интерфейса / OS, desktop, web engine
+      label: Система
     validations:
       required: true

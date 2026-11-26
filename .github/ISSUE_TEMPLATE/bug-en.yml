@@ -1,0 +1,28 @@
+# The English twin of bug.yml, for the English UI: keep the file name, the `version` and `system`
+# ids and their labels (app/src-tauri/src/backend/report.rs).
+name: Bug report
+description: Something in Mostik does not work
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: The report will be public. Leave out messages, colleagues’ names and other personal data.
+  - type: textarea
+    id: what
+    attributes:
+      label: Description
+      placeholder: What happened? How can it be repeated? What did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mostik version
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: System
+    validations:
+      required: true

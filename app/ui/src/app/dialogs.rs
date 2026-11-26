@@ -1060,14 +1060,16 @@ pub(super) fn AboutDialog() -> impl IntoView {
     }
 }
 
-/// "Report a bug": what Mostik fills in the GitHub issue, which everyone can read, and the button
-/// that opens the issue in the browser. The user describes the bug there.
+/// "Report a bug": a warning that the report is public before the browser takes the user to
+/// GitHub, where the issue opens with the version and system filled in. The window closes once the
+/// browser is started; if it cannot be, the link is shown to copy. "Copy link" stays at hand: on
+/// Linux a started `xdg-open` counts as success even if no browser comes up after it.
 #[component]
 pub(super) fn BugReportDialog() -> impl IntoView {
     let c = ctx();
-    let report = RwSignal::new(None::<bridge::BugReport>);
-    // Why the report or the browser did not come, as the dialog says it.
-    let failed = RwSignal::new(None::<String>);
+    let url = RwSignal::new(None::<String>);
+    // What went wrong, as the dialog says it: no link, or no browser for it.
+    let failed = RwSignal::new(None::<&'static str>);
     // The browser is being started.
     let opening = RwSignal::new(false);
     // Whether "Copy link" put the link in the clipboard; `None` before it is pressed.
@@ -1075,36 +1077,42 @@ pub(super) fn BugReportDialog() -> impl IntoView {
     let close = move || c.bug_report.set(false);
     spawn_local(async move {
         match bridge::bug_report().await {
-            Ok(r) => report.try_set(Some(r)).map(drop),
-            Err(e) => failed.try_set(Some(e)).map(drop),
+            Ok(link) => url.try_set(Some(link)).map(drop),
+            Err(e) => {
+                leptos::logging::warn!("bug report: {e}");
+                failed.try_set(Some(tr().bug_no_link)).map(drop)
+            }
         };
     });
-    let url = move || report.with_untracked(|r| r.as_ref().map(|r| r.url.clone()));
     let open = move |_| {
-        let Some(url) = url() else { return };
+        let Some(link) = url.get_untracked() else { return };
         opening.set(true);
         failed.set(None);
         spawn_local(async move {
-            let result = bridge::open_url(&url).await;
+            let result = bridge::open_url(&link).await;
             // Closed meanwhile: the dialog open now, if any, is another one.
             if opening.try_set(false).is_some() {
                 return;
             }
             match result {
                 Ok(()) => close(),
-                Err(e) => failed.set(Some(tr().bug_open_failed(&e))),
+                Err(e) => {
+                    leptos::logging::warn!("bug report: {e}");
+                    failed.set(Some(tr().bug_no_browser));
+                }
             }
         });
     };
     let copy = move |_| {
-        let Some(url) = url() else { return };
-        let write = window().navigator().clipboard().write_text(&url);
+        let Some(link) = url.get_untracked() else { return };
+        let write = window().navigator().clipboard().write_text(&link);
         spawn_local(async move {
             let done = wasm_bindgen_futures::JsFuture::from(write).await.is_ok();
             copied.try_set(Some(done));
         });
     };
-    let no_report = move || report.with(Option::is_none);
+    // The browser did not start: the link is for opening by hand.
+    let manual = move || failed.get() == Some(tr().bug_no_browser);
     view! {
         <Modal class="bug-report" on_close=Callback::new(move |_| close())>
             <header>
@@ -1114,18 +1122,21 @@ pub(super) fn BugReportDialog() -> impl IntoView {
                 </button>
             </header>
             <p>{tr().bug_intro}</p>
-            {move || report.get().map(|r| view! {
-                <pre class="bug-filled">{format!("{}\n{}", tr().version(&r.version), r.system)}</pre>
-            })}
-            <p class="muted">{tr().bug_then}</p>
+            <p class="muted">{tr().bug_public}</p>
             {move || failed.get().map(|e| view! { <p class="danger-text">{e}</p> })}
+            {move || manual().then(|| view! {
+                <input class="bug-link" readonly prop:value=move || url.get().unwrap_or_default()
+                    on:focus=|e| { event_target::<web_sys::HtmlInputElement>(&e).select(); }/>
+            })}
             <div class="modal-actions">
-                <button class="btn" disabled=no_report on:click=copy>{move || match copied.get() {
-                    None => tr().copy_link,
-                    Some(true) => tr().link_copied,
-                    Some(false) => tr().copy_failed,
-                }}</button>
-                <button class="btn primary" disabled=move || no_report() || opening.get() on:click=open>
+                <button class="link bug-copy" disabled=move || url.with(Option::is_none) on:click=copy>
+                    {move || match copied.get() {
+                        None => tr().copy_link,
+                        Some(true) => tr().link_copied,
+                        Some(false) => tr().copy_failed,
+                    }}
+                </button>
+                <button class="btn primary" disabled=move || url.with(Option::is_none) || opening.get() on:click=open>
                     {tr().bug_open}
                 </button>
             </div>

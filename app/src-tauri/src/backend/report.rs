@@ -1,62 +1,63 @@
-//! "Report a bug" in the profile menu: a dialog shows the version of Mostik and the system it runs
-//! on, and its button opens a new GitHub issue in the browser with them filled in. The app sends
-//! nothing itself: the user describes the bug, adds a screenshot and submits the issue on GitHub.
+//! "Report a bug" in the profile menu: a dialog warns that the report is public, and its button
+//! opens a new GitHub issue in the browser with the version of Mostik and the system it runs on
+//! filled in. The app sends nothing itself: the user describes the bug and submits it on GitHub.
 
-use mostik_ipc::BugReport;
 use mostik_ipc::cmd::{self, Out};
-use tauri::Url;
+use tauri::{AppHandle, Url};
 
-/// The issue to open and what it has filled in. The UI shows the rest and opens the link with
-/// `open_url`.
+/// The new issue to open, in the UI language.
 #[tauri::command]
-pub fn bug_report() -> Out<cmd::BugReport> {
-    let (version, system) = (version(), system());
-    BugReport {
-        url: issue_url(&version, &system).into(),
-        version,
-        system,
-    }
+pub fn bug_report(app: AppHandle) -> Out<cmd::BugReport> {
+    let lang = if super::english(&app) { &EN } else { &RU };
+    issue_url(lang, &version(), &system()).into()
 }
 
 /// New issue in the repository.
 const NEW_ISSUE: &str = "https://github.com/tsarev-i/Mostik/issues/new";
-/// The issue form, `.github/ISSUE_TEMPLATE/bug.yml`; the query fills its fields by their ids,
-/// [`VERSION_FIELD`] and [`SYSTEM_FIELD`]. GitHub takes forms from the default branch only, and a
-/// form renamed or removed there, or a field id changed, breaks the link in the copies already
-/// installed.
-const TEMPLATE: &str = "bug.yml";
+/// The query fills the fields of the issue forms by these ids. GitHub takes forms from the
+/// default branch only, and a form renamed or removed there, or a field id changed, breaks the
+/// link in the copies already installed.
 const VERSION_FIELD: &str = "version";
 const SYSTEM_FIELD: &str = "system";
 
-/// The labels of the form's fields, which head the sections of [`plain_body`].
-const WHAT_LABEL: &str = "Что случилось / What happened";
-const STEPS_LABEL: &str = "Как повторить / Steps to reproduce";
-const EXPECTED_LABEL: &str = "Что ожидалось / Expected behavior";
-const VERSION_LABEL: &str = "Версия Мостика / Mostik version";
-const SYSTEM_LABEL: &str = "Система / System";
-
-/// The form with `version` and `system` filled in, and the same issue as plain text in `body`.
-/// GitHub ignores `body` when it has the form and opens a blank issue with `body` when it has not
-/// (the form is not in the default branch yet, or was renamed), so either way the version and
-/// system are in the issue. No `labels` in the query: GitHub answers it with 404 to anyone who
-/// may not label issues, so the form sets the label itself.
-fn issue_url(version: &str, system: &str) -> Url {
-    let mut url = Url::parse(NEW_ISSUE).expect("a valid address");
-    url.query_pairs_mut()
-        .append_pair("template", TEMPLATE)
-        .append_pair(VERSION_FIELD, version)
-        .append_pair(SYSTEM_FIELD, system)
-        .append_pair("body", &plain_body(version, system));
-    url
+/// An issue form in `.github/ISSUE_TEMPLATE/` and the labels of its two filled fields, which head
+/// the same facts in the plain issue.
+struct Lang {
+    template: &'static str,
+    version_label: &'static str,
+    system_label: &'static str,
 }
 
-/// The form as Markdown: a heading per field, as GitHub writes a submitted form, with room to
-/// describe the bug and the version and system filled in.
-fn plain_body(version: &str, system: &str) -> String {
-    format!(
-        "### {WHAT_LABEL}\n\n\n\n### {STEPS_LABEL}\n\n1.\n2.\n3.\n\n### {EXPECTED_LABEL}\n\n\n\n\
-         ### {VERSION_LABEL}\n\n{version}\n\n### {SYSTEM_LABEL}\n\n{system}\n"
-    )
+const RU: Lang = Lang {
+    template: "bug.yml",
+    version_label: "Версия Мостика",
+    system_label: "Система",
+};
+
+const EN: Lang = Lang {
+    template: "bug-en.yml",
+    version_label: "Mostik version",
+    system_label: "System",
+};
+
+/// The form of `lang` with `version` and `system` filled in, and the same two as the text of a
+/// plain issue in `body`. GitHub ignores `body` when it has the form and opens a plain issue with
+/// it when it has not (the form is not in the default branch yet, or was renamed), so either way
+/// the version and system are in the issue; the user writes the description above them. No
+/// `labels` in the query: GitHub answers it with 404 to anyone who may not label issues, so the
+/// form sets the label itself.
+fn issue_url(lang: &Lang, version: &str, system: &str) -> Url {
+    let body = format!(
+        "### {}\n\n{version}\n\n### {}\n\n{system}\n",
+        lang.version_label, lang.system_label
+    );
+    let mut url = Url::parse(NEW_ISSUE).expect("a valid address");
+    url.query_pairs_mut()
+        .append_pair("template", lang.template)
+        .append_pair(VERSION_FIELD, version)
+        .append_pair(SYSTEM_FIELD, system)
+        .append_pair("body", &body);
+    url
 }
 
 /// The version as in "About", and whether this is a debug build.
@@ -234,7 +235,8 @@ mod tests {
 
     #[test]
     fn the_form_gets_the_version_and_system() {
-        let url = issue_url("0.7.1", "Arch Linux, x86_64\nKDE, Wayland\nWebKitGTK 2.50.1");
+        let system = "Arch Linux, x86_64\nKDE, Wayland\nWebKitGTK 2.50.1";
+        let url = issue_url(&RU, "0.7.1", system);
         assert_eq!(url.host_str(), Some("github.com"));
         assert_eq!(url.path(), "/tsarev-i/Mostik/issues/new");
         let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
@@ -243,56 +245,44 @@ mod tests {
             [
                 ("template".into(), "bug.yml".into()),
                 ("version".into(), "0.7.1".into()),
-                (
-                    "system".into(),
-                    "Arch Linux, x86_64\nKDE, Wayland\nWebKitGTK 2.50.1".into()
-                ),
+                ("system".into(), system.into()),
                 (
                     "body".into(),
-                    "### Что случилось / What happened\n\n\n\n\
-                     ### Как повторить / Steps to reproduce\n\n1.\n2.\n3.\n\n\
-                     ### Что ожидалось / Expected behavior\n\n\n\n\
-                     ### Версия Мостика / Mostik version\n\n0.7.1\n\n\
-                     ### Система / System\n\nArch Linux, x86_64\nKDE, Wayland\nWebKitGTK 2.50.1\n"
-                        .into()
+                    format!("### Версия Мостика\n\n0.7.1\n\n### Система\n\n{system}\n")
                 ),
             ]
         );
-        // Line breaks and `&` reach the form as text, not as query syntax.
-        let odd = issue_url("1 & 2", "a=b\nc#d");
+        let english: Vec<(String, String)> = issue_url(&EN, "0.7.1", system).query_pairs().into_owned().collect();
+        assert_eq!(english[0], ("template".into(), "bug-en.yml".into()));
+        assert_eq!(
+            english[3].1,
+            format!("### Mostik version\n\n0.7.1\n\n### System\n\n{system}\n")
+        );
+        // Line breaks and `&` reach the form as text, not as query syntax, and `open_url` takes it.
+        let odd = issue_url(&RU, "1 & 2", "a=b\nc#d");
         assert!(!odd.as_str().contains('\n'));
         assert_eq!(odd.fragment(), None);
         assert_eq!(odd.query_pairs().count(), 4);
+        assert!(mostik_core::markup::safe_url(odd.as_str()));
     }
 
-    /// The form takes the fields by id, and the plain issue is headed by their labels: changing
-    /// one in `bug.yml` must change this file too.
+    /// The forms take the fields by id, and the plain issue is headed by their labels: changing
+    /// one in a form must change this file too.
     #[test]
-    fn the_form_has_the_fields_filled_in() {
-        let form = include_str!("../../../../.github/ISSUE_TEMPLATE/bug.yml");
-        for field in [VERSION_FIELD, SYSTEM_FIELD] {
-            assert!(
-                form.contains(&format!("id: {field}\n")),
-                "no field `{field}` in the form"
-            );
+    fn the_forms_have_the_fields_filled_in() {
+        let forms = [
+            (&RU, include_str!("../../../../.github/ISSUE_TEMPLATE/bug.yml")),
+            (&EN, include_str!("../../../../.github/ISSUE_TEMPLATE/bug-en.yml")),
+        ];
+        for (lang, form) in forms {
+            for (field, label) in [(VERSION_FIELD, lang.version_label), (SYSTEM_FIELD, lang.system_label)] {
+                assert!(
+                    form.contains(&format!("    id: {field}\n    attributes:\n      label: {label}\n")),
+                    "{}: no field `{field}` labelled `{label}`",
+                    lang.template
+                );
+            }
         }
-        for label in [WHAT_LABEL, STEPS_LABEL, EXPECTED_LABEL, VERSION_LABEL, SYSTEM_LABEL] {
-            assert!(
-                form.contains(&format!("label: {label}\n")),
-                "no field labelled `{label}` in the form"
-            );
-        }
-    }
-
-    /// The dialog shows what the link fills in, and `open_url` takes the link.
-    #[test]
-    fn the_report_shows_what_the_link_fills_in() {
-        let report = bug_report();
-        let url = Url::parse(&report.url).expect("a valid address");
-        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-        assert_eq!(query[VERSION_FIELD], report.version);
-        assert_eq!(query[SYSTEM_FIELD], report.system);
-        assert!(mostik_core::markup::safe_url(&report.url));
     }
 
     #[test]
