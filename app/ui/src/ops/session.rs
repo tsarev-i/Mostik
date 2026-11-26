@@ -125,6 +125,10 @@ pub fn subscribe(c: Ctx) {
             }
         })
         .await;
+        bridge::listen(bridge::CALL_ACTION_EVENT, move |r: bridge::CallRequest| {
+            super::call_request(c, r)
+        })
+        .await;
         bridge::listen(bridge::CALL_EVENT, move |call: Option<bridge::CallInfo>| {
             if call.is_some() {
                 c.notice.set(None);

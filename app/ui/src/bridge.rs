@@ -5,8 +5,8 @@ use mostik_core::{ChatId, Message, Timestamp, UnreadBadge, UserId};
 use mostik_ipc::cmd::{self, Command};
 pub use mostik_ipc::cmd::{ReplyRef, SearchFilter, SendOptions};
 pub use mostik_ipc::{
-    Audience, Boot, CallInfo, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget, PendingFile, Ring, Sent,
-    Threads, UpdateStatus, UploadProgress, VoiceEnded,
+    Audience, Boot, CallAction, CallInfo, CallRequest, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget,
+    PendingFile, Ring, Sent, Threads, UpdateStatus, UploadProgress, VoiceEnded,
 };
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
@@ -80,6 +80,8 @@ pub const SNAPSHOT_EVENT: &str = "mostik://snapshot";
 pub const SIGNED_OUT_EVENT: &str = "mostik://signed_out";
 /// The current call changed: [`CallInfo`] or `null`.
 pub const CALL_EVENT: &str = "mostik://call";
+/// A button of the meeting page asks for the chat of the call or to add people: [`CallRequest`].
+pub const CALL_ACTION_EVENT: &str = "mostik://call-action";
 /// The call ringing for the user changed: [`Ring`] or `null`.
 pub const RING_EVENT: &str = "mostik://ring";
 

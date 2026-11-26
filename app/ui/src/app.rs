@@ -38,7 +38,7 @@ pub(crate) use avatar::{Avatar, display_title};
 pub(crate) use field::{place_caret, selection, wrap_selection};
 pub(crate) use org::current_org;
 pub use org::org_key;
-pub use state::{ChatTab, Ctx, Phase, ViewMode};
+pub use state::{ChatTab, Ctx, DetailsTab, Phase, ViewMode};
 pub(crate) use voice::ended as voice_ended;
 
 use avatar::HoverTip;

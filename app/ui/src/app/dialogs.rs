@@ -508,7 +508,12 @@ pub(super) fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
 #[component]
 pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
     let c = ctx();
-    let tab = RwSignal::new(initial);
+    // "Invite" in the call window: the members, with adding people open over them.
+    let tab = RwSignal::new(if initial == DetailsTab::AddPeople {
+        DetailsTab::Members
+    } else {
+        initial
+    });
     let chat_id = c.current.get_untracked();
     let details: RwSignal<Option<bridge::ChatDetails>> = RwSignal::new(None);
     let members: RwSignal<Vec<ChatMember>> = RwSignal::new(vec![]);
@@ -516,7 +521,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
     let description = RwSignal::new(String::new());
     let confirm_leave = RwSignal::new(false);
     let member_query = RwSignal::new(String::new());
-    let adding = RwSignal::new(false);
+    let adding = RwSignal::new(initial == DetailsTab::AddPeople);
     let kind = c.snap.with_untracked(|s| s.chat(&chat_id).map(|ch| ch.kind.clone()));
     let close = move || c.details.set(None);
     let load = {
@@ -671,7 +676,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
                             </div>
                         }.into_any()
                     }
-                    DetailsTab::Members => {
+                    DetailsTab::Members | DetailsTab::AddPeople => {
                         let (rm, me) = (change_rm.clone(), me.clone());
                         view! {
                             <input class="text-input member-search" placeholder=tr().find_members prop:value=move || member_query.get()
@@ -716,7 +721,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
         {move || adding.get().then(|| {
             let add = change_add.clone();
             view! {
-                <AddPeopleDialog chat_id=picker_chat.clone() title=name.get_untracked() exclude=exclude
+                <AddPeopleDialog chat_id=picker_chat.clone() title=Signal::derive(move || name.get()) exclude=exclude
                     on_close=Callback::new(move |_| adding.set(false))
                     on_add=Callback::new(move |ids: Vec<UserId>| { adding.set(false); add(ids, true); })/>
             }
@@ -728,7 +733,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
 #[component]
 fn AddPeopleDialog(
     chat_id: ChatId,
-    title: String,
+    title: Signal<String>,
     exclude: Signal<Vec<UserId>>,
     on_close: Callback<()>,
     on_add: Callback<Vec<UserId>>,
@@ -748,7 +753,7 @@ fn AddPeopleDialog(
     view! {
         <Modal nested=true on_close=on_close>
             <header>
-                <h2>{format!("{} #{title}", tr().add_people_to)}</h2>
+                <h2>{move || format!("{} #{}", tr().add_people_to, title.get())}</h2>
                 <button class="icon-btn" title=tr().close on:click=move |_| on_close.run(())><Icon icon=I::X/></button>
             </header>
             <PeoplePicker chat_id=chat_id exclude=all_excluded on_pick=Callback::new(move |p: UserProfile| people.update(|v| v.push(p)))/>

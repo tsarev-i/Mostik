@@ -18,7 +18,7 @@ use mostik_core::*;
 use crate::app::Ctx;
 use crate::bridge;
 
-pub use calls::{call_user, leave_call, start_call};
+pub use calls::{call_request, call_user, leave_call, start_call};
 pub use chats::{
     history_loaded, jump_to_message, leave_chat, load_older, mark_chat_read, navigate, open_chat, pinned_message,
     read_in_sight, recount_soon, stop_older, view_pinned,

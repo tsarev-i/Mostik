@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use mostik_core::*;
 
-use crate::app::Ctx;
+use crate::app::{Ctx, DetailsTab};
 use crate::bridge;
 use crate::i18n::tr;
 
@@ -69,6 +69,49 @@ pub fn leave_call(c: Ctx) {
     spawn_local(async move {
         if let Err(e) = bridge::leave_call().await {
             failed(c, tr().err_call, e);
+        }
+    });
+}
+
+/// "Chat" and "Invite to the meeting" in the call window, which Telemost leaves to the messenger
+/// around the meeting page: the main window is already in front. "Chat" opens the chat of the
+/// call; "Invite" opens adding people to it, as in Telemost. A call with no group chat to add
+/// people to (a direct chat, a meeting link from a message) has its link copied to share instead.
+pub fn call_request(c: Ctx, r: bridge::CallRequest) {
+    let group = r.chat_id.as_ref().is_some_and(|id| {
+        c.snap.with_untracked(|s| {
+            s.chat(id)
+                .is_some_and(|ch| matches!(ch.kind, ChatKind::Group { .. } | ChatKind::Broadcast))
+        })
+    });
+    match (r.action, r.chat_id, group) {
+        // The chat itself, not the members or adding people left open over it by "Invite".
+        (bridge::CallAction::Chat, Some(id), _) => {
+            c.details.set(None);
+            super::open_chat(c, id);
+        }
+        (bridge::CallAction::Chat, None, _) => c.notice.set(Some(tr().call_no_chat.into())),
+        // Only admins add people, as in the chat details; anyone else shares the link.
+        (bridge::CallAction::Invite, Some(id), true) => spawn_local(async move {
+            let admin = bridge::chat_details(&id.0).await.is_ok_and(|d| d.role == "admin");
+            if admin {
+                super::open_chat(c, id);
+                c.details.set(Some(DetailsTab::AddPeople));
+            } else {
+                share_call_link(c, r.url, tr().call_link_copied_not_admin);
+            }
+        }),
+        (bridge::CallAction::Invite, _, _) => share_call_link(c, r.url, tr().call_link_copied),
+    }
+}
+
+/// Copies the link of the call, with `note` to say so, or shows the link where it cannot.
+pub fn share_call_link(c: Ctx, url: String, note: &'static str) {
+    spawn_local(async move {
+        let copied = wasm_bindgen_futures::JsFuture::from(window().navigator().clipboard().write_text(&url)).await;
+        match copied {
+            Ok(_) => c.notice.set(Some(note.into())),
+            Err(_) => report(c, format!("{} {url}", tr().call_link)),
         }
     });
 }

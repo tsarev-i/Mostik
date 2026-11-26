@@ -358,6 +358,8 @@ pub fn enter_sends() -> bool {
 pub enum DetailsTab {
     About,
     Members,
+    /// "Members" with adding people open over it, for "Invite" in the call window.
+    AddPeople,
 }
 
 /// The tabs of the chat header, as in Slack: the messages, the pinned message, the files.

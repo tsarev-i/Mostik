@@ -29,6 +29,9 @@ use tokio::sync::Mutex;
 /// The current call changed: [`CallInfo`] or `null` when there is no call.
 pub const CALL_EVENT: &str = "mostik://call";
 
+/// A button of the meeting page asked Mostik for something: [`CallRequest`].
+pub const ACTION_EVENT: &str = "mostik://call-action";
+
 /// Refusal to open a second call while one is open.
 pub const BUSY: &str = "another call is already open, leave it first";
 
@@ -43,6 +46,8 @@ const HEIGHT: f64 = 680.0;
 
 /// What the UI shows about the current call.
 pub use mostik_ipc::CallInfo;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use mostik_ipc::{CallAction, CallRequest};
 
 struct Active {
     info: CallInfo,
@@ -298,6 +303,46 @@ fn ended(app: &AppHandle, generation: u64) {
     }
 }
 
+/// "Chat" and "Invite to the meeting" of the meeting page, from the page script: the main window
+/// comes to the front and the UI opens the chat of the call or adds people to it, as the
+/// messenger around the page does in Telemost. Only for the call that is open now.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn requested(app: &AppHandle, generation: u64, action: &str) {
+    let action = match action {
+        "chat" => CallAction::Chat,
+        "invite" => CallAction::Invite,
+        _ => return,
+    };
+    let request = {
+        let state = app.state::<CallState>();
+        let Ok(active) = state.active.lock() else { return };
+        let Some(a) = active.as_ref().filter(|a| a.generation == generation) else {
+            return;
+        };
+        CallRequest {
+            action,
+            chat_id: a.info.chat_id.clone(),
+            url: a.url.clone(),
+        }
+    };
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window("main") {
+            crate::webview::raise(&w);
+        }
+        let _ = app2.emit(ACTION_EVENT, &request);
+    });
+}
+
+/// The page script calls this function with "chat" or "invite" (Linux: a DevTools binding).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const BINDING: &str = "__mostikCall";
+
+/// Where the page script asks for "chat" or "invite" without [`BINDING`] (Windows): a new window
+/// at `<ACTION_URL><action>`, which the call window refuses.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const ACTION_URL: &str = "https://mostik.invalid/call/";
+
 /// Where the page script sends the window once the call is over; the window then closes.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const ENDED_URL: &str = "about:blank#mostik-call-ended";
@@ -331,10 +376,14 @@ pub fn meeting_page(url: &str, english: bool) -> String {
 /// has shown something, has no WebRTC connection left and stays blank for two seconds, it goes
 /// to [`ENDED_URL`] and the window closes. While any connection is open the window stays, even
 /// if the page hides all its controls.
+///
+/// "Chat" and "Invite to the meeting" go to Mostik (see [`requested`]).
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn page_script(title: &str) -> String {
     let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
     let ended = serde_json::to_string(ENDED_URL).unwrap_or_default();
+    let binding = serde_json::to_string(BINDING).unwrap_or_default();
+    let action_url = serde_json::to_string(ACTION_URL).unwrap_or_default();
     format!(
         r#"(() => {{
   if (window.top !== window) return;
@@ -363,6 +412,20 @@ fn page_script(title: &str) -> String {
       location.replace({ended});
     }}
   }}, true);
+
+  // "Chat" and "Invite to the meeting" only tell the messenger around the page (a JSON string
+  // posted to the parent window, here the page itself): Mostik answers them instead.
+  const asks = {{ CHAT_OPEN: "chat", ADD_USERS_EVENT: "invite" }};
+  window.addEventListener("message", e => {{
+    if (e.source !== window || typeof e.data !== "string") return;
+    let m;
+    try {{ m = JSON.parse(e.data); }} catch {{ return; }}
+    const ask = m && Object.hasOwn(asks, m.event) ? asks[m.event] : null;
+    if (!ask) return;
+    const call = window[{binding}];
+    if (typeof call === "function") call(ask);
+    else window.open({action_url} + ask, "_blank");
+  }});
 
   const Native = window.RTCPeerConnection;
   if (!Native) return;
@@ -519,7 +582,8 @@ mod imp {
         let loading = loading_page(app, title);
         match prepare(&cdp, url, title, &loading, jar).await {
             Ok(target) => {
-                tauri::async_runtime::spawn(close_when_left(cdp.clone(), events, target.clone()));
+                let watch = close_when_left(app.clone(), generation, cdp.clone(), events, target.clone());
+                tauri::async_runtime::spawn(watch);
                 Ok(Some(Handle {
                     cdp,
                     target,
@@ -652,6 +716,11 @@ mod imp {
             .ok_or("Target.attachToTarget: no sessionId")?;
         // Navigation events, for `close_when_left`.
         cdp.send("Page.enable", json!({}), Some(session)).await?;
+        // "Chat" and "Invite" of the meeting page (see `page_script`). The page gets the binding
+        // only while the Runtime domain is on; its other events (console) are dropped unread.
+        cdp.send("Runtime.enable", json!({}), Some(session)).await?;
+        cdp.send("Runtime.addBinding", json!({ "name": super::BINDING }), Some(session))
+            .await?;
         cdp.send("Page.navigate", json!({ "url": loading }), Some(session))
             .await?;
         cdp.send("Storage.setCookies", json!({ "cookies": cookies(jar) }), None)
@@ -672,10 +741,20 @@ mod imp {
     }
 
     /// Closes the window once the user leaves the meeting, as the Slack huddle window does
-    /// (see `EndWatch`).
-    async fn close_when_left(cdp: Arc<Cdp>, mut events: UnboundedReceiver<Event>, target: String) {
+    /// (see `EndWatch`). Passes on what the page's buttons ask of Mostik (see `page_script`).
+    async fn close_when_left(
+        app: AppHandle,
+        generation: u64,
+        cdp: Arc<Cdp>,
+        mut events: UnboundedReceiver<Event>,
+        target: String,
+    ) {
         let mut watch = super::EndWatch::default();
         while let Some(e) = events.recv().await {
+            if let Some(action) = binding_call(&e) {
+                super::requested(&app, generation, action);
+                continue;
+            }
             let Some(url) = main_frame_url(&e, &target) else {
                 continue;
             };
@@ -686,6 +765,13 @@ mod imp {
                 return;
             }
         }
+    }
+
+    /// What the page script asked for through [`super::BINDING`], if the event is that.
+    pub(super) fn binding_call(e: &Event) -> Option<&str> {
+        (e.method == "Runtime.bindingCalled" && e.params.get("name").and_then(Value::as_str) == Some(super::BINDING))
+            .then(|| e.params.get("payload")?.as_str())
+            .flatten()
     }
 
     /// The new URL of the window's page, if the event is its navigation. The main frame has
@@ -1017,6 +1103,21 @@ b{{color:#f8f8f8;font-size:17px}}
             assert_eq!(main_frame_url(&ev("Page.loadEventFired", json!({})), "T"), None);
         }
 
+        #[test]
+        fn binding_calls_of_the_page_script_only() {
+            let ev = |name: &str| Event {
+                method: "Runtime.bindingCalled".into(),
+                params: json!({ "name": name, "payload": "chat", "executionContextId": 1 }),
+            };
+            assert_eq!(binding_call(&ev(super::super::BINDING)), Some("chat"));
+            assert_eq!(binding_call(&ev("other")), None);
+            let console = Event {
+                method: "Runtime.consoleAPICalled".into(),
+                params: json!({ "name": super::super::BINDING, "payload": "chat" }),
+            };
+            assert_eq!(binding_call(&console), None);
+        }
+
         /// Drives a real browser in headless mode: the pipe, cookies and permissions work, and
         /// WebRTC is there. Needs Chromium or Chrome and the network: `cargo test -- --ignored`.
         #[tokio::test]
@@ -1095,6 +1196,10 @@ b{{color:#f8f8f8;font-size:17px}}
             assert_eq!(eval("typeof RTCPeerConnection").await, "function");
             // The title survives a page that sets its own, both ways.
             cdp.send("Page.enable", json!({}), Some(&s)).await.unwrap();
+            cdp.send("Runtime.enable", json!({}), Some(&s)).await.unwrap();
+            cdp.send("Runtime.addBinding", json!({ "name": super::super::BINDING }), Some(&s))
+                .await
+                .unwrap();
             cdp.send(
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({ "source": super::super::page_script("Call · #dev") }),
@@ -1115,6 +1220,23 @@ b{{color:#f8f8f8;font-size:17px}}
                 seen |= main_frame_url(&e, &target).is_some_and(|u| u.starts_with("data:text/html,<title>"));
             }
             assert!(seen, "no Page.frameNavigated for the main frame");
+            // "Chat" and "Invite" of the meeting page, posted to the messenger around it, reach
+            // Mostik; other messages do not.
+            let page = "data:text/html,<p>In a call</p><script>for (const event of ['CHAT_OPEN', 'SET_THEME', \
+                'ADD_USERS_EVENT', 'toString']) postMessage(JSON.stringify({event}), '*')</script>";
+            cdp.send("Page.navigate", json!({ "url": page }), Some(&s))
+                .await
+                .unwrap();
+            let mut asked = vec![];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+                    && let Some(action) = binding_call(&e)
+                {
+                    asked.push(action.to_owned());
+                }
+            }
+            assert_eq!(asked, ["chat", "invite"]);
             // A page that showed something and went blank, with no WebRTC connection: the call is over.
             let page =
                 "data:text/html,<p>In a call</p><script>setTimeout(()=>{document.body.textContent=''},1200)</script>";
@@ -1271,7 +1393,7 @@ mod imp {
     use std::sync::Mutex;
 
     use mostik_yandex::session::CookieJar;
-    use tauri::webview::{Color, PermissionKind, PermissionResponse};
+    use tauri::webview::{Color, NewWindowResponse, PermissionKind, PermissionResponse};
     use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
     use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE, ICoreWebView2_2};
     use windows_core::{HSTRING, Interface};
@@ -1298,6 +1420,7 @@ mod imp {
         let label = format!("call-{generation}");
         let app2 = app.clone();
         let label2 = label.clone();
+        let app3 = app.clone();
         let watch = Mutex::new(super::EndWatch::default());
         let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(blank))
             .title(title)
@@ -1314,6 +1437,14 @@ mod imp {
                 }
             })
             .initialization_script(super::page_script(title))
+            // "Chat" and "Invite" of the meeting page (see `page_script`): no window opens.
+            .on_new_window(move |url, _| match url.as_str().strip_prefix(super::ACTION_URL) {
+                Some(action) => {
+                    super::requested(&app3, generation, action);
+                    NewWindowResponse::Deny
+                }
+                None => NewWindowResponse::Allow,
+            })
             // The end of the call, as on Linux (`EndWatch`). Routing inside the page does not
             // come here; on the bare meeting page the page script covers it with `ENDED_URL`.
             .on_navigation(move |url| {
