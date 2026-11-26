@@ -67,6 +67,11 @@ windows-core = "0.62"
 # The registry for the Windows version in a bug report.
 windows = { version = "0.62", features = ["Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# WebKit's spell checking switch in the app's defaults (see webview.rs). Same versions as wry uses.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSString", "NSUserDefaults", "NSValue"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # fd setup for the DevTools pipe of the call browser; close-on-exec flags before the restart after an update.
 libc = "0.2"

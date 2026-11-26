@@ -3049,6 +3049,8 @@ dependencies = [
  "mostik-core",
  "mostik-ipc",
  "mostik-yandex",
+ "objc2",
+ "objc2-foundation",
  "ogg",
  "opus-rs",
  "rodio",

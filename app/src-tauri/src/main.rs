@@ -252,6 +252,8 @@ fn main() {
     // Before Tauri starts any thread: it sets an environment variable for enchant.
     #[cfg(target_os = "linux")]
     spelling::install();
+    #[cfg(target_os = "macos")]
+    webview::allow_spell_checking();
     let builder = tauri::Builder::default();
     // First, as the plugin asks: a second start goes no further (see instance.rs).
     #[cfg(target_os = "windows")]

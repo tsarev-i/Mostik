@@ -122,8 +122,8 @@ pub fn forget_site_data<R: Runtime>(window: &WebviewWindow<R>, what: SiteData) {
 /// checks nothing until its web context is given languages. They are Russian and English, the
 /// languages people write in Telemost, and the system's. The Russian and English dictionaries come
 /// with Mostik (see `spelling.rs`), the others from the system (enchant, hunspell); a language
-/// without one is skipped. Elsewhere the fields' `spellcheck`
-/// attribute, which the UI sets from the same preference, is enough.
+/// without one is skipped. Elsewhere the fields' `spellcheck` attribute, which the UI sets from
+/// the same preference, is enough (on macOS once [`allow_spell_checking`] has run).
 pub fn spell_check<R: Runtime>(window: &WebviewWindow<R>, enabled: bool) {
     #[cfg(target_os = "linux")]
     {
@@ -134,6 +134,25 @@ pub fn spell_check<R: Runtime>(window: &WebviewWindow<R>, enabled: bool) {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = (window, enabled);
+}
+
+/// Turns on WebKit's spell checking while typing on macOS. WKWebView reads it from the app's
+/// defaults (`WebContinuousSpellCheckingEnabled`), which only Safari sets: without it no field is
+/// checked, whatever its `spellcheck` attribute says. Registered defaults are a fallback for this
+/// run only, never written to disk, so a value the user saves (Edit → Spelling and Grammar →
+/// Check Spelling While Typing, in apps that offer it) still wins. To be called before any
+/// webview starts: WebKit reads the setting once.
+#[cfg(target_os = "macos")]
+pub fn allow_spell_checking() {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults};
+
+    let key = NSString::from_str("WebContinuousSpellCheckingEnabled");
+    let on = NSNumber::new_bool(true);
+    let on: &AnyObject = &on;
+    let defaults = NSDictionary::from_slices(&[&*key], &[on]);
+    // SAFETY: the dictionary maps an NSString to an NSNumber, as registerDefaults: expects.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
 }
 
 /// The locale of the user's messages: `LC_ALL`, `LC_MESSAGES` or `LANG`, as gettext reads them.
