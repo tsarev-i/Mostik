@@ -646,8 +646,8 @@ commands! {
     DeleteCustomEmoji = "delete_custom_emoji", DeleteEmojiArgs => Vec<EmojiSet>;
 
     // Help.
-    /// "Report a bug": a new GitHub issue in the browser, the version and system filled in.
-    ReportBug = "report_bug", () => ();
+    /// "Report a bug": the GitHub issue form with the version and system filled in; the UI opens it.
+    BugReport = "bug_report", () => crate::BugReport;
 
     // Updates.
     UpdateStatus = "update_status", () => crate::UpdateStatus;

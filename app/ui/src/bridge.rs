@@ -5,8 +5,8 @@ use mostik_core::{ChatId, Message, Timestamp, UnreadBadge, UserId};
 use mostik_ipc::cmd::{self, Command};
 pub use mostik_ipc::cmd::{ReplyRef, SearchFilter, SendOptions};
 pub use mostik_ipc::{
-    Audience, Boot, CallAction, CallInfo, CallRequest, ChatDetails, Dropped, FoundMessages, HistoryPage, OpenTarget,
-    PendingFile, Ring, Sent, Threads, UpdateStatus, UploadProgress, VoiceEnded,
+    Audience, Boot, BugReport, CallAction, CallInfo, CallRequest, ChatDetails, Dropped, FoundMessages, HistoryPage,
+    OpenTarget, PendingFile, Ring, Sent, Threads, UpdateStatus, UploadProgress, VoiceEnded,
 };
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
@@ -487,9 +487,9 @@ pub async fn open_yandex_id() -> Result<(), String> {
     call::<cmd::OpenYandexId>(()).await
 }
 
-/// "Report a bug": the issue form on GitHub in the browser, the version and system filled in.
-pub async fn report_bug() -> Result<(), String> {
-    call::<cmd::ReportBug>(()).await
+/// "Report a bug": the GitHub issue form to open, with the version and system it has filled in.
+pub async fn bug_report() -> Result<BugReport, String> {
+    call::<cmd::BugReport>(()).await
 }
 
 pub async fn open_url(url: &str) -> Result<(), String> {

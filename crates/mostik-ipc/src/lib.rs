@@ -223,6 +223,17 @@ pub struct Ring {
     pub caller: User,
 }
 
+/// "Report a bug": the GitHub issue form to open, and what it has filled in, for the dialog to show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BugReport {
+    /// The new issue form with `version` and `system` in its query.
+    pub url: String,
+    /// The version of Mostik, as in "About".
+    pub version: String,
+    /// The system, one fact a line: OS, desktop, web engine.
+    pub system: String,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};

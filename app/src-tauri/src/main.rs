@@ -415,7 +415,7 @@ fn main() {
             backend::chats::recommended_chats,
             backend::chats::join_chat,
             backend::files::open_yandex_id,
-            backend::report::report_bug,
+            backend::report::bug_report,
             backend::files::save_file,
             backend::notify::test_notification,
             backend::notify::play_sound,

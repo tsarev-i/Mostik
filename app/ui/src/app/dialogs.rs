@@ -1059,3 +1059,76 @@ pub(super) fn AboutDialog() -> impl IntoView {
         </Modal>
     }
 }
+
+/// "Report a bug": what Mostik fills in the GitHub issue, which everyone can read, and the button
+/// that opens the issue in the browser. The user describes the bug there.
+#[component]
+pub(super) fn BugReportDialog() -> impl IntoView {
+    let c = ctx();
+    let report = RwSignal::new(None::<bridge::BugReport>);
+    // Why the report or the browser did not come, as the dialog says it.
+    let failed = RwSignal::new(None::<String>);
+    // The browser is being started.
+    let opening = RwSignal::new(false);
+    // Whether "Copy link" put the link in the clipboard; `None` before it is pressed.
+    let copied = RwSignal::new(None::<bool>);
+    let close = move || c.bug_report.set(false);
+    spawn_local(async move {
+        match bridge::bug_report().await {
+            Ok(r) => report.try_set(Some(r)).map(drop),
+            Err(e) => failed.try_set(Some(e)).map(drop),
+        };
+    });
+    let url = move || report.with_untracked(|r| r.as_ref().map(|r| r.url.clone()));
+    let open = move |_| {
+        let Some(url) = url() else { return };
+        opening.set(true);
+        failed.set(None);
+        spawn_local(async move {
+            let result = bridge::open_url(&url).await;
+            // Closed meanwhile: the dialog open now, if any, is another one.
+            if opening.try_set(false).is_some() {
+                return;
+            }
+            match result {
+                Ok(()) => close(),
+                Err(e) => failed.set(Some(tr().bug_open_failed(&e))),
+            }
+        });
+    };
+    let copy = move |_| {
+        let Some(url) = url() else { return };
+        let write = window().navigator().clipboard().write_text(&url);
+        spawn_local(async move {
+            let done = wasm_bindgen_futures::JsFuture::from(write).await.is_ok();
+            copied.try_set(Some(done));
+        });
+    };
+    let no_report = move || report.with(Option::is_none);
+    view! {
+        <Modal class="bug-report" on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{tr().report_bug}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()>
+                    <Icon icon=I::X/>
+                </button>
+            </header>
+            <p>{tr().bug_intro}</p>
+            {move || report.get().map(|r| view! {
+                <pre class="bug-filled">{format!("{}\n{}", tr().version(&r.version), r.system)}</pre>
+            })}
+            <p class="muted">{tr().bug_then}</p>
+            {move || failed.get().map(|e| view! { <p class="danger-text">{e}</p> })}
+            <div class="modal-actions">
+                <button class="btn" disabled=no_report on:click=copy>{move || match copied.get() {
+                    None => tr().copy_link,
+                    Some(true) => tr().link_copied,
+                    Some(false) => tr().copy_failed,
+                }}</button>
+                <button class="btn primary" disabled=move || no_report() || opening.get() on:click=open>
+                    {tr().bug_open}
+                </button>
+            </div>
+        </Modal>
+    }
+}

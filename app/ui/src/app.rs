@@ -44,8 +44,8 @@ pub(crate) use voice::ended as voice_ended;
 use avatar::HoverTip;
 use composer::Composer;
 use dialogs::{
-    AboutDialog, AudienceDialog, BrowseChannelsDialog, ChannelDetailsDialog, CreateChannelDialog, DeleteDialog,
-    FolderDialog, ForwardDialog, LeaveDialog, NewMessageDialog,
+    AboutDialog, AudienceDialog, BrowseChannelsDialog, BugReportDialog, ChannelDetailsDialog, CreateChannelDialog,
+    DeleteDialog, FolderDialog, ForwardDialog, LeaveDialog, NewMessageDialog,
 };
 use feed::{ChannelHeader, MessageList, PinsView};
 use files::FilesView;
@@ -89,6 +89,7 @@ pub fn App() -> impl IntoView {
         collapsed: RwSignal::new(HashSet::new()),
         sb_query: RwSignal::new(String::new()),
         about: RwSignal::new(false),
+        bug_report: RwSignal::new(false),
         update: RwSignal::new(bridge::UpdateStatus::None),
         live,
         phase: RwSignal::new(Phase::Loading(tr().connecting)),
@@ -468,6 +469,8 @@ pub fn App() -> impl IntoView {
             c.prefs.set(false);
         } else if c.about.get_untracked() {
             c.about.set(false);
+        } else if c.bug_report.get_untracked() {
+            c.bug_report.set(false);
         } else if c.editing.with_untracked(Option::is_none) && drafts::cancel_reply(c) {
         } else {
             return;
@@ -526,6 +529,7 @@ pub fn App() -> impl IntoView {
         <Show when=move || c.about.get()>
             <AboutDialog/>
         </Show>
+        {move || c.bug_report.get().then(|| view! { <BugReportDialog/> })}
         {move || c.creating_channel.get().map(|to| view! { <CreateChannelDialog to=to/> })}
         {move || c.new_message.get().then(|| view! { <NewMessageDialog/> })}
         {move || c.forwarding.get().map(|m| view! { <ForwardDialog msg=m/> })}

@@ -21,6 +21,21 @@
 .modal p { margin: 12px 0 0; }
 .modal .muted { color: var(--text-muted); font-size: 13px; }
 
+/* "Report a bug": what Mostik fills in the issue. Taller than a short window at a large zoom: it
+   scrolls, so that its buttons stay in reach. */
+.modal.bug-report { max-height: calc(100vh - 32px); overflow-y: auto; }
+.modal.bug-report .bug-filled {
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--bg-block);
+  border: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
 /* ── Loading and login ──────────────────────────────────────────── */
 
 .window.center { display: grid; place-items: center; }

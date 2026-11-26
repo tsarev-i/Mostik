@@ -1,6 +1,7 @@
 # "Report a bug" in Mostik's profile menu opens this form with `version` and `system` filled in
 # from the link (app/src-tauri/src/backend/report.rs). Copies already installed keep that link:
-# keep the file name and these two ids.
+# keep the file name and these two ids. The link also carries the issue as plain text headed by
+# the field labels, for a GitHub without this form: change a label there too.
 name: Ошибка / Bug report
 description: Что-то в Мостике работает не так / Something in Mostik does not work
 labels: ["bug"]

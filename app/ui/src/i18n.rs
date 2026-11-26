@@ -254,6 +254,11 @@ pub struct Tr {
     pub active: &'static str,
     pub preferences: &'static str,
     pub report_bug: &'static str,
+    // "Report a bug" dialog
+    pub bug_intro: &'static str,
+    pub bug_then: &'static str,
+    pub bug_open: &'static str,
+    pub copy_failed: &'static str,
     // About
     pub about_title: &'static str,
     pub update_button: &'static str,
@@ -729,6 +734,10 @@ pub static RU: Tr = Tr {
     active: "В сети",
     preferences: "Настройки",
     report_bug: "Сообщить об ошибке",
+    bug_intro: "В браузере откроется новый issue на GitHub. Мостик сам впишет в него версию и систему:",
+    bug_then: "Вам останется описать, что случилось и как это повторить. Issue видят все, поэтому не прикладывайте переписку и личные данные.",
+    bug_open: "Открыть на GitHub",
+    copy_failed: "Не удалось скопировать",
     about_title: "О Мостике",
     update_button: "Обновить",
     p_updates: "Обновления",
@@ -1198,6 +1207,10 @@ pub static EN: Tr = Tr {
     active: "Active",
     preferences: "Preferences",
     report_bug: "Report a bug",
+    bug_intro: "A new GitHub issue opens in the browser. Mostik fills in the version and system:",
+    bug_then: "You describe what happened and how to repeat it. Issues are public, so leave out messages and personal data.",
+    bug_open: "Open on GitHub",
+    copy_failed: "Could not copy",
     about_title: "About Mostik",
     update_button: "Update",
     p_updates: "Updates",
@@ -1982,6 +1995,13 @@ impl Tr {
         match percent {
             Some(p) => format!("{word} {p}%"),
             None => format!("{word}…"),
+        }
+    }
+
+    pub fn bug_open_failed(&self, e: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Браузер не открылся ({e}). Скопируйте ссылку и откройте её сами."),
+            Lang::En => format!("The browser did not open ({e}). Copy the link and open it yourself."),
         }
     }
 
