@@ -283,6 +283,9 @@ pub fn served_type(kind: &str) -> &str {
     }
 }
 
+/// The most pixels a preview of a local picture may have (see [`serve_file`]).
+const PREVIEW_PIXELS: u64 = 40_000_000;
+
 /// Serves an attachment for the `mostikfile://localhost/<id>?size=…` scheme.
 pub async fn serve_file(app: &AppHandle, path: &str, query: Option<&str>) -> Result<(Vec<u8>, String), String> {
     let id = percent_decode(path.trim_start_matches('/'));
@@ -292,13 +295,23 @@ pub async fn serve_file(app: &AppHandle, path: &str, query: Option<&str>) -> Res
     if let Some(emoji) = id.strip_prefix("emoji/") {
         return service::serve(app, emoji).await;
     }
-    // A preview of a file the user picked (the image of a new custom emoji); no other files.
+    // A preview of a file the user picked, pasted or dropped (the image of a new custom emoji, a
+    // picture attached to a message); no other files. A pasted one is in memory.
     if let Some(path) = id.strip_prefix("local/") {
         let state = app.state::<AppState>();
         if !state.allowed_files.lock().is_ok_and(|a| a.contains(path)) {
             return Err("not a picked file".into());
         }
-        let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+        let kept = state.kept_files.lock().ok().and_then(|k| k.get(path).cloned());
+        let bytes = match kept {
+            Some(bytes) => bytes.to_vec(),
+            None => tokio::fs::read(path).await.map_err(|e| e.to_string())?,
+        };
+        // Decoded, a picture of many pixels takes far more memory than its file: none for a preview.
+        if imagesize::blob_size(&bytes).is_ok_and(|d| (d.width as u64).saturating_mul(d.height as u64) > PREVIEW_PIXELS)
+        {
+            return Err("too large to preview".into());
+        }
         let kind = mime_guess::from_path(path)
             .first_or_octet_stream()
             .essence_str()

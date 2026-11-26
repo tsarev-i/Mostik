@@ -98,6 +98,7 @@
   background: rgba(127, 127, 127, 0.08);
 }
 .file-icon.small { width: 32px; height: 32px; font-size: 16px; }
+.file-thumb.small { width: 32px; height: 32px; flex: none; border-radius: 6px; object-fit: cover; background: var(--border); }
 .pf-remove {
   position: absolute;
   top: 4px;
