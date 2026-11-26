@@ -689,8 +689,49 @@ struct DiskUpload {
     size: u64,
     stamp: Option<std::time::SystemTime>,
     url: Option<String>,
+    /// When the Disk gave `url`, and how many tries in a row on it moved no byte: an address of
+    /// long ago, or one that only fails, is not used again (#70).
+    issued: Option<std::time::Instant>,
+    stalls: u32,
     location: Option<String>,
     file_id: Option<String>,
+}
+
+/// How long the Disk address of a try before is used: the Disk does not say when it expires, and
+/// an expired one fails as if the Disk were full or the network down (#70).
+const DISK_URL_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Tries in a row on one Disk address that move no byte before a new address is asked for.
+const DISK_URL_STALLS: u32 = 2;
+
+impl DiskUpload {
+    /// The address of a try before, if it is still worth going on at.
+    fn usable_url(&self, now: std::time::Instant) -> Option<&str> {
+        let fresh = self.issued.is_some_and(|at| now.duration_since(at) < DISK_URL_TTL);
+        self.url.as_deref().filter(|_| fresh && self.stalls < DISK_URL_STALLS)
+    }
+
+    /// A try on `url` broke off: it counts as a stall when no byte moved.
+    fn broke_off(&mut self, moved: bool) {
+        self.stalls = if moved { 0 } else { self.stalls + 1 };
+    }
+}
+
+/// Whether bytes moved during one `disk_put`: its first report is where it began.
+#[derive(Default)]
+struct Moved(std::sync::Mutex<Option<(u64, u64)>>);
+
+impl Moved {
+    fn saw(&self, sent: u64) {
+        if let Ok(mut m) = self.0.lock() {
+            let (_, last) = m.get_or_insert((sent, sent));
+            *last = (*last).max(sent);
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.0.lock().is_ok_and(|m| m.is_some_and(|(first, last)| last > first))
+    }
 }
 
 /// Records a part of sending `upload` that has gone.
@@ -1133,18 +1174,28 @@ async fn upload_to_disk(
         }
         None => {
             progress(0, size);
+            let moved = Arc::new(Moved::default());
             let sent = {
-                let progress = progress.clone();
-                Arc::new(move |sent| progress(sent, size)) as Arc<dyn Fn(u64) + Send + Sync>
+                let (progress, moved) = (progress.clone(), moved.clone());
+                Arc::new(move |sent| {
+                    moved.saw(sent);
+                    progress(sent, size);
+                }) as Arc<dyn Fn(u64) + Send + Sync>
             };
-            let fresh = match &disk.url {
-                Some(url) => match web.disk_put(url, &file, size, true, sent.clone()).await {
+            let old = disk.usable_url(std::time::Instant::now()).map(str::to_owned);
+            let fresh = match old {
+                Some(url) => match web.disk_put(&url, &file, size, true, sent.clone()).await {
                     Ok(location) => Some(location),
-                    // Broken off again: the next retry goes on at the same address.
-                    Err(e) if transient(&e) || matches!(e, WebError::DiskFull | WebError::DiskTooLarge) => {
+                    // Broken off again: the next retry goes on at the same address, unless it
+                    // moved nothing too many times.
+                    Err(e) if transient(&e) => {
+                        disk.broke_off(moved.any());
+                        step(disk.clone());
                         return Err(failed(e));
                     }
-                    // The address no longer takes the file: a new one, from the start.
+                    Err(e @ WebError::DiskTooLarge) => return Err(failed(e)),
+                    // The address no longer takes the file (an expired one may answer as if the
+                    // Disk were full): a new one, from the start; the Disk tells there if it is.
                     Err(e) => {
                         eprintln!("disk upload: the address of the try before is refused ({e}), a new one");
                         None
@@ -1157,8 +1208,27 @@ async fn upload_to_disk(
                 None => {
                     let url = web.disk_upload_url(chat, name, size, video).await.map_err(&failed)?;
                     disk.url = Some(url.clone());
+                    disk.issued = Some(std::time::Instant::now());
+                    disk.stalls = 0;
                     step(disk.clone());
-                    web.disk_put(&url, &file, size, false, sent).await.map_err(&failed)?
+                    let moved = Arc::new(Moved::default());
+                    let sent = {
+                        let (progress, moved) = (progress.clone(), moved.clone());
+                        Arc::new(move |sent| {
+                            moved.saw(sent);
+                            progress(sent, size);
+                        }) as Arc<dyn Fn(u64) + Send + Sync>
+                    };
+                    match web.disk_put(&url, &file, size, false, sent).await {
+                        Ok(location) => location,
+                        Err(e) => {
+                            if transient(&e) {
+                                disk.broke_off(moved.any());
+                                step(disk.clone());
+                            }
+                            return Err(failed(e));
+                        }
+                    }
                 }
             }
         }
@@ -1382,6 +1452,7 @@ mod tests {
             url: Some("https://uploader.invalid/x".into()),
             location: Some("disk:/x.bin".into()),
             file_id: Some("disk/f1".into()),
+            ..DiskUpload::default()
         };
         let steps = Arc::new(std::sync::Mutex::new(0));
         let counted = steps.clone();
@@ -1421,6 +1492,7 @@ mod tests {
             url: Some("https://uploader.invalid/x".into()),
             location: None,
             file_id: Some("disk/f1".into()),
+            ..DiskUpload::default()
         };
         assert_eq!(carried(done.clone(), 100, Some(then)), done);
         let anew = DiskUpload {
@@ -1430,6 +1502,45 @@ mod tests {
         };
         assert_eq!(carried(done.clone(), 100, Some(later)), anew);
         assert_eq!(carried(done, 101, Some(then)).file_id, None);
+    }
+
+    /// The Disk address of a try before is used again only while it is young and moves bytes
+    /// (#70): two tries in a row that moved nothing, or half an hour, and a new one is asked for.
+    #[test]
+    fn an_old_or_stuck_disk_address_is_not_used_again() {
+        let now = std::time::Instant::now();
+        let mut disk = DiskUpload {
+            url: Some("https://uploader.invalid/x".into()),
+            issued: Some(now),
+            ..DiskUpload::default()
+        };
+        assert_eq!(disk.usable_url(now), disk.url.as_deref());
+        assert_eq!(disk.usable_url(now + DISK_URL_TTL), None);
+        disk.broke_off(false);
+        assert!(disk.usable_url(now).is_some());
+        disk.broke_off(true);
+        disk.broke_off(false);
+        assert!(
+            disk.usable_url(now).is_some(),
+            "a try that moved bytes starts the count again"
+        );
+        disk.broke_off(false);
+        assert_eq!(disk.usable_url(now), None);
+        // An address of a run before this one (no time known) is not trusted either.
+        disk.issued = None;
+        disk.stalls = 0;
+        assert_eq!(disk.usable_url(now), None);
+    }
+
+    #[test]
+    fn moved_bytes_are_counted_from_where_the_try_began() {
+        let m = Moved::default();
+        assert!(!m.any());
+        m.saw(500);
+        m.saw(500);
+        assert!(!m.any());
+        m.saw(501);
+        assert!(m.any());
     }
 
     #[test]
