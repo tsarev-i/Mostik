@@ -58,6 +58,8 @@ tauri-plugin-updater = { version = "2", default-features = false, features = ["s
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# A second start shows the window of the running Mostik and exits (see instance.rs).
+tauri-plugin-single-instance = "2"
 # Session cookies of the call window straight into WebView2 (see call.rs). Same versions as wry uses.
 webview2-com = "0.39"
 windows-core = "0.62"

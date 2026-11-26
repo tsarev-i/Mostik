@@ -253,6 +253,8 @@ pub async fn install_update(app: AppHandle) -> Result<Out<cmd::InstallUpdate>, S
     };
     match update.download_and_install(progress, || {}).await {
         Ok(()) => {
+            // The new process runs while this one is still exiting: it must not hand over to it.
+            crate::instance::release();
             #[cfg(target_os = "linux")]
             if let Some(appimage) = std::env::var_os("APPIMAGE") {
                 match relaunch_appimage(&appimage) {

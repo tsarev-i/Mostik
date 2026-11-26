@@ -10,6 +10,7 @@ mod call;
 #[cfg(target_os = "linux")]
 mod cdp;
 mod downloads;
+mod instance;
 mod login;
 mod ring;
 mod sound;
@@ -28,7 +29,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 
 /// Shows, unminimizes and focuses the main window.
-fn show_main(app: &AppHandle) {
+pub(crate) fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         webview::raise(&w);
     }
@@ -251,7 +252,11 @@ fn main() {
     // Before Tauri starts any thread: it sets an environment variable for enchant.
     #[cfg(target_os = "linux")]
     spelling::install();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // First, as the plugin asks: a second start goes no further (see instance.rs).
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| show_main(app)));
+    builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -369,6 +374,10 @@ fn main() {
             }
         })
         .setup(|app| {
+            // Another Mostik with the same data runs: it shows its window instead.
+            if !instance::claim(app.handle()) {
+                std::process::exit(0);
+            }
             create_main_window(app.handle())?;
             // Before anything can notify: clicks are reported only for notifications shown
             // after a handler exists.
@@ -464,6 +473,7 @@ fn main() {
             }
             // The call browser and its profile with the session cookies go with the app.
             if let tauri::RunEvent::Exit = event {
+                instance::release();
                 window_size::write(app);
                 call::shutdown(app);
                 #[cfg(target_os = "linux")]
