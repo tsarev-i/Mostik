@@ -99,21 +99,9 @@ impl Field {
     }
 
     /// Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y (⌘ on macOS, where ⇧⌘Z is the redo). Returns whether the
-    /// key was one of them. By the key's place, as the other shortcuts in other layouts.
+    /// key was one of them. By the letter (see [`undo_letter`]).
     fn undo_key(self, e: &ev::KeyboardEvent) -> bool {
-        let command = if crate::settings::on_mac() {
-            e.meta_key()
-        } else {
-            e.ctrl_key()
-        };
-        if !command || e.alt_key() {
-            return false;
-        }
-        let back = match e.code().as_str() {
-            "KeyZ" => !e.shift_key(),
-            "KeyY" if !e.shift_key() && !crate::settings::on_mac() => false,
-            _ => return false,
-        };
+        let Some(back) = undo_shortcut(e) else { return false };
         e.prevent_default();
         self.travel(back);
         true
@@ -654,6 +642,33 @@ fn file_name(name: &str, kind: &str) -> String {
     }
 }
 
+/// Whether `e` is the undo (`Some(true)`) or redo (`Some(false)`) of the message field. Such keys
+/// cannot be given to another action in "Preferences".
+pub fn undo_shortcut(e: &ev::KeyboardEvent) -> Option<bool> {
+    let mac = crate::settings::on_mac();
+    let command = if mac { e.meta_key() } else { e.ctrl_key() };
+    if !command || e.alt_key() {
+        return None;
+    }
+    match undo_letter(&e.key(), &e.code())? {
+        'z' => Some(!e.shift_key()),
+        'y' if !e.shift_key() && !mac => Some(false),
+        _ => None,
+    }
+}
+
+/// The letter of an undo or redo key: `z` or `y`. By the layout, as text editors do: on QWERTZ
+/// (German, Czech) the Z is where QWERTY has Y. In a non-Latin layout (Russian Я) by the key's
+/// place, as the other shortcuts.
+fn undo_letter(key: &str, code: &str) -> Option<char> {
+    let mut chars = key.chars();
+    let letter = match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphabetic() => c.to_ascii_lowercase(),
+        _ => code.strip_prefix("Key")?.chars().next()?.to_ascii_lowercase(),
+    };
+    matches!(letter, 'z' | 'y').then_some(letter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +688,22 @@ mod tests {
         assert_eq!(picture_type(&types(&["image/jpeg", "image/png"])), Some("image/png"));
         assert_eq!(picture_type(&types(&["text/plain", "image/webp"])), Some("image/webp"));
         assert_eq!(picture_type(&types(&["text/plain", "text/html"])), None);
+    }
+
+    #[test]
+    fn undo_follows_the_layout() {
+        use super::undo_letter;
+        // QWERTY, and QWERTZ where the Z is on `KeyY`.
+        assert_eq!(undo_letter("z", "KeyZ"), Some('z'));
+        assert_eq!(undo_letter("z", "KeyY"), Some('z'));
+        assert_eq!(undo_letter("y", "KeyZ"), Some('y'));
+        assert_eq!(undo_letter("Z", "KeyY"), Some('z'));
+        // Russian: by the key's place.
+        assert_eq!(undo_letter("я", "KeyZ"), Some('z'));
+        assert_eq!(undo_letter("н", "KeyY"), Some('y'));
+        // Other keys, Latin or not.
+        assert_eq!(undo_letter("x", "KeyZ"), None);
+        assert_eq!(undo_letter("ч", "KeyX"), None);
+        assert_eq!(undo_letter("Unidentified", "KeyQ"), None);
     }
 }
