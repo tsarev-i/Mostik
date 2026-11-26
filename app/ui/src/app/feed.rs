@@ -342,8 +342,92 @@ pub(super) fn MessageList() -> impl IntoView {
         on_load.forget();
         true
     });
+    // The list gets shorter or taller without changing (the "No connection" banner above it, the
+    // composer below it growing, the window resized): its bottom edge stays where it was, the
+    // space comes off or goes to the top, as in Slack. Otherwise the messages move down by the
+    // banner and the last ones go under the composer.
+    let height = StoredValue::new(None::<i32>);
+    // Where the resize observer has put the list: the scroll event of that is not the user's
+    // either and must not make the list follow the bottom.
+    let placed = StoredValue::new(None::<i32>);
+    let observer = std::rc::Rc::new(std::cell::RefCell::new(None::<web_sys::ResizeObserver>));
+    on_cleanup({
+        let observer = leptos::__reexports::send_wrapper::SendWrapper::new(observer.clone());
+        move || {
+            if let Some(o) = observer.take().borrow_mut().take() {
+                o.disconnect();
+            }
+        }
+    });
+    let observer = leptos::__reexports::send_wrapper::SendWrapper::new(observer);
+    Effect::new(move |attached: Option<bool>| {
+        if attached == Some(true) {
+            return true;
+        }
+        let Some(el) = list_ref.get() else { return false };
+        let on_resize = wasm_bindgen::closure::Closure::<dyn Fn(js_sys::Array)>::new(move |_: js_sys::Array| {
+            let Some(list) = list_ref.try_get_untracked().flatten() else {
+                return;
+            };
+            let now = list.client_height();
+            // A hidden list (a thread pane over the whole window) keeps its last height and
+            // place: it comes back as it was.
+            if now == 0 {
+                return;
+            }
+            let Some(before) = height.try_get_value() else { return };
+            height.try_set_value(Some(now));
+            let Some(delta) = before.map(|before| before - now).filter(|d| *d != 0) else {
+                return;
+            };
+            let top = list.scroll_top();
+            // A taller list at the bottom has already been pulled up by the browser: it stays at
+            // the bottom. Elsewhere the shift goes from where the list was before, which the
+            // browser may have changed already too.
+            let target = if stick.try_get_untracked() == Some(true) {
+                list.scroll_height() - list.client_height()
+            } else {
+                last_top.try_get_value().flatten().unwrap_or(top) + delta
+            };
+            if target != top {
+                list.set_scroll_top(target);
+                placed.try_set_value(Some(list.scroll_top()));
+            }
+            let moved = list.scroll_top() - top;
+            // This scroll is not the user's, as in `restore`, and its event may come after the
+            // list changes (an older page asked for below): the kept message is taken now. Before
+            // `restore` it has moved in the view by this scroll.
+            last_top.try_set_value(Some(list.scroll_top()));
+            if restoring.try_get_value() == Some(true) {
+                if let Some(Some((ts, offset))) = keep.try_get_value() {
+                    keep.try_set_value(Some((ts, offset - f64::from(moved))));
+                }
+            } else {
+                keep.try_set_value(top_row(&list));
+            }
+            // Taken up to the top, or no longer filled, the list loads older messages, as when the
+            // user scrolls there: its scroll event does not count as the user's.
+            let id = c.current.get_untracked();
+            let short = list.scroll_height() <= list.client_height();
+            if ops::history_loaded(&id) && (short || (moved < 0 && list.scroll_top() < NEAR_TOP)) {
+                ops::load_older(c);
+            }
+        });
+        if let Ok(o) = web_sys::ResizeObserver::new(wasm_bindgen::JsCast::unchecked_ref(on_resize.as_ref())) {
+            o.observe(&el);
+            *observer.borrow_mut() = Some(o);
+        }
+        // Lives as long as the element; the signals are checked with `try_` after unmount.
+        on_resize.forget();
+        true
+    });
     let on_scroll = move |_| {
         let Some(el) = list_ref.get_untracked() else { return };
+        // The browser has moved a list that changed its height, before the resize observer ran:
+        // the observer puts it in place from where it was.
+        if height.get_value().is_some_and(|h| h != el.client_height()) {
+            return;
+        }
         let top = el.scroll_top();
         let last = last_top.get_value();
         last_top.set_value(Some(top));
@@ -352,7 +436,10 @@ pub(super) fn MessageList() -> impl IntoView {
         // short chat the top is near the bottom too, and the list must not snap back down as an
         // older page comes. Right at the bottom it holds on, as when the last message goes away.
         let below = el.scroll_height() - top - el.client_height();
-        stick.set(below < 2 || (!up && below < 120));
+        if placed.get_value() != Some(top) {
+            stick.set(below < 2 || (!up && below < 120));
+        }
+        placed.set_value(None);
         if restoring.get_value() {
             // Before `restore` the kept message moves in the view only as far as the user scrolls.
             if let (Some(last), Some((ts, offset))) = (last, keep.get_value()) {
