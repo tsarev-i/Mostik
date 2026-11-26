@@ -338,6 +338,16 @@ fn requested(app: &AppHandle, generation: u64, action: &str) {
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const BINDING: &str = "__mostikCall";
 
+/// Whether a link the meeting page opens in a new window goes to the user's browser: a page of
+/// another site, which has nothing to do in a window of the call's throwaway profile, over the
+/// call (a "Share" link to Telegram, help pages). Yandex pages stay in the call window's browser,
+/// which has the session (the account settings).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn elsewhere(url: &str) -> bool {
+    mostik_core::markup::safe_url(url)
+        && Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && !is_yandex(&u))
+}
+
 /// Where the page script asks for "chat" or "invite" without [`BINDING`] (Windows): a new window
 /// at `<ACTION_URL><action>`, which the call window refuses.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -383,6 +393,7 @@ fn page_script(title: &str) -> String {
     let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
     let ended = serde_json::to_string(ENDED_URL).unwrap_or_default();
     let binding = serde_json::to_string(BINDING).unwrap_or_default();
+    let yandex = serde_json::to_string(&mostik_yandex::endpoints::YANDEX_DOMAINS).unwrap_or_default();
     let action_url = serde_json::to_string(ACTION_URL).unwrap_or_default();
     format!(
         r#"(() => {{
@@ -459,6 +470,49 @@ fn page_script(title: &str) -> String {
     // takes no other click on it.
     if (ask === "chat") dispatch({{ type: "chat/setIsChatLoading", payload: false }});
   }});
+
+  // A link to another site the page opens in a new window goes to Mostik, which opens it in the
+  // user's browser rather than in a window of this throwaway profile over the call (see
+  // `elsewhere`); Yandex pages open here as the page means them to. Only with the binding
+  // (Linux); the Windows window sorts out its new windows itself. A link cancelled the old way
+  // (`return false` in `onclick`) is not told from one let through: the page does not do that.
+  const yandex = {yandex};
+  const webLink = url => {{
+    if (typeof window[{binding}] !== "function" || !url) return null;
+    let u;
+    try {{ u = new URL(String(url), location.href); }} catch {{ return null; }}
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    const host = u.hostname.toLowerCase();
+    return yandex.some(d => host === d || host.endsWith("." + d)) ? null : u.href;
+  }};
+  const openOut = url => {{
+    const href = webLink(url);
+    if (href) window[{binding}]("open:" + href);
+    return !!href;
+  }};
+  let pageOpened = false;
+  const nativeOpen = window.open;
+  // Only a new window: `_self`, `_top` or a named one keep what they are.
+  window.open = function (url, target, ...rest) {{
+    const fresh = target === undefined || target === "" || target === "_blank";
+    if (!fresh || !openOut(url)) return nativeOpen.call(window, url, target, ...rest);
+    pageOpened = true;
+    return null;
+  }};
+  // A link with `target=_blank`: the page's handlers may stop the click before it bubbles up
+  // here, so it is caught on the way down and kept from opening a window; once they have run, it
+  // goes to Mostik, unless the page has cancelled it or opened it with `window.open` itself.
+  window.addEventListener("click", e => {{
+    const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+    const href = a && a.target === "_blank" && !e.defaultPrevented ? webLink(a.href) : null;
+    if (!href) return;
+    const cancel = e.preventDefault.bind(e);
+    let cancelled = false;
+    e.preventDefault = () => {{ cancelled = true; cancel(); }};
+    cancel();
+    pageOpened = false;
+    setTimeout(() => {{ if (!cancelled && !pageOpened) openOut(href); }});
+  }}, true);
 
   const Native = window.RTCPeerConnection;
   if (!Native) return;
@@ -785,7 +839,10 @@ mod imp {
         let mut watch = super::EndWatch::default();
         while let Some(e) = events.recv().await {
             if let Some(action) = binding_call(&e) {
-                super::requested(&app, generation, action);
+                match action.strip_prefix("open:") {
+                    Some(url) => open_link(url),
+                    None => super::requested(&app, generation, action),
+                }
                 continue;
             }
             let Some(url) = main_frame_url(&e, &target) else {
@@ -797,6 +854,17 @@ mod imp {
                 let _ = cdp.send("Browser.close", json!({}), None).await;
                 return;
             }
+        }
+    }
+
+    /// A link to another site the meeting page opens in a new window (see `page_script`): in the
+    /// user's browser.
+    fn open_link(url: &str) {
+        if !super::elsewhere(url) {
+            return;
+        }
+        if let Err(e) = crate::backend::open_external(url) {
+            eprintln!("call: could not open a link: {e}");
         }
     }
 
@@ -1278,6 +1346,29 @@ b{{color:#f8f8f8;font-size:17px}}
                 eval("acts.join()").await,
                 "chat/setIsChatLoading=false,settingsModal/setIsOpened=true"
             );
+            // Links the page opens in a new window go to Mostik: a link with `target=_blank` and
+            // `window.open`; one the page has handled itself, opens in a named window or of Yandex
+            // does not.
+            let page = "data:text/html,<a id=a target=_blank href='https://t.me/share'>t</a>\
+                <a id=b target=_blank href='https://example.org/b'>b</a><script>\
+                b.addEventListener('click', e => e.preventDefault());\
+                setTimeout(() => a.click(), 100); setTimeout(() => b.click(), 200);\
+                setTimeout(() => window.open('https://example.org/w'), 300);\
+                setTimeout(() => window.open('https://example.org/n', 'named'), 400);\
+                setTimeout(() => window.open('https://id.yandex.ru/personal'), 500)</script>";
+            cdp.send("Page.navigate", json!({ "url": page }), Some(&s))
+                .await
+                .unwrap();
+            let mut opened = vec![];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+                    && let Some(action) = binding_call(&e)
+                {
+                    opened.push(action.to_owned());
+                }
+            }
+            assert_eq!(opened, ["open:https://t.me/share", "open:https://example.org/w"]);
             // A page that showed something and went blank, with no WebRTC connection: the call is over.
             let page =
                 "data:text/html,<p>In a call</p><script>setTimeout(()=>{document.body.textContent=''},1200)</script>";
@@ -1484,6 +1575,13 @@ mod imp {
                     super::requested(&app3, generation, action);
                     NewWindowResponse::Deny
                 }
+                // Another site goes to the user's browser, as on Linux (see `elsewhere`).
+                None if super::elsewhere(url.as_str()) => {
+                    if let Err(e) = crate::backend::open_external(url.as_str()) {
+                        eprintln!("call: could not open a link: {e}");
+                    }
+                    NewWindowResponse::Deny
+                }
                 None => NewWindowResponse::Allow,
             })
             // The end of the call, as on Linux (`EndWatch`). Routing inside the page does not
@@ -1635,6 +1733,18 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn links_to_other_sites_leave_the_call_window() {
+        assert!(elsewhere("https://t.me/share/url?url=x"));
+        assert!(elsewhere("http://example.org/"));
+        assert!(!elsewhere("https://id.yandex.ru/personal"));
+        assert!(!elsewhere("https://telemost.360.yandex.ru/j/1"));
+        assert!(elsewhere("https://yandex.ru.evil.example/"), "not a Yandex host");
+        assert!(!elsewhere("file:///etc/passwd"));
+        assert!(!elsewhere("javascript:alert(1)"));
+    }
 
     #[test]
     fn meeting_links() {

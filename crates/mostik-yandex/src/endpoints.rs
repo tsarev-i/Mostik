@@ -20,7 +20,7 @@ pub const FILES_HOST: &str = "files.messenger.yandex.ru";
 
 /// Domains of Yandex: Telemost and Yandex ID live on `yandex.ru`, files and push on `yandex.net`,
 /// and the international pages, sign-in included, on `yandex.com`.
-const YANDEX_DOMAINS: [&str; 3] = ["yandex.ru", "yandex.com", "yandex.net"];
+pub const YANDEX_DOMAINS: [&str; 3] = ["yandex.ru", "yandex.com", "yandex.net"];
 
 /// Whether `host` is one of [`YANDEX_DOMAINS`] or a subdomain of one: whose cookies the session
 /// keeps, and which pages are Yandex's own in the call window.
