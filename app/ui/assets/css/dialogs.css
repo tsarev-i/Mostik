@@ -24,6 +24,11 @@
 /* ── Loading and login ──────────────────────────────────────────── */
 
 .window.center { display: grid; place-items: center; }
+/* The start screens are the app's own, not a page: their text does not select, nor does the logo
+   drag away. The sign-in error does select, to be copied into a bug report. */
+.window.center { -webkit-user-select: none; user-select: none; }
+.window.center img { -webkit-user-drag: none; }
+.window.center .login-error { -webkit-user-select: text; user-select: text; }
 
 .splash { display: grid; justify-items: center; gap: 16px; color: rgba(var(--chrome-ink), 0.85); }
 .spinner {
