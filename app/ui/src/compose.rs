@@ -659,11 +659,12 @@ pub fn undo_shortcut(e: &ev::KeyboardEvent) -> Option<bool> {
 
 /// The letter of an undo or redo key: `z` or `y`. By the layout, as text editors do: on QWERTZ
 /// (German, Czech) the Z is where QWERTY has Y. In a non-Latin layout (Russian Я) by the key's
-/// place, as the other shortcuts.
+/// place, as the other shortcuts. A key that types something else (`;` on Dvorak) is neither.
 fn undo_letter(key: &str, code: &str) -> Option<char> {
     let mut chars = key.chars();
     let letter = match (chars.next(), chars.next()) {
         (Some(c), None) if c.is_ascii_alphabetic() => c.to_ascii_lowercase(),
+        (Some(c), None) if !c.is_alphabetic() => return None,
         _ => code.strip_prefix("Key")?.chars().next()?.to_ascii_lowercase(),
     };
     matches!(letter, 'z' | 'y').then_some(letter)
@@ -705,5 +706,7 @@ mod tests {
         assert_eq!(undo_letter("x", "KeyZ"), None);
         assert_eq!(undo_letter("ч", "KeyX"), None);
         assert_eq!(undo_letter("Unidentified", "KeyQ"), None);
+        // Dvorak: the key in the place of Z types `;`.
+        assert_eq!(undo_letter(";", "KeyZ"), None);
     }
 }

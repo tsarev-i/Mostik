@@ -85,9 +85,12 @@ pub fn call_request(c: Ctx, r: bridge::CallRequest) {
         })
     });
     match (r.action, r.chat_id, group) {
-        // The chat itself, not the members or adding people left open over it by "Invite".
+        // The chat itself, not the members or adding people left open over it by "Invite", nor a
+        // thread or profile, which in a narrow window covers the chat.
         (bridge::CallAction::Chat, Some(id), _) => {
             c.details.set(None);
+            c.thread.set(None);
+            c.profile.set(None);
             super::open_chat(c, id);
         }
         (bridge::CallAction::Chat, None, _) => c.notice.set(Some(tr().call_no_chat.into())),
