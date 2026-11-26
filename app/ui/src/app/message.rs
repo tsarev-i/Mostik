@@ -1006,6 +1006,13 @@ pub(super) fn Outbox(#[prop(optional)] in_thread: bool) -> impl IntoView {
 
 /// Why a sending failed, in the interface's language where the backend's words are known.
 fn failure_reason(why: &str) -> String {
+    // Telemost refused the file itself (empty, or of a kind it does not take): a retry cannot help.
+    if let Some(name) = why
+        .strip_suffix(mostik_ipc::cmd::FILE_REFUSED)
+        .and_then(|n| n.strip_suffix(": "))
+    {
+        return tr().file_refused(name);
+    }
     let known = [
         (mostik_ipc::cmd::UPLOAD_STALLED, tr().upload_stalled),
         (mostik_ipc::cmd::DISK_FULL, tr().disk_full),
@@ -1050,6 +1057,10 @@ fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
             let length = 2.0 * std::f64::consts::PI * 9.0;
             let dash = format!("{:.1} {length:.1}", share * length);
             let can_cancel = !f.cancelled && !f.done() && failed.is_none();
+            // A message that was not sent can go without any of its files: one uploaded whole may
+            // still be the one Telemost refused.
+            let can_remove = !f.cancelled && failed.is_some();
+            let (remove_id, remove_path) = (id.clone(), path.clone());
             let ring = view! {
                 <svg class="out-ring" viewBox="0 0 24 24" width="24" height="24">
                     <circle class="out-ring-track" cx="12" cy="12" r="9"/>
@@ -1068,6 +1079,12 @@ fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
                         view! {
                             <button class="out-cancel" title=tr().cancel_upload on:click=move |_| ops::cancel_file(c, &id, &path)>{ring}</button>
                         }.into_any()
+                    } else if can_remove {
+                        view! {
+                            <button class="icon-btn out-remove" title=tr().remove on:click=move |_| ops::remove_failed_file(c, &remove_id, &remove_path)>
+                                <Icon icon=I::X size=16/>
+                            </button>
+                        }.into_any()
                     } else {
                         view! { <span class="out-cancel">{ring}</span> }.into_any()
                     }}
@@ -1075,11 +1092,16 @@ fn OutgoingRow(out: ops::Outgoing) -> impl IntoView {
             }
         })
         .collect_view();
+    let attempts = out.attempts;
     let actions = failed.map(|why| {
         let (retry, remove) = (id.clone(), id.clone());
+        let why = match attempts {
+            0 | 1 => failure_reason(&why),
+            n => format!("{} ({})", failure_reason(&why), tr().attempt(n)),
+        };
         view! {
             <div class="out-failed">
-                <span class="out-why">{failure_reason(&why)}</span>
+                <span class="out-why">{why}</span>
                 <button class="btn small" on:click=move |_| ops::retry_upload(c, &retry)>{tr().retry}</button>
                 <button class="btn small" on:click=move |_| ops::drop_upload(c, &remove)>{tr().remove}</button>
             </div>

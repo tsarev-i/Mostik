@@ -2005,6 +2005,27 @@ impl Tr {
         }
     }
 
+    pub fn empty_file(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Файл «{name}» пустой, Телемост его не примет"),
+            Lang::En => format!("“{name}” is empty, Telemost would refuse it"),
+        }
+    }
+
+    pub fn file_refused(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Телемост не принял файл «{name}». Уберите его и повторите"),
+            Lang::En => format!("Telemost refused “{name}”. Remove it and retry"),
+        }
+    }
+
+    pub fn attempt(&self, n: u32) -> String {
+        match self.lang {
+            Lang::Ru => format!("попытка {n}"),
+            Lang::En => format!("attempt {n}"),
+        }
+    }
+
     pub fn version(&self, v: &str) -> String {
         match self.lang {
             Lang::Ru => format!("Версия {v}"),

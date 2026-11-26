@@ -1056,7 +1056,13 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
             Arc::new(move |sent| progress(sent, total)),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| match e {
+            // The storage's own refusal: `upload: HTTP <status> <data.code>`, no file name in it.
+            WebError::BadResponse(s) if s.starts_with("upload: HTTP ") && s.ends_with(" bad_file") => {
+                format!("{name}: {}", cmd::FILE_REFUSED)
+            }
+            e => format!("{name}: {e}"),
+        })?;
     let info = wire::file_info(&id, &name, size);
     Ok(match dims {
         Some(d) => Uploaded::Image(wire::gallery_image(d.width as u64, d.height as u64, info)),

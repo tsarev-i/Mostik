@@ -169,6 +169,8 @@ pub struct Outgoing {
     pub files: Vec<OutFile>,
     /// Why it was not sent.
     pub failed: Option<String>,
+    /// Tries so far: a retry that fails as the one before shows that it did try.
+    pub attempts: u32,
     /// When it was sent, for its place among the messages.
     pub ts: Timestamp,
     /// How it goes: without a sound, as important.
@@ -224,6 +226,7 @@ pub fn send_files(
                 })
                 .collect(),
             failed: None,
+            attempts: 1,
             ts: super::now_mcs(),
             options,
         })
@@ -279,6 +282,7 @@ pub fn retry_upload(c: Ctx, id: &str) {
     c.outbox.update(|o| {
         if let Some(m) = o.iter_mut().find(|m| m.id == id) {
             m.failed = None;
+            m.attempts += 1;
             for f in &mut m.files {
                 f.sent = 0;
             }
@@ -298,6 +302,20 @@ pub fn drop_upload(c: Ctx, id: &str) {
             }
         });
     }
+}
+
+/// "×" on a file of a message that was not sent: the retry goes without it, as a file Telemost
+/// refused would only fail it again. A message left with nothing to send goes away.
+pub fn remove_failed_file(c: Ctx, id: &str, path: &str) {
+    let empty = c.outbox.with_untracked(|o| {
+        o.iter()
+            .find(|m| m.id == id)
+            .is_some_and(|m| m.text.trim().is_empty() && m.files.iter().all(|f| f.cancelled || f.file.path == path))
+    });
+    if empty {
+        return drop_upload(c, id);
+    }
+    cancel_file(c, id, path);
 }
 
 /// A click on the upload circle of a file: the message goes without it.
@@ -348,6 +366,18 @@ pub fn attach_files(c: Ctx, chat: ChatId, thread: Option<Timestamp>, files: Vec<
             forget_pasted(c, f.path);
         }
         return c.error.set(Some(tr().no_files_here.into()));
+    }
+    // Telemost refuses an empty file (`bad_file`), and the whole message with it.
+    let (empty, files): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| f.size == 0);
+    if let Some(first) = empty.first() {
+        c.error
+            .set(Some(tr().empty_file(&mostik_core::plain_file_name(&first.name))));
+    }
+    for f in empty {
+        forget_pasted(c, f.path);
+    }
+    if files.is_empty() {
+        return;
     }
     c.pending_files.update(|all| {
         let list = all.entry((chat, thread)).or_default();
