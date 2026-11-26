@@ -1,0 +1,45 @@
+# "Report a bug" in Mostik's profile menu opens this form with `version` and `system` filled in
+# from the link (app/src-tauri/src/backend/report.rs). Copies already installed keep that link:
+# keep the file name and these two ids.
+name: Ошибка / Bug report
+description: Что-то в Мостике работает не так / Something in Mostik does not work
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issue видят все: не прикладывайте переписку, имена коллег и другие личные данные. Скриншот можно перетащить в любое поле.
+
+        Issues are public: leave out messages, names and other personal data. Drop a screenshot into any field.
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось / What happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить / Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что ожидалось / Expected behavior
+  - type: input
+    id: version
+    attributes:
+      label: Версия Мостика / Mostik version
+      description: «О программе» в верхней панели / "About" in the top bar
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: Система / System
+      description: ОС, рабочий стол, движок интерфейса / OS, desktop, web engine
+    validations:
+      required: true

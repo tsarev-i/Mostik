@@ -249,6 +249,7 @@ pub struct Tr {
     // Avatar menu
     pub active: &'static str,
     pub preferences: &'static str,
+    pub report_bug: &'static str,
     // About
     pub about_title: &'static str,
     pub update_button: &'static str,
@@ -719,6 +720,7 @@ pub static RU: Tr = Tr {
     thread: "Тред",
     active: "В сети",
     preferences: "Настройки",
+    report_bug: "Сообщить об ошибке",
     about_title: "О Мостике",
     update_button: "Обновить",
     p_updates: "Обновления",
@@ -1183,6 +1185,7 @@ pub static EN: Tr = Tr {
     thread: "Thread",
     active: "Active",
     preferences: "Preferences",
+    report_bug: "Report a bug",
     about_title: "About Mostik",
     update_button: "Update",
     p_updates: "Updates",

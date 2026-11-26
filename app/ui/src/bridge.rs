@@ -485,6 +485,11 @@ pub async fn open_yandex_id() -> Result<(), String> {
     call::<cmd::OpenYandexId>(()).await
 }
 
+/// "Report a bug": the issue form on GitHub in the browser, the version and system filled in.
+pub async fn report_bug() -> Result<(), String> {
+    call::<cmd::ReportBug>(()).await
+}
+
 pub async fn open_url(url: &str) -> Result<(), String> {
     call::<cmd::OpenUrl>(cmd::UrlArgs { url: url.into() }).await
 }

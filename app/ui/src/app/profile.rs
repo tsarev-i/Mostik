@@ -93,6 +93,12 @@ pub(super) fn MeMenu() -> impl IntoView {
                 ops::open_profile(c, me);
             }>{tr().profile}</button>
             <button on:click=move |_| { close(); c.prefs.set(true); }>{tr().preferences}</button>
+            <button on:click=move |_| {
+                close();
+                spawn_local(async move {
+                    if let Err(e) = bridge::report_bug().await { c.error.set(Some(e)); }
+                });
+            }>{tr().report_bug}</button>
             {c.live.then(|| view! {
                 <div class="me-sep"></div>
                 <button on:click=move |_| {

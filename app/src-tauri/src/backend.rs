@@ -32,6 +32,7 @@ pub mod messages;
 pub mod notify;
 pub mod prefs;
 pub mod presence;
+pub mod report;
 pub mod service;
 pub mod threads;
 pub mod voice;
