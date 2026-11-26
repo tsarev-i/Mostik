@@ -1,5 +1,6 @@
 //! HTTP side of the client: the web client page, CSRF and the `/api/` RPC.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,6 +27,10 @@ pub enum WebError {
     MissingParam(&'static str),
     #[error("bad server response: {0}")]
     BadResponse(String),
+    /// An API call answered 404 with no JSON: `get_users_data` does so when it knows none of
+    /// the people asked about.
+    #[error("{method}: not found (HTTP 404)")]
+    NotFound { method: String },
     /// A gateway or server error (5xx): Telemost is overloaded or restarting.
     #[error("{method}: Telemost is not responding (HTTP {status})")]
     Unavailable { method: String, status: u16 },
@@ -91,22 +96,35 @@ pub fn transfer_timeout(bytes: u64) -> Duration {
 }
 
 /// How long Mostik waits for Yandex Disk to take in a file it has got whole, how often it asks,
-/// and how long it pauses before an upload broken off goes on: as the web client does.
+/// and the pauses before an upload broken off goes on from where the Disk got to, one per try:
+/// growing, so that a minute without a network does not use them all up (#65).
+/// `stall` is how long a `PUT` may go without a byte taken before it counts as broken off and
+/// goes on like one: shorter than the minute after which the app gives up on a silent upload
+/// (`UPLOAD_STALL`), which a connection that died mid-file would otherwise reach first.
 #[derive(Debug, Clone, Copy)]
 struct DiskTiming {
     processing: Duration,
     poll: Duration,
-    resume_pause: Duration,
+    resume_pauses: &'static [Duration],
+    stall: Duration,
 }
 
 const DISK_TIMING: DiskTiming = DiskTiming {
     processing: Duration::from_secs(20 * 60),
     poll: Duration::from_secs(5),
-    resume_pause: Duration::from_secs(2),
+    // Two and a half minutes in all; a try that got further starts them again.
+    resume_pauses: &[
+        Duration::from_secs(2),
+        Duration::from_secs(4),
+        Duration::from_secs(8),
+        Duration::from_secs(15),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    ],
+    stall: Duration::from_secs(40),
 };
-
-/// How many times an upload to Yandex Disk broken off goes on from where the Disk got to.
-const DISK_RESUMES: usize = 3;
 
 /// Pauses before the repeats of a reading call that failed for a transient reason.
 const READ_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
@@ -519,16 +537,19 @@ impl WebClient {
 
     /// Puts a file of `size` bytes to `url` from [`WebClient::disk_upload_url`], telling
     /// `progress` how many bytes the Disk has, and waits while Yandex Disk takes it in. An upload
-    /// broken off goes on from where the Disk got to, a few times. Returns the file's place on the
-    /// Disk (`Location`) for [`WebClient::add_disk_file`].
+    /// broken off goes on from where the Disk got to, with growing pauses. With `resume` the
+    /// address was used before (a retry of the sending): the Disk is asked first how much it has.
+    /// Returns the file's place on the Disk (`Location`) for [`WebClient::add_disk_file`].
     pub async fn disk_put(
         &self,
         url: &str,
         file: &DiskFile,
         size: u64,
+        resume: bool,
         progress: Arc<dyn Fn(u64) + Send + Sync>,
     ) -> Result<String, WebError> {
-        self.disk_put_timed(url, file, size, progress, DISK_TIMING).await
+        self.disk_put_timed(url, file, size, resume, progress, DISK_TIMING)
+            .await
     }
 
     async fn disk_put_timed(
@@ -536,6 +557,7 @@ impl WebClient {
         url: &str,
         file: &DiskFile,
         size: u64,
+        resume: bool,
         progress: Arc<dyn Fn(u64) + Send + Sync>,
         timing: DiskTiming,
     ) -> Result<String, WebError> {
@@ -543,30 +565,68 @@ impl WebClient {
             return Err(WebError::BadResponse("disk upload: the file is empty".into()));
         }
         // `None`: how much the Disk has is to be asked before going on.
-        let mut from = Some(0);
+        let mut from = (!resume).then_some(0);
         let mut failures = 0;
+        // How far the Disk had got at the last failure: a try that got further is not counted.
+        let mut reached = 0;
+        // How far the Disk is known to have got.
+        let mut known = 0;
+        // Where the body of the `PUT` going on is, and when it last moved (ms since `start`).
+        let start = tokio::time::Instant::now();
+        let (body_at, moved) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let watched: Arc<dyn Fn(u64) + Send + Sync> = {
+            let (body_at, moved, progress) = (body_at.clone(), moved.clone(), progress.clone());
+            Arc::new(move |sent| {
+                body_at.store(sent, Ordering::SeqCst);
+                moved.store(start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                progress(sent);
+            })
+        };
         loop {
             let step = match from {
                 None => self.disk_offset(url).await.map(|got| {
                     let got = got.min(size);
                     progress(got);
+                    known = got;
+                    if got > reached {
+                        (reached, failures) = (got, 0);
+                    }
                     from = Some(got);
                     None
                 }),
-                Some(at) if at < size => self
-                    .disk_put_part(url, file, size, at, progress.clone())
-                    .await
-                    .map(Some),
+                Some(at) if at < size => {
+                    known = at;
+                    body_at.store(at, Ordering::SeqCst);
+                    moved.store(start.elapsed().as_millis() as u64, Ordering::SeqCst);
+                    // A body that stops before its end is a break, not an upload to wait for.
+                    let stalled = async {
+                        loop {
+                            tokio::time::sleep(timing.stall / 10).await;
+                            let still =
+                                (start.elapsed().as_millis() as u64).saturating_sub(moved.load(Ordering::SeqCst));
+                            if body_at.load(Ordering::SeqCst) < size && still >= timing.stall.as_millis() as u64 {
+                                break;
+                            }
+                        }
+                    };
+                    tokio::select! {
+                        answer = self.disk_put_part(url, file, size, at, watched.clone()) => answer.map(Some),
+                        () = stalled => Err(WebError::Stalled),
+                    }
+                }
                 Some(_) => Ok(Some(DiskAnswer::Processing)),
             };
             match step {
                 Ok(None) => {}
                 Ok(Some(DiskAnswer::Done(location))) => return Ok(location),
                 Ok(Some(DiskAnswer::Processing)) => return self.disk_wait(url, size, &progress, timing).await,
-                Err(e) if failures < DISK_RESUMES && disk_retry(&e) => {
+                Err(e) if disk_retry(&e) && failures < timing.resume_pauses.len() => {
+                    // A sign of life for the caller, whose watch for a silent upload would end it
+                    // while the tries wait: a pause and one try take less than its minute.
+                    progress(known);
+                    tokio::time::sleep(timing.resume_pauses[failures]).await;
                     failures += 1;
                     from = None;
-                    tokio::time::sleep(timing.resume_pause).await;
                 }
                 Err(e) => return Err(e),
             }
@@ -778,6 +838,11 @@ impl WebClient {
                 retried = true;
                 continue;
             }
+            if status == StatusCode::NOT_FOUND && parsed.is_err() {
+                return Err(WebError::NotFound {
+                    method: method.to_owned(),
+                });
+            }
             if status.is_server_error() && parsed.is_err() {
                 return Err(WebError::Unavailable {
                     method: method.to_owned(),
@@ -977,10 +1042,10 @@ fn disk_refusal(v: &Value) -> Option<WebError> {
     disk_status(code)
 }
 
-/// Whether an upload to Yandex Disk may go on after `e`: the connection broke or the Disk
-/// answered 5xx.
+/// Whether an upload to Yandex Disk may go on after `e`: the connection broke or stalled, or the
+/// Disk answered 5xx.
 fn disk_retry(e: &WebError) -> bool {
-    matches!(e, WebError::Http(_) | WebError::Unavailable { .. })
+    matches!(e, WebError::Http(_) | WebError::Unavailable { .. } | WebError::Stalled)
 }
 
 /// `data.code` of an RPC answer, for an error message.
@@ -1276,6 +1341,8 @@ mod tests {
         Reply(&'static str),
         /// Read this many bytes of the body, then drop the connection.
         Cut(usize),
+        /// Read this many bytes of the body, then hold the connection without a word.
+        Hang(usize),
     }
 
     /// A fake Yandex Disk on a local port: each request comes on its own connection and gets
@@ -1310,7 +1377,7 @@ mod tests {
                 };
                 let length: usize = header("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let wanted = match step {
-                    DiskStep::Cut(n) => n.min(length),
+                    DiskStep::Cut(n) | DiskStep::Hang(n) => n.min(length),
                     DiskStep::Reply(_) => length,
                 };
                 let mut body = data[head_end..].to_vec();
@@ -1324,8 +1391,17 @@ mod tests {
                 body.truncate(length);
                 let method = head.split(' ').next().unwrap_or_default().to_owned();
                 seen.lock().unwrap().push((method, header("content-range"), body));
-                if let DiskStep::Reply(answer) = step {
-                    let _ = s.write_all(answer.as_bytes()).await;
+                match step {
+                    DiskStep::Reply(answer) => {
+                        let _ = s.write_all(answer.as_bytes()).await;
+                    }
+                    DiskStep::Hang(_) => {
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            drop(s);
+                        });
+                    }
+                    DiskStep::Cut(_) => {}
                 }
             }
         });
@@ -1335,7 +1411,8 @@ mod tests {
     const FAST_DISK: DiskTiming = DiskTiming {
         processing: Duration::from_secs(5),
         poll: Duration::from_millis(10),
-        resume_pause: Duration::from_millis(10),
+        resume_pauses: &[Duration::from_millis(10); 3],
+        stall: Duration::from_millis(300),
     };
 
     const ACCEPTED: &str = "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1358,7 +1435,7 @@ mod tests {
         let file = DiskFile::Memory(bytes.clone().into());
         let progress = Arc::new(move |n| *seen.lock().unwrap() = n);
         let location = client()
-            .disk_put_timed(&url, &file, size as u64, progress, FAST_DISK)
+            .disk_put_timed(&url, &file, size as u64, false, progress, FAST_DISK)
             .await
             .unwrap();
         assert_eq!(location, "disk:/x.bin");
@@ -1388,7 +1465,7 @@ mod tests {
         .await;
         let file = DiskFile::Path(path.clone());
         let location = client()
-            .disk_put_timed(&url, &file, size as u64, Arc::new(|_| {}), FAST_DISK)
+            .disk_put_timed(&url, &file, size as u64, false, Arc::new(|_| {}), FAST_DISK)
             .await
             .unwrap();
         assert_eq!(location, "disk:/x.bin");
@@ -1400,6 +1477,107 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A retry of the sending goes on at the address of the try before: it asks the Disk first
+    /// how much it has, and sends only the rest (#65).
+    #[tokio::test]
+    async fn a_retry_goes_on_where_the_disk_got_to() {
+        let size = 2000;
+        let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let (url, log) = fake_disk(vec![
+            DiskStep::Reply("HTTP/1.1 200 OK\r\nContent-Length: 1500\r\nConnection: close\r\n\r\n"),
+            DiskStep::Reply(CREATED),
+        ])
+        .await;
+        let file = DiskFile::Memory(bytes.clone().into());
+        let location = client()
+            .disk_put_timed(&url, &file, size as u64, true, Arc::new(|_| {}), FAST_DISK)
+            .await
+            .unwrap();
+        assert_eq!(location, "disk:/x.bin");
+        let log = log.lock().unwrap();
+        assert_eq!(log[0].0, "HEAD");
+        assert_eq!(log[1].1.as_deref(), Some("bytes 1500-1999/2000"));
+        assert_eq!(log[1].2, bytes[1500..]);
+    }
+
+    /// Breaks that each got further do not use up the tries: only the ones in a row that got
+    /// nowhere count (#65).
+    #[tokio::test]
+    async fn breaks_that_get_further_do_not_use_up_the_tries() {
+        let size = 10_000;
+        let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let has = |n: usize| -> &'static str {
+            Box::leak(format!("HTTP/1.1 200 OK\r\nContent-Length: {n}\r\nConnection: close\r\n\r\n").into_boxed_str())
+        };
+        // Four breaks with three tries: each one after more of the file got there.
+        let mut steps = Vec::new();
+        for got in [1000, 2000, 3000, 4000] {
+            steps.push(DiskStep::Cut(500));
+            steps.push(DiskStep::Reply(has(got)));
+        }
+        steps.push(DiskStep::Reply(CREATED));
+        let (url, _) = fake_disk(steps).await;
+        let file = DiskFile::Memory(bytes.into());
+        let location = client()
+            .disk_put_timed(&url, &file, size as u64, false, Arc::new(|_| {}), FAST_DISK)
+            .await
+            .unwrap();
+        assert_eq!(location, "disk:/x.bin");
+        // Four breaks in a row that get nowhere are too many.
+        let mut steps = Vec::new();
+        for _ in 0..4 {
+            steps.push(DiskStep::Cut(0));
+            steps.push(DiskStep::Reply(has(0)));
+        }
+        let (url, _) = fake_disk(steps).await;
+        let file = DiskFile::Memory(vec![1; 10].into());
+        let result = client()
+            .disk_put_timed(&url, &file, 10, false, Arc::new(|_| {}), FAST_DISK)
+            .await;
+        assert!(result.is_err());
+    }
+
+    /// A `PUT` that stops taking bytes before the end of the file (the connection died on the
+    /// way, and nothing tells it) is broken off and goes on like a broken one, telling `progress`
+    /// meanwhile that the upload is alive (#65).
+    #[tokio::test]
+    async fn a_put_that_stalls_goes_on() {
+        // More than the socket buffers take in: the rest of the body stays unsent.
+        let size = 24 * 1024 * 1024;
+        let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let (url, log) = fake_disk(vec![
+            DiskStep::Hang(1000),
+            DiskStep::Reply("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n"),
+            DiskStep::Reply(CREATED),
+        ])
+        .await;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let file = DiskFile::Memory(bytes.clone().into());
+        let started = std::time::Instant::now();
+        let location = client()
+            .disk_put_timed(
+                &url,
+                &file,
+                size as u64,
+                false,
+                Arc::new(move |n| seen.lock().unwrap().push(n)),
+                FAST_DISK,
+            )
+            .await
+            .unwrap();
+        assert_eq!(location, "disk:/x.bin");
+        // Not after the fake Disk lets the stalled connection go, 30 s on.
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        let log = log.lock().unwrap();
+        assert_eq!(log[1].0, "HEAD");
+        let range = format!("bytes 1000-{}/{size}", size - 1);
+        assert_eq!(log[2].1.as_deref(), Some(range.as_str()));
+        assert_eq!(log[2].2, bytes[1000..]);
+        // The break said the upload was alive, at where the Disk was known to be.
+        assert!(calls.lock().unwrap().contains(&0));
+    }
+
     /// A full Disk is told at once, without going on.
     #[tokio::test]
     async fn a_full_yandex_disk_stops_the_upload() {
@@ -1409,7 +1587,7 @@ mod tests {
         .await;
         let file = DiskFile::Memory(vec![1; 10].into());
         let result = client()
-            .disk_put_timed(&url, &file, 10, Arc::new(|_| {}), FAST_DISK)
+            .disk_put_timed(&url, &file, 10, false, Arc::new(|_| {}), FAST_DISK)
             .await;
         assert!(matches!(result, Err(WebError::DiskFull)));
         assert_eq!(log.lock().unwrap().len(), 1);

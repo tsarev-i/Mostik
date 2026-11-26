@@ -1,6 +1,7 @@
 //! Live events from the socket: diagnostics, `Shared` updates, events for the UI, calls ringing,
 //! chats that arrive with their first message, and the names of the people mentioned.
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -15,8 +16,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::chats::chat_info_raw;
 use super::connection::{probing, reconnect_loop};
-use super::notify::{may_ring, notify};
-use super::threads::reply_notifies_now;
+use super::notify::{Gap, may_ring, notify};
+use super::threads::{refresh_threads, reply_notifies_now};
 use super::{AppState, EVENT, Live, Shared, fill_profiles, live, note_files, service};
 
 /// Socket events written to `probe-events.jsonl` per run.
@@ -133,6 +134,21 @@ pub(super) fn handle_incoming(
         }
         Incoming::Text(_) => {}
         Incoming::Closed => {
+            // What this connection saw, for the next one to notify of what came meanwhile. The
+            // first drop counts: the connections of a storm that never got ready saw nothing.
+            if let Ok(sh) = shared.lock()
+                && sh.ready
+                && let Ok(mut gap) = app.state::<AppState>().gap.lock()
+                && gap.as_ref().is_none_or(|g| g.generation != generation)
+            {
+                *gap = Some(Gap {
+                    generation,
+                    since: mostik_yandex::clock::now_mcs(),
+                    last: sh.last.clone(),
+                    followed: sh.followed.clone(),
+                    not_followed: sh.not_followed.clone(),
+                });
+            }
             let _ = app.emit(EVENT, &LiveEvent::Connection { online: false });
             let app = app.clone();
             tauri::async_runtime::spawn(async move { reconnect_loop(app, generation).await });
@@ -180,12 +196,60 @@ fn sync_shared(app: &AppHandle, shared: &Arc<StdMutex<Shared>>, ev: &LiveEvent) 
             sh.muted = chats.iter().map(|(id, level)| (id.0.clone(), *level)).collect();
             true
         }
+        LiveEvent::Reactions {
+            chat_id, ts, version, ..
+        } if *version > 0 => newer_reactions(&mut sh.reactions_seen, (chat_id.0.clone(), *ts), *version),
+        // Its replies notify from now on, with no fetch of the thread list first; the UI gets
+        // the list fetched again, as after a reply in a thread it did not have.
+        LiveEvent::ThreadJoined { chat_id, parent } => {
+            let key = (chat_id.0.clone(), *parent);
+            sh.not_followed.remove(&key);
+            sh.left.remove(&key);
+            // Unless replies already wait for a fetch.
+            if !sh.followed.contains(&key) && sh.joined.insert(key) && sh.ready && sh.thread_wait.is_empty() {
+                let (app, shared) = (app.clone(), shared.clone());
+                tauri::async_runtime::spawn(async move { refresh_threads(app, shared).await });
+            }
+            // The UI lets the thread back into its list (it may have left it).
+            true
+        }
+        // Its replies stop notifying (unless they mention the user), and the UI drops it from
+        // the thread list.
+        LiveEvent::ThreadLeft { chat_id, parent } => {
+            let key = (chat_id.0.clone(), *parent);
+            sh.followed.remove(&key);
+            sh.joined.remove(&key);
+            sh.not_followed.insert(key.clone());
+            sh.left.insert(key);
+            true
+        }
         LiveEvent::Paused { pause } => {
             sh.paused = *pause;
             true
         }
         _ => true,
     }
+}
+
+/// How many messages [`newer_reactions`] remembers the versions of; then it starts afresh.
+const REACTIONS_SEEN: usize = 2000;
+
+/// Whether reactions of `version` to message `key` are newer than any seen before (or as new:
+/// the same push twice changes nothing), and records them.
+fn newer_reactions(
+    seen: &mut BTreeMap<(String, mostik_core::Timestamp), u64>,
+    key: (String, mostik_core::Timestamp),
+    version: u64,
+) -> bool {
+    if seen.get(&key).is_some_and(|v| *v > version) {
+        eprintln!("reactions: a late push of an older version is skipped");
+        return false;
+    }
+    if seen.len() >= REACTIONS_SEEN && !seen.contains_key(&key) {
+        seen.clear();
+    }
+    seen.insert(key, version);
+    true
 }
 
 /// A `StateSync` says the user is in a new chat. When the user created or joined it here, the
@@ -344,4 +408,23 @@ async fn fetch_chat(live: &Live, chat_id: &str) -> Option<(Chat, Vec<User>)> {
         }
     }
     Some((chat, users))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A late push with the reactions of an older version is skipped; the same one again, a
+    /// newer one and one of another message are not.
+    #[test]
+    fn late_reactions_do_not_undo_newer_ones() {
+        let mut seen = BTreeMap::new();
+        let key = |ts| ("c".to_owned(), ts);
+        assert!(newer_reactions(&mut seen, key(1), 5));
+        assert!(!newer_reactions(&mut seen, key(1), 4));
+        assert!(newer_reactions(&mut seen, key(1), 5));
+        assert!(newer_reactions(&mut seen, key(1), 6));
+        assert!(newer_reactions(&mut seen, key(2), 1));
+        assert_eq!(seen[&key(1)], 6);
+    }
 }

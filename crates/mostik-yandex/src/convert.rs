@@ -610,6 +610,9 @@ pub struct HistoryData {
     pub messages: Vec<Message>,
     /// The last `(Timestamp, SeqNo)` of every chat, for read markers.
     pub last: BTreeMap<String, (Timestamp, u64)>,
+    /// How the senders of these messages wanted the members told of them, by `(chat, time)`; only
+    /// the ones other than [`Alert::Default`].
+    pub alerts: BTreeMap<(String, Timestamp), Alert>,
 }
 
 /// The time of the oldest record of a `history` page. Deleted messages and service records count
@@ -657,6 +660,10 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
             }
             if let Parsed::Message(m) = parse_server_message(sm, Some(id), me) {
                 last_ts = last_ts.max(m.ts);
+                let alert = Alert::from_code(n(sm, &["ClientMessage", "NotificationBehaviour"]).unwrap_or(0));
+                if alert != Alert::Default {
+                    out.alerts.insert((id.to_owned(), m.ts), alert);
+                }
                 out.messages.push(*m);
             }
         }
@@ -685,11 +692,34 @@ pub fn from_history(v: &Value, me: Option<&UserId>) -> HistoryData {
                 .flatten()
                 .filter_map(uint)
                 .collect(),
+            role: chat.get("MyRole").and_then(my_role),
             ..Chat::new(chat_id, kind)
         });
     }
     out.users = users.into_values().collect();
     out
+}
+
+/// The user's role in a chat of the chat list: `MyRole {Role, Rights, Version}`, `Role` 1 for
+/// a member and 2 for an admin, none for a channel's subscriber. Without `Rights` nothing is
+/// known.
+fn my_role(v: &Value) -> Option<MyRole> {
+    Some(MyRole {
+        admin: n(v, &["Role"]) == Some(2),
+        rights: n(v, &["Rights"])?,
+        version: n(v, &["Version"]).unwrap_or(0),
+    })
+}
+
+/// The user's role from the `chat_member` of a `roles_changed` push:
+/// `{role: "member" | "admin", rights: ["leave", "read", …], version}`.
+fn chat_member_role(v: &Value) -> Option<MyRole> {
+    let names = v.get("rights")?.as_array()?;
+    Some(MyRole {
+        admin: s(v, &["role"]) == Some("admin"),
+        rights: MyRole::rights_of(names.iter().filter_map(Value::as_str)),
+        version: n(v, &["version"]).unwrap_or(0),
+    })
 }
 
 /// Found messages from the HTTP RPC `search` response with `entities: ["messages"]`:
@@ -791,6 +821,7 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
             ts: n(r, &["Timestamp"])?,
             reactions: reactions(sm, me),
             users: reaction_authors(sm),
+            version: n(sm, &["ReactionsVersion"]).unwrap_or(0),
         });
     }
     if let Some(seen) = cm.get("SeenMarker") {
@@ -848,8 +879,8 @@ pub fn from_push(body: &Value, me: Option<&UserId>) -> Option<LiveEvent> {
 
 /// A `StateSync` push: `Data` is base64 JSON `{"type": …, "data": {…}}`, a change of the
 /// user's chats, synced settings or calls. Types seen: `you_added`, `you_removed`,
-/// `chat_info_changed`, `members_changed_v2`, `user_bucket`, `meeting_updated`; `roles_changed`
-/// is not used.
+/// `chat_info_changed`, `members_changed_v2`, `user_bucket`, `meeting_updated`, `roles_changed`,
+/// `you_added_to_thread`, `you_removed_from_thread`.
 fn state_sync(sync: &Value) -> Option<LiveEvent> {
     let data: Value = serde_json::from_slice(&base64(s(sync, &["Data"])?)?).ok()?;
     let d = &data["data"];
@@ -869,6 +900,29 @@ fn state_sync(sync: &Value) -> Option<LiveEvent> {
             description: text("description"),
             member_count: count(),
         }),
+        // `{chat_id, version, previous_version, roles: {admin: {add, remove}}, chat_member}`:
+        // `roles` are the others' changes, which the members list fetches anew when opened.
+        "roles_changed" => Some(LiveEvent::RoleChanged {
+            chat_id: chat_id()?,
+            role: chat_member_role(d.get("chat_member")?)?,
+        }),
+        // `{thread_id, chat_member}`: the rights there are a thread's, the parent chat's count.
+        "you_added_to_thread" => {
+            let (chat, parent) = thread_parent(s(d, &["thread_id"])?)?;
+            Some(LiveEvent::ThreadJoined {
+                chat_id: ChatId(chat),
+                parent,
+            })
+        }
+        // `{thread_id, chat_member: {version, rights}}`: unfollowed elsewhere, or the user's only
+        // reply in the thread was deleted.
+        "you_removed_from_thread" => {
+            let (chat, parent) = thread_parent(s(d, &["thread_id"])?)?;
+            Some(LiveEvent::ThreadLeft {
+                chat_id: ChatId(chat),
+                parent,
+            })
+        }
         "members_changed_v2" => Some(LiveEvent::ChatChanged {
             chat_id: chat_id()?,
             name: None,
@@ -1969,6 +2023,38 @@ mod tests {
         }
     }
 
+    /// `MyRole` of the chat list, with masks seen on 2026-11-24: a group member, an admin and a
+    /// channel the user only reads.
+    #[test]
+    fn chat_list_rights() {
+        let chat = |id: &str, role: Value| json!({"ChatId": id, "ChatInfo": {"Name": "x"}, "MyRole": role});
+        let v = json!({"Chats": [
+            chat("0/0/member", json!({"Rights": 16631118, "Role": 1, "Version": 4})),
+            chat("0/0/admin", json!({"Rights": 50200542, "Role": 2, "Version": 5})),
+            chat("1/0/channel", json!({"Rights": 11010052, "Version": 6})),
+            chat("0/0/unknown", json!({"Role": 1})),
+        ]});
+        let d = from_history(&v, None);
+        let [member, admin, channel, unknown] = [0, 1, 2, 3].map(|i| &d.chats[i]);
+        assert_eq!(
+            member.role,
+            Some(MyRole {
+                admin: false,
+                rights: 16631118,
+                version: 4
+            })
+        );
+        assert!(member.can_post(false) && member.can_post(true) && member.can(Right::SendAttachments));
+        assert!(admin.role.is_some_and(|r| r.admin) && admin.can_post(false));
+        assert!(!channel.role.is_some_and(|r| r.admin));
+        assert!(!channel.can_post(false) && !channel.can_post(true));
+        assert!(!channel.can(Right::SendAttachments) && !channel.can(Right::MarkAsImportant));
+        assert!(channel.can(Right::SendReactions) && channel.can(Right::DownloadFiles));
+        // Without the rights nothing is known, and everything is offered.
+        assert_eq!(unknown.role, None);
+        assert!(unknown.can_post(false) && unknown.can(Right::SendAttachments));
+    }
+
     #[test]
     fn parses_history_like_observed_schema() {
         let v = json!({"Chats": [{
@@ -2198,6 +2284,30 @@ mod tests {
         assert_eq!(alert(Some(3)), Alert::Quiet);
     }
 
+    /// The chat list keeps how its messages notify, for the ones that came while the connection
+    /// was down (the bot of the owner's organization sends `SILENT`).
+    #[test]
+    fn the_chat_list_says_how_its_messages_notify() {
+        let item = |chat: &str, ts: u64, behaviour: Option<u64>| {
+            let mut v = json!({"ServerMessage": {"ClientMessage": {"Plain": {"ChatId": chat, "Text": {"MessageText": "hi"}}},
+                "ServerMessageInfo": {"Timestamp": ts, "SeqNo": 1, "From": {"Guid": "u"}}}});
+            if let Some(b) = behaviour {
+                v["ServerMessage"]["ClientMessage"]["NotificationBehaviour"] = json!(b);
+            }
+            v
+        };
+        let list = json!({"Chats": [
+            {"ChatId": "0/0/c", "LastSeqNo": 1, "ChatInfo": {"Name": "c"}, "Messages": [item("0/0/c", 5, Some(1))]},
+            {"ChatId": "0/0/d", "LastSeqNo": 1, "ChatInfo": {"Name": "d"}, "Messages": [item("0/0/d", 6, None)]},
+        ]});
+        let data = from_history(&list, None);
+        assert_eq!(data.messages.len(), 2);
+        assert_eq!(
+            data.alerts.into_iter().collect::<Vec<_>>(),
+            [(("0/0/c".to_owned(), 5), Alert::Silent)]
+        );
+    }
+
     #[test]
     fn presence_from_subscribe() {
         let st = json!({"LastMessages": [{"ClientMessage": {"UserStatus": {}}, "ServerMessageInfo": {"From": {"Guid": "a"}}},
@@ -2368,7 +2478,8 @@ mod tests {
             })
         );
         let react = json!({"ClientMessage": {"Reaction": {"ChatId": "c", "Timestamp": 7, "Type": 100102, "Action": 2}},
-                           "Reactions": [{"Type": 100102, "Count": 1}], "RecentUserReactions": [{"Type": 100102, "UserInfo": {"Guid": "me"}}]});
+                           "Reactions": [{"Type": 100102, "Count": 1}], "ReactionsVersion": 5,
+                           "RecentUserReactions": [{"Type": 100102, "UserInfo": {"Guid": "me"}}]});
         assert_eq!(
             from_push(&react, Some(&me)),
             Some(LiveEvent::Reactions {
@@ -2382,6 +2493,7 @@ mod tests {
                     users: vec![me.clone()],
                 }],
                 users: vec![User::named(me.clone(), "me")],
+                version: 5,
             })
         );
         let unreact =
@@ -2393,6 +2505,7 @@ mod tests {
                 ts: 7,
                 reactions: vec![],
                 users: vec![],
+                version: 0,
             })
         );
         let seen = json!({"ClientMessage": {"SeenMarker": {"ChatId": "c", "SeqNo": 3}}, "ServerMessageInfo": {"From": {"Guid": "me"}}});
@@ -2458,6 +2571,45 @@ mod tests {
             from_push(&removed, Some(&me)),
             Some(LiveEvent::ChatRemoved {
                 chat_id: ChatId("0/0/old".into())
+            })
+        );
+        // As seen on 2026-11-24, with the names cut down; an unknown name counts for nothing.
+        let roles = sync_push(
+            json!({"type": "roles_changed", "data": {"chat_id": "0/0/a", "version": 9,
+            "previous_version": 8, "roles": {"admin": {"add": [], "remove": []}},
+            "chat_member": {"rights": ["leave", "read", "write", "pin_message"], "role": "member", "version": 9}}}),
+        );
+        assert_eq!(
+            from_push(&roles, Some(&me)),
+            Some(LiveEvent::RoleChanged {
+                chat_id: ChatId("0/0/a".into()),
+                role: MyRole {
+                    admin: false,
+                    rights: 0b1110,
+                    version: 9
+                }
+            })
+        );
+        let thread = sync_push(
+            json!({"type": "you_added_to_thread", "data": {"thread_id": "100/0/a_42",
+            "chat_member": {"version": 3, "role": "member", "rights": ["leave", "read", "write"]}}}),
+        );
+        assert_eq!(
+            from_push(&thread, Some(&me)),
+            Some(LiveEvent::ThreadJoined {
+                chat_id: ChatId("0/0/a".into()),
+                parent: 42
+            })
+        );
+        let left = sync_push(
+            json!({"type": "you_removed_from_thread", "data": {"thread_id": "100/0/a_42",
+            "chat_member": {"version": 4, "rights": []}}}),
+        );
+        assert_eq!(
+            from_push(&left, Some(&me)),
+            Some(LiveEvent::ThreadLeft {
+                chat_id: ChatId("0/0/a".into()),
+                parent: 42
             })
         );
         let members = sync_push(json!({"type": "members_changed_v2",

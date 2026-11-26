@@ -26,7 +26,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::events::handle_incoming;
 use super::presence::start_heartbeat;
-use super::{AppState, Boot, EVENT, Live, SIGNED_OUT_EVENT, SNAPSHOT_EVENT, Shared, fill_profiles, service, text};
+use super::{
+    AppState, Boot, EVENT, Live, SIGNED_OUT_EVENT, SNAPSHOT_EVENT, Shared, fill_profiles_cached, notify, service, text,
+};
 use crate::{call, login, store};
 
 /// Turns on the connection diagnostics (`probe*.json`, `probe-events.jsonl`) in a release build.
@@ -180,8 +182,8 @@ pub async fn logout(app: AppHandle, state: tauri::State<'_, AppState>) -> Result
 
 /// Removes what the signed-out account left on this computer: the diagnostic probes (they name
 /// its cookies and chats), the custom emoji cache, the files allowed for sending and saving, the
-/// list of where its attachments were saved, and the cookies and caches of the main window. The
-/// UI clears its own `localStorage` keys.
+/// list of where its attachments were saved, the people it fetched, and the cookies and caches of
+/// the main window. The UI clears its own `localStorage` keys.
 async fn forget_local_data(app: &AppHandle, state: &AppState) {
     if let Ok(dir) = app.path().app_data_dir()
         && let Ok(entries) = std::fs::read_dir(dir)
@@ -204,6 +206,9 @@ async fn forget_local_data(app: &AppHandle, state: &AppState) {
     }
     if let Ok(mut known) = state.known_files.lock() {
         known.clear();
+    }
+    if let Ok(mut profiles) = state.profiles.lock() {
+        *profiles = super::ProfileCache::default();
     }
     if let Some(main) = app.get_webview_window("main") {
         crate::webview::forget_site_data(&main, crate::webview::SiteData::CookiesAndCaches);
@@ -245,6 +250,10 @@ async fn connect(
         Ok((snapshot, live)) => {
             if !install(app, state, generation, live).await {
                 return Ok(Boot::NeedLogin { reason: None });
+            }
+            // The UI starts afresh with this chat list: nothing in it is news to notify of.
+            if let Ok(mut gap) = state.gap.lock() {
+                *gap = None;
             }
             Ok(Boot::Ready {
                 snapshot: Box::new(snapshot),
@@ -325,11 +334,13 @@ async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
             // Its close went to a reconnection that this loop turned away: try again.
             Ok((_, live)) if live.xiva.is_closed() => eprintln!("reconnect: the new connection closed at once"),
             Ok((snapshot, live)) => {
+                let shared = live.shared.clone();
                 if !install(app, state, generation, live).await {
                     return false;
                 }
                 let _ = app.emit(EVENT, &LiveEvent::Connection { online: true });
                 let _ = app.emit(SNAPSHOT_EVENT, &snapshot);
+                notify_missed(app, &shared);
                 return true;
             }
             Err(ConnectError::Unauthorized) => {
@@ -349,11 +360,34 @@ async fn reconnect(app: &AppHandle, state: &AppState, generation: u64) -> bool {
     }
 }
 
-/// The pause before reconnection attempt `attempt` (from 0): 2, 4, 8 … 60 s, each stretched by
+/// Notifies of the messages that came while the connection was down (`Shared::missed`), after the
+/// UI has the chat list they are in. The gap is closed: the next drop starts one of its own.
+fn notify_missed(app: &AppHandle, shared: &StdMutex<Shared>) {
+    if let Ok(mut gap) = app.state::<AppState>().gap.lock() {
+        *gap = None;
+    }
+    let missed = shared
+        .lock()
+        .map(|mut sh| std::mem::take(&mut sh.missed))
+        .unwrap_or_default();
+    if !missed.is_empty() {
+        eprintln!(
+            "reconnect: {} chats got messages while the connection was down",
+            missed.len()
+        );
+    }
+    for (m, alert) in missed {
+        notify::notify(app, shared, &m, None, alert);
+    }
+}
+
+/// The pause before reconnection attempt `attempt` (from 0): 4, 8, 16 … 60 s, each stretched by
 /// up to a half at random (`random` is any number), so that clients cut off together (a
-/// Telemost restart, a network change at an office) do not come back all at once.
+/// Telemost restart, a network change at an office) do not come back all at once. Not less than
+/// 4 s at first: after Telemost drops the connection, the network to it often stays broken for
+/// 2–3 s more, and an attempt that early failed one time in four.
 fn reconnect_pause(attempt: u32, random: u64) -> Duration {
-    let base = 2_000u64.saturating_mul(1 << attempt.min(5)).min(60_000);
+    let base = 4_000u64.saturating_mul(1 << attempt.min(4)).min(60_000);
     Duration::from_millis(base + random % (base / 2 + 1))
 }
 
@@ -526,6 +560,7 @@ async fn connect_inner(
         probe["notes"] = json!("exists");
     }
     let last = std::mem::take(&mut data.last);
+    let alerts = std::mem::take(&mut data.alerts);
     // The snapshot and the connection need an ID even for a user nothing named: one that
     // matches nobody.
     let me_id = known_me.clone().unwrap_or_else(|| UserId("me".into()));
@@ -565,7 +600,7 @@ async fn connect_inner(
             })
         })
         .collect();
-    let filled = fill_profiles(&web, &mut snapshot.users).await;
+    let filled = fill_profiles_cached(state, generation, &web, &mut snapshot.users).await;
     probe["profiles_filled"] = json!(filled);
     match web.buckets().await {
         Ok(b) => {
@@ -601,6 +636,20 @@ async fn connect_inner(
         sh.learn_names(&snapshot.users);
         sh.channels = snapshot.mention_channels();
         sh.ready = true;
+        // What came while the connection before this one was down notifies once this one is in
+        // place (see `notify_missed`). The gap stays until then: a connection that closes at once
+        // leaves it to the next one. What it knew of the threads carries over too, until the UI
+        // fetches their list again.
+        if let Ok(gap) = state.gap.lock()
+            && let Some(gap) = gap.as_ref().filter(|g| g.generation == generation)
+        {
+            // Not the threads left since this connection came up.
+            let followed: Vec<_> = gap.followed.iter().filter(|k| !sh.left.contains(*k)).cloned().collect();
+            sh.followed.extend(followed);
+            sh.not_followed.extend(gap.not_followed.iter().cloned());
+            sh.missed = notify::missed(gap, &snapshot.chats, &snapshot.messages, &alerts, known_me.as_ref());
+            probe["missed"] = json!(sh.missed.len());
+        }
     }
     probe["snapshot"] = json!({
         "chats": snapshot.chats.len(),
@@ -636,11 +685,11 @@ mod tests {
         let ms = |attempt, random| reconnect_pause(attempt, random).as_millis();
         assert_eq!(
             [0, 1, 2, 3, 4, 5, 40].map(|a| ms(a, 0)),
-            [2000, 4000, 8000, 16000, 32000, 60000, 60000]
+            [4000, 8000, 16000, 32000, 60000, 60000, 60000]
         );
         // Up to a half more, at random.
-        assert_eq!(ms(0, 1000), 3000);
-        assert_eq!(ms(0, 1001), 2000);
+        assert_eq!(ms(0, 2000), 6000);
+        assert_eq!(ms(0, 2001), 4000);
         assert_eq!(ms(5, u64::MAX), 60000 + u128::from(u64::MAX % 30001));
         assert!(reconnect_pause(40, u64::MAX) <= Duration::from_secs(90));
     }

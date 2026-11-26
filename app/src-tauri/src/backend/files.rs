@@ -675,6 +675,22 @@ struct SentParts {
     texts: usize,
     paths: std::collections::BTreeSet<String>,
     parts: Option<Vec<String>>,
+    /// How far the files going through Yandex Disk got, by path: a retry goes on from there
+    /// instead of uploading gigabytes again (#65).
+    disk: BTreeMap<String, DiskUpload>,
+}
+
+/// How far a file going through Yandex Disk got: the address it goes to, its place on the Disk
+/// once it is there whole, its `file_id` once it is added to the chat. Each step is done once.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct DiskUpload {
+    /// The size the file had and when it was last changed (none for a pasted one, which never
+    /// changes): a file changed since is uploaded anew.
+    size: u64,
+    stamp: Option<std::time::SystemTime>,
+    url: Option<String>,
+    location: Option<String>,
+    file_id: Option<String>,
 }
 
 /// Records a part of sending `upload` that has gone.
@@ -754,21 +770,27 @@ pub async fn send_files(
                 gallery_id: gallery_id.clone(),
                 path: (*path).clone(),
                 kept,
+                disk: done.disk.get(*path).cloned().unwrap_or_default(),
+                disk_step: disk_progress(&app, upload.as_ref(), path),
             };
             upload_tracked(app.clone(), upload.clone(), file)
         })
         .collect();
+    // Every upload goes on to its end even when another one fails: what got through is not
+    // uploaded again by a retry, and a large file on its way to Yandex Disk is not dropped (#65).
     let uploaded: Result<Vec<(usize, Uploaded)>, String> = {
-        use futures_util::{StreamExt, TryStreamExt};
-        futures_util::stream::iter(
+        use futures_util::StreamExt;
+        let mut all: Vec<(usize, Result<Uploaded, String>)> = futures_util::stream::iter(
             uploads
                 .into_iter()
                 .enumerate()
-                .map(|(i, job)| async move { job.await.map(|u| (i, u)) }),
+                .map(|(i, job)| async move { (i, job.await) }),
         )
         .buffer_unordered(UPLOAD_CONCURRENCY)
-        .try_collect()
-        .await
+        .collect()
+        .await;
+        all.sort_by_key(|(i, _)| *i);
+        all.into_iter().map(|(i, u)| u.map(|u| (i, u))).collect()
     };
     if let Some(upload) = &upload
         && let Ok(mut uploads) = state.uploads.lock()
@@ -863,13 +885,28 @@ enum Uploaded {
     Cancelled,
 }
 
-/// One file to upload into chat `target`; an image goes into the gallery `gallery_id`.
+/// One file to upload into chat `target`; an image goes into the gallery `gallery_id`. A file
+/// going through Yandex Disk goes on from `disk`, where a try before got to, and tells
+/// `disk_step` each step it makes.
 struct Upload {
     web: WebClient,
     target: String,
     gallery_id: String,
     path: String,
     kept: Option<bytes::Bytes>,
+    disk: DiskUpload,
+    disk_step: Arc<dyn Fn(DiskUpload) + Send + Sync>,
+}
+
+/// Records how far the file at `path` of sending `upload` got on its way through Yandex Disk,
+/// for a retry of the sending (see [`DiskUpload`]).
+fn disk_progress(app: &AppHandle, upload: Option<&String>, path: &str) -> Arc<dyn Fn(DiskUpload) + Send + Sync> {
+    let (app, upload, path) = (app.clone(), upload.cloned(), path.to_owned());
+    Arc::new(move |disk| {
+        mark_sent(&app.state::<AppState>(), upload.as_ref(), |s| {
+            s.disk.insert(path.clone(), disk);
+        });
+    })
 }
 
 /// How far an upload has got and when it last moved, for the stall check.
@@ -969,14 +1006,19 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
         gallery_id,
         path,
         kept,
+        disk,
+        disk_step,
     } = file;
     let path = path.as_str();
     let p = std::path::Path::new(path);
     let name = file_name(path);
     let mime = mime_guess::from_path(p).first_or_octet_stream();
-    let on_disk = match &kept {
-        Some(bytes) => bytes.len() as u64,
-        None => tokio::fs::metadata(p).await.map_err(|e| format!("{path}: {e}"))?.len(),
+    let (on_disk, stamp) = match &kept {
+        Some(bytes) => (bytes.len() as u64, None),
+        None => {
+            let meta = tokio::fs::metadata(p).await.map_err(|e| format!("{path}: {e}"))?;
+            (meta.len(), meta.modified().ok())
+        }
     };
     if on_disk > cmd::MAX_UPLOAD {
         let file = match kept {
@@ -984,7 +1026,14 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
             None => DiskFile::Path(p.to_owned()),
         };
         let video = mime.type_() == "video";
-        return upload_to_disk(&mut web, &target, &name, video, file, on_disk, progress).await;
+        let to = DiskTarget {
+            chat: &target,
+            name: &name,
+            video,
+            size: on_disk,
+            stamp,
+        };
+        return upload_to_disk(&mut web, to, file, disk, disk_step, progress).await;
     }
     let bytes = match kept {
         Some(bytes) => bytes,
@@ -1015,31 +1064,123 @@ async fn upload_one(file: Upload, progress: Arc<dyn Fn(u64, u64) + Send + Sync>)
     })
 }
 
+/// What of the try before (`done`) holds for the file as it is now: all of it, or nothing for a
+/// file changed since, even one of the same size.
+fn carried(done: DiskUpload, size: u64, stamp: Option<std::time::SystemTime>) -> DiskUpload {
+    if done.size == size && done.stamp == stamp {
+        done
+    } else {
+        DiskUpload {
+            size,
+            stamp,
+            ..DiskUpload::default()
+        }
+    }
+}
+
+/// Where a file through Yandex Disk goes: chat `chat`, under `name`; a `video` gets a preview.
+/// `size` and `stamp` (when it was last changed) tell the file from one changed since a try before.
+struct DiskTarget<'a> {
+    chat: &'a str,
+    name: &'a str,
+    video: bool,
+    size: u64,
+    stamp: Option<std::time::SystemTime>,
+}
+
 /// Uploads a file over [`cmd::MAX_UPLOAD`] through the user's Yandex Disk, as the web client
 /// does: Telemost gives an address on the Disk, the file goes there as it is read, then it is
-/// added to chat `target`. It is sent as a file, an image too.
+/// added to the chat. It is sent as a file, an image too. A retry of the sending goes on from
+/// `done`, where the try before got to, and each step goes to `step` (#65): a file added to the
+/// chat is not uploaded again, one on the Disk is only added, one on its way goes on at its
+/// address from where the Disk got to, or anew if the address no longer takes it.
 async fn upload_to_disk(
     web: &mut WebClient,
-    target: &str,
-    name: &str,
-    video: bool,
+    to: DiskTarget<'_>,
     file: DiskFile,
-    size: u64,
+    done: DiskUpload,
+    step: Arc<dyn Fn(DiskUpload) + Send + Sync>,
     progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
 ) -> Result<Uploaded, String> {
+    let DiskTarget {
+        chat,
+        name,
+        video,
+        size,
+        stamp,
+    } = to;
     let failed = |e: WebError| match e {
         WebError::DiskFull => format!("{name}: {}", cmd::DISK_FULL),
         WebError::DiskTooLarge => format!("{name}: {}", cmd::DISK_FILE_TOO_LARGE),
+        WebError::Stalled => format!("{name}: {}", cmd::UPLOAD_STALLED),
         e => format!("{name}: {e}"),
     };
-    progress(0, size);
-    let url = web.disk_upload_url(target, name, size, video).await.map_err(&failed)?;
-    let location = web
-        .disk_put(&url, &file, size, Arc::new(move |sent| progress(sent, size)))
-        .await
-        .map_err(&failed)?;
-    let id = web.add_disk_file(target, &location).await.map_err(&failed)?;
+    let mut disk = carried(done, size, stamp);
+    if let Some(id) = &disk.file_id {
+        progress(size, size);
+        return Ok(Uploaded::File(request_id(), wire::disk_file_info(id, name, size)));
+    }
+    let location = match disk.location.clone() {
+        Some(location) => {
+            progress(size, size);
+            location
+        }
+        None => {
+            progress(0, size);
+            let sent = {
+                let progress = progress.clone();
+                Arc::new(move |sent| progress(sent, size)) as Arc<dyn Fn(u64) + Send + Sync>
+            };
+            let fresh = match &disk.url {
+                Some(url) => match web.disk_put(url, &file, size, true, sent.clone()).await {
+                    Ok(location) => Some(location),
+                    // Broken off again: the next retry goes on at the same address.
+                    Err(e) if transient(&e) || matches!(e, WebError::DiskFull | WebError::DiskTooLarge) => {
+                        return Err(failed(e));
+                    }
+                    // The address no longer takes the file: a new one, from the start.
+                    Err(e) => {
+                        eprintln!("disk upload: the address of the try before is refused ({e}), a new one");
+                        None
+                    }
+                },
+                None => None,
+            };
+            match fresh {
+                Some(location) => location,
+                None => {
+                    let url = web.disk_upload_url(chat, name, size, video).await.map_err(&failed)?;
+                    disk.url = Some(url.clone());
+                    step(disk.clone());
+                    web.disk_put(&url, &file, size, false, sent).await.map_err(&failed)?
+                }
+            }
+        }
+    };
+    disk.location = Some(location.clone());
+    step(disk.clone());
+    let id = match web.add_disk_file(chat, &location).await {
+        Ok(id) => id,
+        Err(e) => {
+            // Refused for good: the next retry uploads the file anew rather than ask again.
+            if !transient(&e) {
+                step(DiskUpload {
+                    size,
+                    stamp,
+                    ..DiskUpload::default()
+                });
+            }
+            return Err(failed(e));
+        }
+    };
+    disk.file_id = Some(id.clone());
+    step(disk);
     Ok(Uploaded::File(request_id(), wire::disk_file_info(&id, name, size)))
+}
+
+/// Whether `e` may pass by itself: the connection broke or timed out, or the server answered 5xx.
+fn transient(e: &WebError) -> bool {
+    e.is_transient() || matches!(e, WebError::Http(_) | WebError::Net(_))
 }
 
 /// Sends a ready `ClientMessage` and returns the feed message (with its attachments).
@@ -1221,6 +1362,68 @@ mod tests {
         assert_eq!(sent.parts.as_deref(), Some(&["first".to_owned(), "cut".to_owned()][..]));
         assert_eq!(sent.texts, 1);
         assert_eq!(sent.paths.into_iter().collect::<Vec<_>>(), ["/tmp/a.pdf"]);
+    }
+
+    /// A retry of a sending does not upload again a large file a try before has already put on
+    /// Yandex Disk and added to the chat: it goes as it is, with no request (#65).
+    #[tokio::test]
+    async fn a_file_added_by_a_try_before_is_not_uploaded_again() {
+        let mut web = WebClient::new(Default::default(), "Mostik/test".into()).unwrap();
+        let size = cmd::MAX_UPLOAD + 1;
+        let done = DiskUpload {
+            size,
+            stamp: None,
+            url: Some("https://uploader.invalid/x".into()),
+            location: Some("disk:/x.bin".into()),
+            file_id: Some("disk/f1".into()),
+        };
+        let steps = Arc::new(std::sync::Mutex::new(0));
+        let counted = steps.clone();
+        let to = DiskTarget {
+            chat: "0/0/c",
+            name: "x.bin",
+            video: false,
+            size,
+            stamp: None,
+        };
+        let got = upload_to_disk(
+            &mut web,
+            to,
+            DiskFile::Path("/nonexistent/x.bin".into()),
+            done,
+            Arc::new(move |_| *counted.lock().unwrap() += 1),
+            Arc::new(|_, _| {}),
+        )
+        .await
+        .unwrap();
+        match got {
+            Uploaded::File(_, info) => assert_eq!(info, wire::disk_file_info("disk/f1", "x.bin", size)),
+            _ => panic!("not a file"),
+        }
+        assert_eq!(*steps.lock().unwrap(), 0);
+    }
+
+    /// A file changed between the tries, even to the same size, keeps nothing of the try before:
+    /// neither its address (the old start with the new end) nor its `file_id` (the old file).
+    #[test]
+    fn a_file_changed_since_the_try_before_starts_anew() {
+        let then = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        let later = then + std::time::Duration::from_secs(1);
+        let done = DiskUpload {
+            size: 100,
+            stamp: Some(then),
+            url: Some("https://uploader.invalid/x".into()),
+            location: None,
+            file_id: Some("disk/f1".into()),
+        };
+        assert_eq!(carried(done.clone(), 100, Some(then)), done);
+        let anew = DiskUpload {
+            size: 100,
+            stamp: Some(later),
+            ..DiskUpload::default()
+        };
+        assert_eq!(carried(done.clone(), 100, Some(later)), anew);
+        assert_eq!(carried(done, 101, Some(then)).file_id, None);
     }
 
     #[test]

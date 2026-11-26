@@ -1,10 +1,11 @@
 //! Notifications: which messages notify, mentions of the user, the notification itself with its
 //! icon and sound.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex as StdMutex;
 
 use mostik_core::event::Alert;
-use mostik_core::{Message, NotifyLevel, User};
+use mostik_core::{Chat, ChatId, Message, NotifyLevel, Timestamp, User, UserId};
 use mostik_ipc::cmd::{self, Args, Out, SoundArgs};
 use mostik_yandex::clock;
 use tauri::{AppHandle, Manager};
@@ -33,6 +34,66 @@ pub(super) fn mentions_me(sh: &Shared, m: &Message) -> bool {
         };
         with_names(sh, |names| mostik_core::markup::mentions_me(&m.text, names, me))
     })
+}
+
+/// How long a connection may have been dead before Mostik noticed it: Xiva pings once a minute,
+/// a connection silent for one and a half of that is dropped, checked every 10 s; a reset
+/// comes with the next heartbeat, a minute apart.
+const NOTICED_LATE_MCS: Timestamp = 3 * 60 * 1_000_000;
+
+/// What a connection that went down had seen: the last message of each chat (`Shared::last`)
+/// and when it was found closed. Pushes are lost while a connection is dead and until the next
+/// one is up, and their messages come with its chat list instead, which notifies of nothing:
+/// [`missed`] finds them there. Telemost drops the connection now and then, in storms on a
+/// shaky network.
+///
+/// It also hands the next connection what it knew of the threads (`Shared::followed` and
+/// `Shared::not_followed`): without that, the first reply after each reconnection in a thread
+/// the user does not follow fetched the thread list again, a few times an hour.
+#[derive(Default)]
+pub(super) struct Gap {
+    pub generation: u64,
+    pub since: Timestamp,
+    pub last: BTreeMap<String, (Timestamp, u64)>,
+    pub followed: BTreeSet<(String, Timestamp)>,
+    pub not_followed: BTreeSet<(String, Timestamp)>,
+}
+
+/// The messages to notify of after a reconnection: the last message of each chat in the new chat
+/// list (`messages`, one per chat) that the connection before had not seen, sent by someone else
+/// at most a few minutes before the drop was noticed, in a chat still unread (not read
+/// meanwhile on another device). Thread replies and notes about the chat are left out, as in
+/// [`notify`]; whether each notifies is up to it.
+pub(super) fn missed(
+    gap: &Gap,
+    chats: &[Chat],
+    messages: &[Message],
+    alerts: &BTreeMap<(String, Timestamp), Alert>,
+    me: Option<&UserId>,
+) -> Vec<(Message, Alert)> {
+    let unread = |chat: &ChatId| chats.iter().any(|c| &c.id == chat && c.unread > 0);
+    let mut out: Vec<(Message, Alert)> = Vec::new();
+    for m in messages {
+        let seen = gap.last.get(&m.chat_id.0).map_or(0, |l| l.0);
+        if m.ts <= seen
+            || m.ts.saturating_add(NOTICED_LATE_MCS) < gap.since
+            || m.thread_parent.is_some()
+            || m.is_note()
+            || m.edited
+            || me == Some(&m.author)
+            || !unread(&m.chat_id)
+        {
+            continue;
+        }
+        let alert = alerts.get(&(m.chat_id.0.clone(), m.ts)).copied().unwrap_or_default();
+        match out.iter_mut().find(|(o, _)| o.chat_id == m.chat_id) {
+            Some(o) if o.0.ts < m.ts => *o = (m.clone(), alert),
+            Some(_) => {}
+            None => out.push((m.clone(), alert)),
+        }
+    }
+    out.sort_by_key(|(m, _)| m.ts);
+    out
 }
 
 /// Whether notifications are paused now.
@@ -220,4 +281,80 @@ pub fn test_notification(app: AppHandle) -> Result<Out<cmd::TestNotification>, S
             )
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mostik_core::ChatKind;
+
+    const MIN: Timestamp = 60 * 1_000_000;
+
+    fn chat(id: &str, unread: u32) -> Chat {
+        Chat {
+            unread,
+            ..Chat::new(ChatId(id.into()), ChatKind::Group { public: false })
+        }
+    }
+
+    fn msg(chat: &str, ts: Timestamp, author: &str) -> Message {
+        Message {
+            chat_id: ChatId(chat.into()),
+            ts,
+            author: UserId(author.into()),
+            text: "hi".into(),
+            thread_parent: None,
+            edited: false,
+            important: false,
+            reactions: vec![],
+            thread: None,
+            seq_no: 0,
+            attachments: vec![],
+            forwarded: vec![],
+            call: None,
+            system: None,
+            media: None,
+            reads: None,
+        }
+    }
+
+    /// After a reconnection, the last message of each chat the dropped connection had not seen
+    /// notifies, as its sender wanted; old ones, own ones and ones read meanwhile do not.
+    #[test]
+    fn messages_missed_while_the_connection_was_down() {
+        let since = 100 * MIN;
+        let gap = Gap {
+            generation: 1,
+            since,
+            last: BTreeMap::from([("a".into(), (since - 5 * MIN, 1)), ("b".into(), (since - MIN, 1))]),
+            ..Gap::default()
+        };
+        let me = UserId("me".into());
+        let chats = [
+            chat("a", 1),
+            chat("b", 1),
+            chat("c", 1),
+            chat("d", 0),
+            chat("e", 2),
+            chat("f", 1),
+        ];
+        let messages = [
+            // Came while the connection was down.
+            msg("a", since - 2 * MIN, "anna"),
+            // Seen by the connection before.
+            msg("b", since - MIN, "boris"),
+            // A chat new to the list, long before the drop.
+            msg("c", since - 60 * MIN, "anna"),
+            // Read meanwhile on another device.
+            msg("d", since + MIN, "anna"),
+            // Sent by the user from another device.
+            msg("e", since + MIN, "me"),
+            // Sent without any notification.
+            msg("f", since + 2 * MIN, "vera"),
+        ];
+        let alerts = BTreeMap::from([(("f".to_owned(), since + 2 * MIN), Alert::Silent)]);
+        let found = missed(&gap, &chats, &messages, &alerts, Some(&me));
+        let found: Vec<_> = found.iter().map(|(m, a)| (m.chat_id.0.as_str(), *a)).collect();
+        assert_eq!(found, [("a", Alert::Default), ("f", Alert::Silent)]);
+    }
 }

@@ -195,6 +195,10 @@ pub struct UrlArgs {
 pub struct VoiceArgs {
     pub file_id: String,
     pub from_ms: u64,
+    /// Its length as the message says (`Voice.Duration`), 0 if it does not: no more of the file
+    /// than that is decoded.
+    #[serde(default)]
+    pub duration_ms: u64,
 }
 
 /// A file taken off the message, as [`crate::PendingFile::path`].
@@ -410,6 +414,10 @@ pub struct PrefsArgs {
     pub tray_icon: TrayIcon,
     /// Check spelling in the message fields (#50): on Linux WebKitGTK does it only when asked.
     pub spell_check: bool,
+    /// Closing the main window hides it to the tray instead of quitting (Linux and Windows;
+    /// macOS always hides it).
+    #[serde(default)]
+    pub close_to_tray: bool,
 }
 
 /// The tray icon from "Preferences".
@@ -687,10 +695,12 @@ mod tests {
             sound: "bell".into(),
             tray_icon: TrayIcon::App,
             spell_check: true,
+            close_to_tray: true,
         };
         pinned(
             args,
-            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell", "trayIcon": "app", "spellCheck": true }),
+            json!({ "notify": "direct", "preview": true, "lang": "en", "sound": "bell", "trayIcon": "app", "spellCheck": true,
+                    "closeToTray": true }),
         );
         let args = ThreadReadArgs {
             chat_id: ChatId("c1".into()),

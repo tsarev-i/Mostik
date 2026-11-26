@@ -15,7 +15,8 @@ use crate::i18n::tr;
 use crate::icons::{I, Icon};
 use crate::keys::{self, Action};
 use crate::modal::Modal;
-use crate::text_edit::{LinkTarget, insert_into, paste_link};
+use crate::text_edit::{LinkTarget, insert_into, paste_link, utf16_len};
+use crate::undo::{self, History, Kind};
 use crate::{bridge, editor};
 
 /// A message field as its toolbar, hotkeys and dialogs see it.
@@ -26,6 +27,17 @@ pub struct Field {
     changed: Callback<String>,
     /// What the open "Add link" dialog edits.
     link: RwSignal<Option<LinkTarget>>,
+    /// Ctrl+Z and its redo (see [`undo`]).
+    history: StoredValue<History>,
+    /// The field before the change an `input` event is about to report, and what it is.
+    pending: StoredValue<Option<(undo::State, Kind)>>,
+}
+
+/// The text of field `el` and where its caret is.
+fn state_of(el: &web_sys::HtmlElement) -> undo::State {
+    let text = editor::value(el);
+    let caret = selection(el).1.unwrap_or_else(|| utf16_len(&text));
+    undo::State { text, caret }
 }
 
 impl Field {
@@ -34,21 +46,96 @@ impl Field {
             area,
             changed: Callback::new(changed),
             link: RwSignal::new(None),
+            history: StoredValue::new(History::default()),
+            pending: StoredValue::new(None),
         }
+    }
+
+    /// The field now shows text put in from outside (the draft of another chat, nothing after a
+    /// sending): Ctrl+Z does not go back into what was there.
+    pub fn reset_history(self) {
+        self.history.update_value(History::reset);
+    }
+
+    /// Records the change of field `el` from `before` to what it shows now.
+    fn note(self, el: &web_sys::HtmlElement, before: undo::State, kind: Kind) {
+        let after = state_of(el);
+        self.history
+            .update_value(|h| h.record(before, &after, kind, js_sys::Date::now()));
+    }
+
+    /// Ctrl+Z (`back`) or its redo: the field as it was before the last step, or after the step
+    /// undone last.
+    fn travel(self, back: bool) {
+        let Some(el) = self.area.get_untracked() else {
+            return;
+        };
+        // The `input` it sends is no change of the user's.
+        self.pending.set_value(None);
+        let current = state_of(&el);
+        let to = self
+            .history
+            .try_update_value(|h| if back { h.undo(current) } else { h.redo(current) })
+            .flatten();
+        if let Some(to) = to {
+            place_caret(&el, &to.text, to.caret);
+            // As if typed: the field's owner saves the draft and looks for suggestions again.
+            let init = web_sys::EventInit::new();
+            init.set_bubbles(true);
+            if let Ok(input) = web_sys::Event::new_with_event_init_dict("input", &init) {
+                let _ = el.dispatch_event(&input);
+            }
+        }
+    }
+
+    /// Makes a change of the field's for the user (a line break, a picked suggestion) with `make`,
+    /// which returns the new text, as one step of the undo history.
+    pub fn edit(self, make: impl FnOnce(&web_sys::HtmlElement) -> String) -> Option<String> {
+        let el = self.area.get_untracked()?;
+        let was = state_of(&el);
+        let text = make(&el);
+        self.note(&el, was, Kind::Other);
+        Some(text)
+    }
+
+    /// Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y (⌘ on macOS, where ⇧⌘Z is the redo). Returns whether the
+    /// key was one of them. By the key's place, as the other shortcuts in other layouts.
+    fn undo_key(self, e: &ev::KeyboardEvent) -> bool {
+        let command = if crate::settings::on_mac() {
+            e.meta_key()
+        } else {
+            e.ctrl_key()
+        };
+        if !command || e.alt_key() {
+            return false;
+        }
+        let back = match e.code().as_str() {
+            "KeyZ" => !e.shift_key(),
+            "KeyY" if !e.shift_key() && !crate::settings::on_mac() => false,
+            _ => return false,
+        };
+        e.prevent_default();
+        self.travel(back);
+        true
     }
 
     /// Wraps the selection in markup markers or takes them off, as the toolbar buttons do.
     pub fn wrap(self, before: &str, after: &str) {
         if let Some(el) = self.area.get_untracked() {
-            self.changed.run(wrap_selection(&el, before, after));
+            let was = state_of(&el);
+            let text = wrap_selection(&el, before, after);
+            self.note(&el, was, Kind::Other);
+            self.changed.run(text);
         }
     }
 
     /// Puts `text` in place of the `start..end` selection kept from before a picker took the focus.
     fn insert_at(self, text: &str, (start, end): (Option<u32>, Option<u32>)) {
         if let Some(el) = self.area.get_untracked() {
+            let was = state_of(&el);
             let (value, caret) = insert_into(&editor::value(&el), start, end, text, 0);
             place_caret(&el, &value, caret);
+            self.note(&el, was, Kind::Other);
             self.changed.run(value);
         }
     }
@@ -71,7 +158,9 @@ impl Field {
         match made {
             // The field cannot change under the dialog; if it did, the link is not put over it.
             Some((text, caret)) if editor::value(&el) == target.text => {
+                let was = state_of(&el);
                 place_caret(&el, &text, caret);
+                self.note(&el, was, Kind::Other);
                 self.changed.run(text);
             }
             _ => {
@@ -115,7 +204,9 @@ impl Field {
             return false;
         };
         e.prevent_default();
+        let was = state_of(&el);
         place_caret(&el, &text, caret);
+        self.note(&el, was, Kind::Other);
         self.changed.run(text);
         true
     }
@@ -160,22 +251,48 @@ pub fn FieldArea(
                 if let Some(el) = area.get_untracked() {
                     let text = editor::tidy(&el, &crate::custom::lookup(c));
                     set_spellable(&el, editor::spellable(&text));
+                    if let Some((before, kind)) = field.pending.try_update_value(Option::take).flatten() {
+                        field.note(&el, before, kind);
+                    }
                     on_input.run(text);
                 }
             }
             on:beforeinput=move |e: ev::InputEvent| {
                 if let Some(el) = area.get_untracked() {
+                    // "Undo" in the context menu, and Ctrl+Z where the browser takes it first.
+                    let kind = e.input_type();
+                    if kind == "historyUndo" || kind == "historyRedo" {
+                        e.prevent_default();
+                        return field.travel(kind == "historyUndo");
+                    }
+                    // Typing over a selection replaces it: a step of its own.
+                    let (start, end) = selection(&el);
+                    let kind = if start != end {
+                        Kind::Other
+                    } else if kind.starts_with("insertText") || kind == "insertCompositionText" {
+                        Kind::Typing
+                    } else if kind.starts_with("delete") {
+                        Kind::Deleting
+                    } else {
+                        Kind::Other
+                    };
+                    field.pending.set_value(Some((state_of(&el), kind)));
                     // Before the browser puts the text in and checks the line it went into.
                     if spellable.get_untracked() && !editor::spellable_after(&el, &e) {
                         set_spellable(&el, false);
                     }
                     editor::before_input(&el, &e, &crate::custom::lookup(c));
+                    // Made here, its `input` has come already; or nothing changed, only the caret
+                    // moved. Either way no `input` is to come for it.
+                    if e.default_prevented() {
+                        field.pending.set_value(None);
+                    }
                 }
             }
             // The window's shortcuts are not the field's: given keys like Ctrl+↑, zoom would also
             // edit the last message.
             on:keydown=move |e: ev::KeyboardEvent| {
-                if !e.is_composing() && !field.hotkey(&e) && !keys::window_shortcut(&e) {
+                if !e.is_composing() && !field.undo_key(&e) && !field.hotkey(&e) && !keys::window_shortcut(&e) {
                     on_key.run(e);
                 }
             }

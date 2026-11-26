@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use mostik_core::*;
 
-use crate::i18n::tr;
+use crate::i18n::{NotePart, tr};
 use crate::icons::{I, Icon};
 use crate::{ops, time};
 
@@ -836,12 +836,14 @@ fn CallRow(msg: Message, end: Option<Message>, live: bool) -> impl IntoView {
 /// What a note about the chat says after the name of its author.
 pub(super) fn chat_note_text(s: &Snapshot, m: &Message) -> Option<String> {
     let note = m.system.as_ref()?;
-    let name = |id: &UserId| {
-        s.user(id)
-            .filter(|u| u.has_name())
-            .map_or_else(|| tr().someone.to_owned(), |u| u.display_name.clone())
-    };
-    Some(tr().chat_note(note, &m.author, name))
+    Some(tr().chat_note(note, &m.author, |id| note_name(s, id)))
+}
+
+/// The name of a person a note about the chat adds or removes.
+fn note_name(s: &Snapshot, id: &UserId) -> String {
+    s.user(id)
+        .filter(|u| u.has_name())
+        .map_or_else(|| tr().someone.to_owned(), |u| u.display_name.clone())
 }
 
 /// A note about the chat, like Slack's "joined #channel": who did what, and when.
@@ -851,11 +853,24 @@ fn SystemRow(msg: Message) -> impl IntoView {
     let Some(note) = msg.system.clone() else {
         return ().into_any();
     };
-    let (name, text) = c.snap.with_untracked(|s| {
+    // The people it adds or removes are names to click, as its author is: each opens a profile.
+    let (name, parts) = c.snap.with_untracked(|s| {
+        let parts = tr()
+            .chat_note_parts(&note, &msg.author)
+            .into_iter()
+            .map(|part| match part {
+                NotePart::Text(text) => text.into_any(),
+                NotePart::Person(id) => {
+                    let name = note_name(s, &id);
+                    view! { <button class="msg-author" on:click=move |_| ops::open_profile(c, id.clone())>{name}</button> }
+                        .into_any()
+                }
+            })
+            .collect::<Vec<_>>();
         (
             s.user(&msg.author)
                 .map_or_else(|| tr().someone.to_owned(), |u| u.display_name.clone()),
-            chat_note_text(s, &msg).unwrap_or_default(),
+            parts,
         )
     });
     let icon = match note {
@@ -871,7 +886,7 @@ fn SystemRow(msg: Message) -> impl IntoView {
             <div class="call-note-body">
                 <span class="chat-note-text">
                     <button class="msg-author" on:click=move |_| ops::open_profile(c, id.clone())>{name}</button>
-                    " "{text}
+                    " "{parts}
                 </span>
                 <span class="msg-time">{time::hm(msg.ts)}</span>
             </div>

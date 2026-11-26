@@ -339,6 +339,16 @@ pub fn attach_files(c: Ctx, chat: ChatId, thread: Option<Timestamp>, files: Vec<
     if files.is_empty() {
         return;
     }
+    // Pasted or dropped where Telemost would refuse them: a pasted file is not kept either.
+    if !c
+        .snap
+        .with_untracked(|s| s.chat(&chat).is_none_or(|ch| ch.can(Right::SendAttachments)))
+    {
+        for f in files {
+            forget_pasted(c, f.path);
+        }
+        return c.error.set(Some(tr().no_files_here.into()));
+    }
     c.pending_files.update(|all| {
         let list = all.entry((chat, thread)).or_default();
         for f in files {

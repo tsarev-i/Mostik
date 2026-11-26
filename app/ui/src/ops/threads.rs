@@ -14,6 +14,55 @@ use super::chats::load_latest;
 use super::snapshot::in_sight;
 use super::{failed, learn_users};
 
+thread_local! {
+    /// Threads Telemost said the user stopped following ([`LiveEvent::ThreadLeft`]), each with
+    /// the number of list loads ([`LOADS`]) started by then. A reply there does not bring one
+    /// back, though the parent is the user's; Telemost's word does: the user's own reply or a
+    /// mention there, [`LiveEvent::ThreadJoined`], or a list that has it and was asked for after
+    /// the user left (the backend keeps out of its lists the threads left on its connection).
+    static LEFT: std::cell::RefCell<std::collections::HashMap<(ChatId, Timestamp), u64>> = Default::default();
+    /// Loads of the followed-thread list started ([`load_threads`]).
+    static LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many threads [`LEFT`] remembers; then it starts afresh.
+const LEFT_MAX: usize = 200;
+
+/// The user no longer follows the thread of message `parent`: it leaves the list.
+pub(super) fn leave_thread(c: Ctx, chat_id: ChatId, parent: Timestamp) {
+    c.threads
+        .update(|list| list.retain(|t| t.parent.chat_id != chat_id || t.parent.ts != parent));
+    LEFT.with_borrow_mut(|left| {
+        if left.len() >= LEFT_MAX {
+            left.clear();
+        }
+        left.insert((chat_id, parent), LOADS.get());
+    });
+}
+
+/// Telemost made the user follow the thread of message `parent` again.
+pub(super) fn rejoin_thread(chat_id: ChatId, parent: Timestamp) {
+    LEFT.with_borrow_mut(|left| left.remove(&(chat_id, parent)));
+}
+
+/// Takes a list from the backend into account: the threads in it that the user left before
+/// load number `load` went out are followed again; the others left stay out of it.
+fn settle_left(threads: &mut Vec<FollowedThread>, load: u64) {
+    LEFT.with_borrow_mut(|left| {
+        threads.retain(|t| {
+            let key = (t.parent.chat_id.clone(), t.parent.ts);
+            match left.get(&key) {
+                Some(by) if *by >= load => false,
+                Some(_) => {
+                    left.remove(&key);
+                    true
+                }
+                None => true,
+            }
+        })
+    });
+}
+
 pub fn open_thread(c: Ctx, parent: Timestamp) {
     c.profile.set(None);
     c.thread.set(Some(parent));
@@ -101,10 +150,13 @@ pub fn load_threads(c: Ctx) {
         c.threads.set(list);
         return;
     }
+    let load = LOADS.get() + 1;
+    LOADS.set(load);
     spawn_local(async move {
         match bridge::followed_threads().await {
-            Ok(t) => {
+            Ok(mut t) => {
                 c.snap.update(|s| learn_users(s, t.users));
+                settle_left(&mut t.threads, load);
                 c.threads.set(t.threads);
             }
             Err(e) => leptos::logging::warn!("threads: {e}"),
@@ -114,7 +166,10 @@ pub fn load_threads(c: Ctx) {
 
 /// Takes a freshly fetched thread list. A thread that got replies since the fetch went out
 /// keeps its newer local state; one only known locally (just replied in) stays.
-pub(super) fn merge_threads(c: Ctx, fresh: Vec<FollowedThread>) {
+pub(super) fn merge_threads(c: Ctx, mut fresh: Vec<FollowedThread>) {
+    // The backend checks the list against the threads left on its connection as it sends it:
+    // it is newer than any departure the UI has seen.
+    settle_left(&mut fresh, u64::MAX);
     c.threads.update(|list| {
         let same =
             |a: &FollowedThread, b: &FollowedThread| a.parent.chat_id == b.parent.chat_id && a.parent.ts == b.parent.ts;
@@ -152,6 +207,13 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
         (s.me.clone(), mentioned, parent_msg)
     });
     let mine = m.author == me;
+    let key = (m.chat_id.clone(), parent);
+    let left = if mine || mentioned {
+        LEFT.with_borrow_mut(|left| left.remove(&key));
+        false
+    } else {
+        LEFT.with_borrow(|left| left.contains_key(&key))
+    };
     let open =
         c.current.with_untracked(|cur| cur == &m.chat_id) && c.thread.get_untracked() == Some(parent) && in_sight();
     let mut read_now = false;
@@ -161,7 +223,7 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
             .position(|t| t.parent.chat_id == m.chat_id && t.parent.ts == parent);
         let at = match (at, parent_msg) {
             (Some(i), _) => i,
-            (None, Some(p)) if mine || mentioned || p.author == me => {
+            (None, Some(p)) if mine || mentioned || (p.author == me && !left) => {
                 list.push(FollowedThread {
                     parent: p,
                     unread: 0,
@@ -250,4 +312,62 @@ pub fn open_followed_thread(c: Ctx, parent: Message) {
             }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread(ts: Timestamp) -> FollowedThread {
+        FollowedThread {
+            parent: Message {
+                chat_id: ChatId("c".into()),
+                ts,
+                author: UserId("me".into()),
+                text: String::new(),
+                thread_parent: None,
+                edited: false,
+                important: false,
+                reactions: vec![],
+                thread: None,
+                seq_no: 0,
+                attachments: vec![],
+                forwarded: vec![],
+                call: None,
+                system: None,
+                media: None,
+                reads: None,
+            },
+            unread: 0,
+            last_ts: ts,
+            last_seq: 0,
+            seen_seq: None,
+        }
+    }
+
+    fn left(ts: Timestamp) -> bool {
+        LEFT.with_borrow(|l| l.contains_key(&(ChatId("c".into()), ts)))
+    }
+
+    /// A list asked for before the user left a thread keeps it out; one asked for after that
+    /// has the word, and a thread in it is followed again.
+    #[test]
+    fn a_list_from_before_the_departure_does_not_bring_the_thread_back() {
+        LOADS.set(3);
+        LEFT.with_borrow_mut(|l| {
+            l.clear();
+            // Left while load 3 was out, and before load 2.
+            l.insert((ChatId("c".into()), 1), 3);
+            l.insert((ChatId("c".into()), 2), 1);
+        });
+        let mut list = vec![thread(1), thread(2), thread(5)];
+        settle_left(&mut list, 3);
+        assert_eq!(list.iter().map(|t| t.parent.ts).collect::<Vec<_>>(), [2, 5]);
+        assert!(left(1) && !left(2));
+        // A later list (or the backend's own, checked as it was sent) settles the first one too.
+        let mut list = vec![thread(1)];
+        settle_left(&mut list, u64::MAX);
+        assert_eq!(list.len(), 1);
+        assert!(!left(1));
+    }
 }

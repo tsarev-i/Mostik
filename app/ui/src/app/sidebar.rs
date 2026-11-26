@@ -97,7 +97,9 @@ pub(super) fn Sidebar() -> impl IntoView {
                 </div>
                 <For
                     each=move || c.sections.get()
-                    key=|sec| (sec.id.clone(), sec.title.clone(), sec.chats.clone())
+                    // Not by the chats: a section reads them itself, so a new message reordering
+                    // them does not build the whole section again.
+                    key=|sec| (sec.id.clone(), sec.title.clone())
                     children=move |sec: Section| view! { <SidebarSection section=sec/> }
                 />
                 <Show when=move || searching(c) && !any_found(c) && elsewhere.with(|(ch, p)| ch.is_empty() && p.is_empty())>
@@ -418,15 +420,24 @@ fn SidebarSection(section: Section) -> impl IntoView {
     };
     let section_id = section.id.clone();
     // Section conversations after the sidebar filter and sorting.
+    let chats = {
+        let id = section.id.clone();
+        Memo::new(move |_| {
+            c.sections
+                .with(|all| all.iter().find(|s| s.id == id).map(|s| s.chats.clone()))
+                .unwrap_or_default()
+        })
+    };
     let visible = {
-        let (chats, section_id) = (section.chats.clone(), section.id.clone());
+        let section_id = section.id.clone();
         Memo::new(move |_| {
             let (filter, hide_muted) = c.settings.with(|s| (s.sidebar_filter, s.hide_muted));
             let query = c.sb_query.with(|q| q.trim().to_owned());
             let current = chat_in_pane(c);
             let now = ops::now_mcs();
             c.snap.with(|s| {
-                section_order(c, s, &section_id, &chats)
+                chats
+                    .with(|chats| section_order(c, s, &section_id, chats))
                     .iter()
                     .filter_map(|id| s.chat(id))
                     .filter(|ch| {
@@ -467,6 +478,20 @@ fn SidebarSection(section: Section) -> impl IntoView {
         })
     };
     let empty = Memo::new(move |_| visible.with(Vec::is_empty));
+    // The rows shown. A collapsed section still shows chats with unread messages, the open chat
+    // included only when it has them. Found conversations show in collapsed sections too.
+    let rows = Memo::new(move |_| {
+        let folded = collapsed.get() && !searching(c);
+        let ids = visible.get();
+        if !folded {
+            return ids;
+        }
+        c.snap.with(|s| {
+            ids.into_iter()
+                .filter(|id| s.chat(id).is_some_and(|ch| ch.unread > 0 && !ch.muted))
+                .collect()
+        })
+    });
     // The section icon, as in Slack; a folder has its emoji instead, or nothing.
     let icon = section_icon(&section_id);
     let emoji = {
@@ -535,18 +560,14 @@ fn SidebarSection(section: Section) -> impl IntoView {
                     </button>
                 </div>
                 </div>
-                {let section_id = section_id.clone(); move || {
-                    // A collapsed section still shows chats with unread messages, the open chat included only
-                    // when it has them. Found conversations show in collapsed sections too.
-                    let folded = collapsed.get() && !searching(c);
-                    visible
-                        .get()
-                        .into_iter()
-                        .filter(|id| {
-                            !folded || c.snap.with(|s| s.chat(id).is_some_and(|ch| ch.unread > 0 && !ch.muted))
-                        })
-                        .map(|id| view! { <ChatRow id=id section=section_id.clone()/> })
-                        .collect_view()
+                // Keyed: a chat moving up keeps its row, so a reordered section does not build all its
+                // rows again (and blink every avatar in it).
+                {let section_id = section_id.clone(); view! {
+                    <For
+                        each=move || rows.get()
+                        key=|id| id.clone()
+                        children=move |id| view! { <ChatRow id=id section=section_id.clone()/> }
+                    />
                 }}
                 {(section_id == "dms").then(|| view! {
                     <Show when=move || !collapsed.get() && !searching(c)>

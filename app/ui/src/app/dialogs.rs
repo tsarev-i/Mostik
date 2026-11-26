@@ -272,6 +272,7 @@ pub(super) fn ForwardDialog(msg: Message) -> impl IntoView {
             let mut list: Vec<&Chat> = s
                 .chats
                 .iter()
+                .filter(|ch| ch.can(Right::Write))
                 .filter(|ch| q.is_empty() || display_title(s, ch).to_lowercase().contains(&q))
                 .collect();
             list.sort_by_key(|ch| std::cmp::Reverse(ch.last_ts));

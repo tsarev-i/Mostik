@@ -151,8 +151,8 @@ pub(super) fn InlineEditor(msg: Message) -> impl IntoView {
                         }
                         "Enter" => {
                             e.prevent_default();
-                            if let Some(el) = area.get_untracked() {
-                                text.set(insert_text(&el, "\n", 0));
+                            if let Some(t) = field.edit(|el| insert_text(el, "\n", 0)) {
+                                text.set(t);
                             }
                         }
                         _ => {}
@@ -204,8 +204,38 @@ fn reveal_editor(area: &web_sys::HtmlElement) {
     }
 }
 
+/// The message field of the open chat, or with `thread` of its open thread; in a chat where the
+/// user may not write (a channel they only read), a line that says so instead. It is not a
+/// `composer-wrap`, so files dropped there are not taken either.
 #[component]
 pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
+    let c = ctx();
+    let may_post = Memo::new(move |_| {
+        let id = c.current.get();
+        c.snap.with(|s| s.chat(&id).is_none_or(|ch| ch.can_post(thread)))
+    });
+    move || {
+        if may_post.get() {
+            view! { <MessageField thread/> }.into_any()
+        } else {
+            let text = if thread {
+                tr().read_only_threads
+            } else {
+                tr().read_only_chat
+            };
+            view! {
+                <div class=if thread { "read-only-note in-thread" } else { "read-only-note" }>
+                    <Icon icon=I::Lock size=14/>
+                    <span>{text}</span>
+                </div>
+            }
+            .into_any()
+        }
+    }
+}
+
+#[component]
+fn MessageField(thread: bool) -> impl IntoView {
     let c = ctx();
     let (draft, set_draft) = signal(String::new());
     let sending = RwSignal::new(false);
@@ -230,8 +260,15 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
     });
     let can_important = Memo::new(move |_| {
         let id = c.current.get();
+        c.snap.with(|s| {
+            s.chat(&id)
+                .is_some_and(|ch| ch.kind != ChatKind::Broadcast && ch.can(Right::MarkAsImportant))
+        })
+    });
+    let can_attach = Memo::new(move |_| {
+        let id = c.current.get();
         c.snap
-            .with(|s| s.chat(&id).is_some_and(|ch| ch.kind != ChatKind::Broadcast))
+            .with(|s| s.chat(&id).is_none_or(|ch| ch.can(Right::SendAttachments)))
     });
 
     // The field shows the draft: a restored draft, a sent message clearing it, formatting. Typing
@@ -262,9 +299,19 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             Some(DraftKey::Chat(chat))
         }
     });
+    let remember = move |text: &str| {
+        if let Some(key) = field_key.get_untracked() {
+            drafts::set_text(c, &key, text, None);
+        }
+    };
+    let field = crate::compose::Field::new(area, move |text| {
+        remember(&text);
+        set_draft.set(text);
+    });
     // Its draft: filled in when the field becomes another chat's or thread's, saved while typing.
     // A change from elsewhere shows too: a message sent from this field before it was built
-    // again clears the draft when it has gone, and "Drafts" can delete it.
+    // again clears the draft when it has gone, and "Drafts" can delete it. Ctrl+Z does not go
+    // back from it into what the field showed before.
     Effect::new(move |_| {
         let stored = field_key.with(|k| {
             k.as_ref()
@@ -272,6 +319,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         });
         let stored = stored.unwrap_or_default();
         if draft.with_untracked(|d| *d != stored) {
+            field.reset_history();
             set_draft.set(stored);
         }
     });
@@ -297,12 +345,9 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         field_key.track();
         silent.set(false);
         important.set(false);
+        // Another chat's field: Ctrl+Z does not go back into the one before, even with both empty.
+        field.reset_history();
     });
-    let remember = move |text: &str| {
-        if let Some(key) = field_key.get_untracked() {
-            drafts::set_text(c, &key, text, None);
-        }
-    };
 
     let placeholder = move || {
         if thread {
@@ -383,6 +428,8 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     }
                     let same_place = c.current.get_untracked() == chat_for_draft && parent() == thread_parent;
                     if same_place && draft.try_get_untracked().is_some_and(|d| unchanged(&d)) {
+                        // Ctrl+Z does not bring back what has gone.
+                        field.reset_history();
                         set_draft.set(String::new());
                     }
                 }
@@ -395,45 +442,41 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
         let Some(pick) = suggestions.with_untracked(|s| s.get(i).cloned()) else {
             return;
         };
-        if let Some(el) = area.get_untracked() {
-            let text = match pick {
-                Suggestion::Emoji { glyph, code } => {
-                    crate::emoji::remember(crate::emoji::Source::Text, glyph);
-                    insert_text(
-                        &el,
-                        glyph,
-                        code.len().min(emoji_query(&el).map_or(0, |q| q.chars().count())) + 1,
-                    )
-                }
-                Suggestion::Custom(e) => {
-                    let code = mostik_core::custom_emoji::caption(&e.name);
-                    crate::emoji::remember(crate::emoji::Source::Text, &code);
-                    insert_text(&el, &code, emoji_query(&el).map_or(0, |q| q.chars().count()) + 1)
-                }
-                Suggestion::Person(_) | Suggestion::Channel(_) | Suggestion::All => {
-                    let name = match pick {
-                        Suggestion::Person(u) => {
-                            c.picked.update(|p| {
-                                p.insert(u.display_name.clone(), u.id);
-                            });
-                            u.display_name
-                        }
-                        Suggestion::Channel(n) => n,
-                        _ => MENTION_ALL.to_owned(),
-                    };
-                    let typed = mention_query(&el).map_or(0, |q| q.chars().count() + 1);
-                    insert_text(&el, &format!("@{name} "), typed)
-                }
-            };
+        let picked = field.edit(|el| match pick {
+            Suggestion::Emoji { glyph, code } => {
+                crate::emoji::remember(crate::emoji::Source::Text, glyph);
+                insert_text(
+                    el,
+                    glyph,
+                    code.len().min(emoji_query(el).map_or(0, |q| q.chars().count())) + 1,
+                )
+            }
+            Suggestion::Custom(e) => {
+                let code = mostik_core::custom_emoji::caption(&e.name);
+                crate::emoji::remember(crate::emoji::Source::Text, &code);
+                insert_text(el, &code, emoji_query(el).map_or(0, |q| q.chars().count()) + 1)
+            }
+            Suggestion::Person(_) | Suggestion::Channel(_) | Suggestion::All => {
+                let name = match pick {
+                    Suggestion::Person(u) => {
+                        c.picked.update(|p| {
+                            p.insert(u.display_name.clone(), u.id);
+                        });
+                        u.display_name
+                    }
+                    Suggestion::Channel(n) => n,
+                    _ => MENTION_ALL.to_owned(),
+                };
+                let typed = mention_query(el).map_or(0, |q| q.chars().count() + 1);
+                insert_text(el, &format!("@{name} "), typed)
+            }
+        });
+        if let Some(text) = picked {
             remember(&text);
             set_draft.set(text);
         }
         suggestions.set(vec![]);
     };
-    let field = crate::compose::Field::new(area, move |text| {
-        remember(&text);
-        set_draft.set(text);
-    });
     if !thread {
         crate::compose::attach_dropped(c);
     }
@@ -470,8 +513,7 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
             // A line break of our own: the browser would put the new line in a block.
             "Enter" => {
                 ev.prevent_default();
-                if let Some(el) = area.get_untracked() {
-                    let text = insert_text(&el, "\n", 0);
+                if let Some(text) = field.edit(|el| insert_text(el, "\n", 0)) {
                     remember(&text);
                     set_draft.set(text);
                 }
@@ -484,6 +526,10 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                 let chat = c.current.get_untracked();
                 let tp = parent();
                 let last = c.snap.with_untracked(|s| {
+                    // Not where Telemost does not let the user edit.
+                    if !s.chat(&chat).is_none_or(|ch| ch.can(Right::EditMessage)) {
+                        return None;
+                    }
                     s.messages
                         .iter()
                         .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && !m.is_note())
@@ -604,19 +650,21 @@ pub(super) fn Composer(#[prop(optional)] thread: bool) -> impl IntoView {
                     </div>
                 </Show>
                 <div class="composer-bottom">
-                    <button class="cb round" title=tr().attach on:click=move |_| {
-                        if !c.live {
-                            return c.error.set(Some(tr().only_in_app_files.into()));
-                        }
-                        // The files go to the chat or thread the dialog was opened in.
-                        let (chat, thread_parent) = (c.current.get_untracked(), parent());
-                        spawn_local(async move {
-                            match bridge::pick_files().await {
-                                Ok(files) => ops::attach_files(c, chat, thread_parent, files),
-                                Err(e) => c.error.set(Some(e)),
+                    <Show when=move || can_attach.get()>
+                        <button class="cb round" title=tr().attach on:click=move |_| {
+                            if !c.live {
+                                return c.error.set(Some(tr().only_in_app_files.into()));
                             }
-                        });
-                    }><Icon icon=I::Plus size=16/></button>
+                            // The files go to the chat or thread the dialog was opened in.
+                            let (chat, thread_parent) = (c.current.get_untracked(), parent());
+                            spawn_local(async move {
+                                match bridge::pick_files().await {
+                                    Ok(files) => ops::attach_files(c, chat, thread_parent, files),
+                                    Err(e) => c.error.set(Some(e)),
+                                }
+                            });
+                        }><Icon icon=I::Plus size=16/></button>
+                    </Show>
                     <crate::compose::EmojiButton field class="cb" size=18/>
                     // Pressing them keeps the caret in the field.
                     <Show when=move || can_silent.get()>

@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Chat, ChatFolder, ChatId, FollowedThread, Meeting, Message, NotifyLevel, Pause, PresenceInfo, Reaction, Reads,
-    Timestamp, User, UserId,
+    Chat, ChatFolder, ChatId, FollowedThread, Meeting, Message, MyRole, NotifyLevel, Pause, PresenceInfo, Reaction,
+    Reads, Timestamp, User, UserId,
 };
 
 /// How the sender of a message wants the members told of it (`NotificationBehaviour`).
@@ -65,6 +65,9 @@ pub enum LiveEvent {
         ts: Timestamp,
         reactions: Vec<Reaction>,
         users: Vec<User>,
+        /// `ReactionsVersion`: one more with every reaction to the message; 0 if not reported.
+        #[serde(default)]
+        version: u64,
     },
     /// The user read the chat (possibly on another device).
     Seen {
@@ -114,6 +117,20 @@ pub enum LiveEvent {
         threads: Vec<FollowedThread>,
         users: Vec<User>,
     },
+    /// Telemost made the user follow the thread of message `parent` (`you_added_to_thread`),
+    /// for a mention, say. Its replies notify; the UI gets the thread list fetched again and
+    /// lets the thread back into it if the user had left it.
+    ThreadJoined {
+        chat_id: ChatId,
+        parent: Timestamp,
+    },
+    /// Telemost made the user stop following the thread of message `parent`
+    /// (`you_removed_from_thread`): they unfollowed it elsewhere, or their only reply there was
+    /// deleted. Its replies no longer notify, and the thread leaves the thread list.
+    ThreadLeft {
+        chat_id: ChatId,
+        parent: Timestamp,
+    },
     /// The user is in a new chat: created it, was added to it, or someone started a direct chat.
     /// For the backend: it normally swallows this one, fetches the chat and sends
     /// [`LiveEvent::ChatAdded`] instead. The UI ignores it if it gets through.
@@ -130,6 +147,11 @@ pub enum LiveEvent {
         name: Option<String>,
         description: Option<String>,
         member_count: Option<u32>,
+    },
+    /// The user's role or rights in the chat changed (`roles_changed`).
+    RoleChanged {
+        chat_id: ChatId,
+        role: MyRole,
     },
     /// The chat folders of every organization, after a change on any device.
     Folders {
@@ -222,6 +244,20 @@ mod tests {
             }),
         );
         pinned(
+            LiveEvent::RoleChanged {
+                chat_id: chat("c1"),
+                role: MyRole {
+                    admin: false,
+                    rights: 12,
+                    version: 5,
+                },
+            },
+            json!({
+                "type": "role_changed", "chat_id": "c1",
+                "role": { "admin": false, "rights": 12, "version": 5 },
+            }),
+        );
+        pinned(
             LiveEvent::Connection { online: true },
             json!({ "type": "connection", "online": true }),
         );
@@ -290,6 +326,13 @@ mod tests {
                 "type": "meeting", "chat_id": "c1", "url": "https://telemost.yandex.ru/j/1",
                 "started": 100, "participants": 2, "ended": false,
             }),
+        );
+        pinned(
+            LiveEvent::ThreadLeft {
+                chat_id: chat("c1"),
+                parent: 42,
+            },
+            json!({ "type": "thread_left", "chat_id": "c1", "parent": 42 }),
         );
         pinned(
             LiveEvent::Paused { pause: None },

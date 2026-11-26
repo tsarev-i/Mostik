@@ -19,6 +19,7 @@ mod settings;
 mod storage;
 mod text_edit;
 mod time;
+mod undo;
 
 fn main() {
     console_error_panic_hook::set_once();

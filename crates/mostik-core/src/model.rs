@@ -195,6 +195,84 @@ pub struct Chat {
     /// while the chat was in view, with "Mark as read on open" off. Kept for this session only.
     #[serde(default, skip)]
     pub uncounted: Vec<u64>,
+    /// The user's role and rights in the chat (`MyRole`), when Telemost said: a chat that came
+    /// otherwise (created, joined, found) allows everything until the next chat list.
+    #[serde(default)]
+    pub role: Option<MyRole>,
+}
+
+/// The user's role in a chat and what it lets them do: `MyRole` of the chat list, `chat_member`
+/// of a `roles_changed` push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MyRole {
+    /// Telemost's `Role` 2 ("admin"); 1 is a member, and a channel's subscriber has none.
+    pub admin: bool,
+    /// A bit per right, by [`Right`].
+    pub rights: u64,
+    /// Grows with every change of the role, so an older change does not undo a newer one.
+    pub version: u64,
+}
+
+impl MyRole {
+    pub fn can(&self, right: Right) -> bool {
+        self.rights >> (right as u32) & 1 == 1
+    }
+
+    /// The bits of the rights named as `roles_changed` names them; unknown names are left out.
+    pub fn rights_of<'a>(names: impl IntoIterator<Item = &'a str>) -> u64 {
+        names
+            .into_iter()
+            .filter_map(Right::named)
+            .fold(0, |bits, r| bits | 1 << (r as u32))
+    }
+}
+
+/// A right of [`MyRole::rights`], by its bit in Telemost's `MyRole.Rights`. Matched on 2026-11-24
+/// against two pushes that list the rights by name (`roles_changed` of a group, 15 names, and
+/// `you_added_to_thread`, 10): the names go up with the bits. The bits only admins have (4, 7,
+/// 9, 11–13, 25) and bit 11 of direct chats are not named yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Right {
+    Leave = 1,
+    Read = 2,
+    Write = 3,
+    AddUsers = 6,
+    ListMembers = 8,
+    MarkAsImportant = 10,
+    EditMessage = 14,
+    WriteToThread = 15,
+    ManageMeetings = 16,
+    SendStickers = 18,
+    SendReactions = 19,
+    SendAttachments = 20,
+    DownloadFiles = 21,
+    MakeExtCall = 22,
+    Share = 23,
+}
+
+impl Right {
+    const ALL: [(Right, &'static str); 15] = [
+        (Right::Leave, "leave"),
+        (Right::Read, "read"),
+        (Right::Write, "write"),
+        (Right::AddUsers, "add_users"),
+        (Right::ListMembers, "list_members"),
+        (Right::MarkAsImportant, "mark_as_important"),
+        (Right::EditMessage, "edit_message"),
+        (Right::WriteToThread, "write_to_thread"),
+        (Right::ManageMeetings, "manage_meetings"),
+        (Right::SendStickers, "send_stickers"),
+        (Right::SendReactions, "send_reactions"),
+        (Right::SendAttachments, "send_attachments"),
+        (Right::DownloadFiles, "download_files"),
+        (Right::MakeExtCall, "make_ext_call"),
+        (Right::Share, "share"),
+    ];
+
+    /// The right Telemost names `name`.
+    pub fn named(name: &str) -> Option<Right> {
+        Self::ALL.iter().find(|(_, n)| *n == name).map(|(r, _)| *r)
+    }
 }
 
 /// User's organization: a "workspace" in Slack terms.
@@ -889,7 +967,19 @@ impl Chat {
             last_seq: 0,
             seen_seq: None,
             uncounted: vec![],
+            role: None,
         }
+    }
+
+    /// Whether the user may do `right` here: as far as known, so a chat without a known role
+    /// allows everything, and Telemost has the last word.
+    pub fn can(&self, right: Right) -> bool {
+        self.role.is_none_or(|r| r.can(right))
+    }
+
+    /// Whether the user may write here: in the chat itself, or with `thread` in its threads.
+    pub fn can_post(&self, thread: bool) -> bool {
+        self.can(if thread { Right::WriteToThread } else { Right::Write })
     }
 
     /// The Telemost sidebar section the chat belongs to by its kind: `dms`, `meetings` or
@@ -993,6 +1083,44 @@ mod chat_icon_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rights by name of two pushes of 2026-11-24 make the masks the chat list had for the
+    /// same chats: the bits of the names are right.
+    #[test]
+    fn rights_by_name_match_the_chat_list_masks() {
+        let group = [
+            "leave",
+            "read",
+            "write",
+            "add_users",
+            "list_members",
+            "mark_as_important",
+            "edit_message",
+            "write_to_thread",
+            "manage_meetings",
+            "send_stickers",
+            "send_reactions",
+            "send_attachments",
+            "download_files",
+            "make_ext_call",
+            "share",
+        ];
+        assert_eq!(MyRole::rights_of(group), 16631118);
+        let thread = [
+            "leave",
+            "read",
+            "write",
+            "mark_as_important",
+            "edit_message",
+            "send_stickers",
+            "send_reactions",
+            "send_attachments",
+            "download_files",
+            "share",
+        ];
+        assert_eq!(MyRole::rights_of(thread), 12338190);
+        assert_eq!(MyRole::rights_of(["read", "no_such_right"]), 1 << 2);
+    }
 
     /// A sticker's picture is on the public host, by an id that is a plain path, never elsewhere.
     #[test]
