@@ -25,20 +25,20 @@ impl ChatId {
         self.0.starts_with("0/58/")
     }
 
-    /// A direct chat with someone else: the two users' GUIDs, `<guid>_<guid>`. "Notes", the
-    /// chat with oneself, has the same GUID twice and is not one.
-    pub fn is_direct(&self) -> bool {
+    /// A personal chat: the two users' GUIDs, `<guid>_<guid>`. A direct chat with someone else,
+    /// or "Notes", the chat with oneself, with the same GUID twice.
+    pub fn is_personal(&self) -> bool {
         !self.0.contains('/')
             && self
                 .0
                 .split_once('_')
-                .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !b.contains('_') && a != b)
+                .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !b.contains('_'))
     }
 
-    /// Messages here can have threads, as in the web client: in groups (`0/<ns>/<uuid>`) and
-    /// direct chats, not in channels (`1/…`) and "Notes".
+    /// Messages here can have threads: in groups (`0/<ns>/<uuid>`), direct chats and "Notes",
+    /// not in channels (`1/…`). The web client offers none in "Notes", but Telemost keeps them.
     pub fn has_threads(&self) -> bool {
-        self.0.starts_with("0/") || self.is_direct()
+        self.0.starts_with("0/") || self.is_personal()
     }
 }
 
@@ -1379,18 +1379,10 @@ mod tests {
     fn chats_with_threads() {
         let id = |s: &str| ChatId(s.into());
         assert!(id("0/0/a").has_threads() && id("0/22/a").has_threads());
-        assert!(id("aa_bb").is_direct() && id("aa_bb").has_threads());
-        // "Notes", channels and thread chats have none.
-        for none in [
-            "aa_aa",
-            "1/0/a",
-            "100/0/a_1",
-            "110/0/aa_bb_1",
-            "aa",
-            "aa_",
-            "_bb",
-            "aa_bb_cc",
-        ] {
+        // A direct chat and "Notes".
+        assert!(id("aa_bb").has_threads() && id("aa_aa").has_threads());
+        // Channels and thread chats have none.
+        for none in ["1/0/a", "100/0/a_1", "110/0/aa_bb_1", "aa", "aa_", "_bb", "aa_bb_cc"] {
             assert!(!id(none).has_threads(), "{none}");
         }
     }

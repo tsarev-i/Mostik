@@ -35,16 +35,17 @@ pub fn count32(x: u64) -> u32 {
 }
 
 /// Thread chat for message `ts` of chat `chat_id`: a group `0/<ns>/<uuid>` →
-/// `100/<ns>/<uuid>_<ts>`, a direct chat `<guid>_<guid>` → `110/0/<guid>_<guid>_<ts>`. Verified
-/// on a live session (direct chats on 2026-11-27); channels and "Notes" have no threads, as in the
-/// web client. Which chats have them is [`ChatId::has_threads`].
+/// `100/<ns>/<uuid>_<ts>`, a personal chat `<guid>_<guid>` (direct or "Notes") →
+/// `110/0/<guid>_<guid>_<ts>`. Verified on a live session on 2026-11-27 (direct chats by the web
+/// client, "Notes" by `mostik-selftest --notes-thread`); channels have no threads. Which chats
+/// have them is [`ChatId::has_threads`].
 pub fn thread_chat_id(chat_id: &str, ts: Timestamp) -> Option<String> {
     if let Some(rest) = chat_id.strip_prefix("0/") {
         let (ns, uuid) = rest.split_once('/')?;
         return (!uuid.is_empty() && !uuid.contains('/')).then(|| format!("100/{ns}/{uuid}_{ts}"));
     }
     ChatId(chat_id.to_owned())
-        .is_direct()
+        .is_personal()
         .then(|| format!("110/0/{chat_id}_{ts}"))
 }
 
@@ -57,7 +58,7 @@ fn thread_parent(thread_id: &str) -> Option<(String, Timestamp)> {
     } else {
         let (chat, ts) = thread_id.strip_prefix("110/0/")?.rsplit_once('_')?;
         let chat = ChatId(chat.to_owned());
-        if !chat.is_direct() {
+        if !chat.is_personal() {
             return None;
         }
         (chat.0, ts)
@@ -1522,16 +1523,10 @@ mod tests {
         let thread = "110/0/aa-1_bb-2_42";
         assert_eq!(thread_chat_id(dm, 42).as_deref(), Some(thread));
         assert_eq!(thread_parent(thread), Some((dm.into(), 42)));
-        // "Notes" and channels have no threads; a direct thread has a direct chat for a parent.
-        assert_eq!(thread_chat_id("aa-1_aa-1", 42), None);
+        // Channels have no threads; a personal thread has a personal chat for a parent.
         assert_eq!(thread_chat_id("1/0/x", 42), None);
-        for not_direct in [
-            "110/0/aa-1_42",
-            "110/0/aa-1_aa-1_42",
-            "110/0/0/0/x_42",
-            "110/1/aa-1_bb-2_42",
-        ] {
-            assert_eq!(thread_parent(not_direct), None, "{not_direct}");
+        for not_personal in ["110/0/aa-1_42", "110/0/0/0/x_42", "110/1/aa-1_bb-2_42"] {
+            assert_eq!(thread_parent(not_personal), None, "{not_personal}");
         }
         // Telemost's ID and Mostik's "has threads" agree.
         for id in ["0/0/x", "0/22/x", dm, "aa-1_aa-1", "1/0/x", "100/0/x_1", thread] {
@@ -1577,6 +1572,36 @@ mod tests {
         assert_eq!(threads.len(), 1);
         let t = &threads[0];
         assert_eq!((t.parent.chat_id.0.as_str(), t.parent.ts, t.unread), (dm, 42, 1));
+    }
+
+    /// Threads of "Notes", the chat with oneself: the web client offers none, but Telemost keeps
+    /// them under the same `110/0/<chat>_<parent time>` as a direct chat's.
+    #[test]
+    fn notes_threads() {
+        let notes = "aa-1_aa-1";
+        let thread = "110/0/aa-1_aa-1_42";
+        assert_eq!(thread_chat_id(notes, 42).as_deref(), Some(thread));
+        assert_eq!(thread_parent(thread), Some((notes.into(), 42)));
+        assert!(ChatId(notes.into()).has_threads());
+
+        let me = UserId("aa-1".into());
+        let reply = json!({"ClientMessage": {"Plain": {"ChatId": thread, "Text": {"MessageText": "r"}}},
+                           "ServerMessageInfo": {"Timestamp": 50, "SeqNo": 1, "From": {"Guid": "aa-1"}}});
+        match from_push(&reply, Some(&me)) {
+            Some(LiveEvent::Upsert { message, .. }) => {
+                assert_eq!((message.chat_id.0.as_str(), message.thread_parent), (notes, Some(42)));
+            }
+            other => panic!("{other:?}"),
+        }
+        let seen = json!({"ClientMessage": {"SeenMarker": {"ChatId": thread, "Timestamp": 50, "SeqNo": 1}},
+                          "ServerMessageInfo": {"Timestamp": 50, "From": {"Guid": "aa-1"}}});
+        assert_eq!(
+            from_push(&seen, Some(&me)),
+            Some(LiveEvent::ThreadSeen {
+                chat_id: ChatId(notes.into()),
+                parent: 42
+            })
+        );
     }
 
     #[test]
