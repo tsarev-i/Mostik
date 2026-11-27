@@ -18,11 +18,6 @@ use super::feed::feed_names;
 use super::state::{Ctx, CtxMenu, CtxTarget, close_menus, ctx, selected_in_message, wants_native_menu};
 use super::text::render_text;
 
-/// Threads are supported in group chats (`0/<ns>/<uuid>`).
-fn threads_supported(chat: &ChatId) -> bool {
-    chat.0.starts_with("0/")
-}
-
 /// Avatars under a message with a thread, as in Slack.
 const MAX_THREAD_FACES: usize = 5;
 
@@ -276,7 +271,7 @@ pub(super) fn MessageRow(
             })
         }
     };
-    let reply_btn = (!in_thread && threads_supported(&chat_id)).then(|| {
+    let reply_btn = (!in_thread && chat_id.has_threads()).then(|| {
         view! {
             <Show when=move || can(Right::WriteToThread)>
                 <button title=tr().reply_in_thread on:click=open_thread><Icon icon=I::Threads size=16/></button>

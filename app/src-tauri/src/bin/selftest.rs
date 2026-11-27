@@ -521,7 +521,8 @@ async fn run() -> Res<()> {
     }
 }
 
-/// Read-only check that a thread chat ID is `100/<ns>/<parent uuid>_<parent ts>`.
+/// Read-only check that a thread chat ID is the one Mostik makes of its parent:
+/// `100/<ns>/<parent uuid>_<parent ts>` in a group, `110/0/<direct chat>_<parent ts>` in a direct chat.
 async fn threads(xiva: &XivaClient) -> Res<()> {
     let t = xiva
         .call("history", &wire::thread_list(0), 40)
@@ -546,10 +547,17 @@ async fn threads(xiva: &XivaClient) -> Res<()> {
         let uuid_ok = parent_chat
             .and_then(|p| p.rsplit('/').next())
             .is_some_and(|u| id.contains(u));
+        let ours = parent_chat
+            .zip(parent_ts)
+            .and_then(|(chat, ts)| mostik_yandex::convert::thread_chat_id(chat, ts));
+        let ours_ok = ours.as_deref() == Some(id);
         step(
             "thread ID",
-            tail_ok && uuid_ok,
-            format!("suffix is parent time: {tail_ok}; contains parent chat uuid: {uuid_ok}"),
+            tail_ok && uuid_ok && ours_ok,
+            format!(
+                "{}: suffix is parent time: {tail_ok}; contains parent chat uuid: {uuid_ok}; Mostik makes the same: {ours_ok}",
+                id_pattern(id)
+            ),
         );
     }
     Ok(())

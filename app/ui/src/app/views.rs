@@ -13,7 +13,7 @@ use crate::i18n::tr;
 use crate::icons::{I, Icon};
 use crate::{bridge, ops, time};
 
-use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, status_badge};
+use super::avatar::{Avatar, Mark, chat_face, display_title, kind_icon, place_title, status_badge};
 use super::composer::Composer;
 use super::drafts::{self, DraftKey};
 use super::feed::{Feed, call_title, chat_note_text};
@@ -35,7 +35,7 @@ pub(super) fn ThreadPane() -> impl IntoView {
     let title = Memo::new(move |_| {
         let id = c.current.get();
         c.snap
-            .with(|s| s.chat(&id).map(|ch| chat_title(s, ch)).unwrap_or_default())
+            .with(|s| s.chat(&id).map(|ch| place_title(s, ch)).unwrap_or_default())
     });
     let replies = Memo::new(move |_| {
         open.get()
@@ -47,7 +47,7 @@ pub(super) fn ThreadPane() -> impl IntoView {
             <header class="tp-header">
                 <div>
                     <div class="tp-title">{tr().thread}</div>
-                    <div class="tp-sub">{move || shown.get().then(|| format!("# {}", title.get()))}</div>
+                    <div class="tp-sub">{move || shown.get().then(|| title.get())}</div>
                 </div>
                 <button class="icon-btn" title=tr().close on:click=move |_| c.thread.set(None)>
                     <Icon icon=I::X/>
@@ -362,7 +362,7 @@ pub(super) fn ThreadsView() -> impl IntoView {
                 list.into_iter().map(|t| {
                     let (author, title, names, me_name, me_id) = c.snap.with(|s| (
                         s.user(&t.parent.author).cloned(),
-                        s.chat(&t.parent.chat_id).map(|ch| display_title(s, ch)).unwrap_or_default(),
+                        s.chat(&t.parent.chat_id).map(|ch| place_title(s, ch)).unwrap_or_default(),
                         s.mention_names(),
                         s.user(&s.me).map(|u| u.display_name.clone()).unwrap_or_default(),
                         s.me.clone(),
@@ -392,7 +392,7 @@ pub(super) fn ThreadsView() -> impl IntoView {
                             <span class="dm-body">
                                 <span class="dm-top">
                                     <span class="dm-name">{name}</span>
-                                    <span class="thread-where">{format!("# {title}")}</span>
+                                    <span class="thread-where">{title}</span>
                                     <span class="dm-time">{time::relative(t.last_ts)}</span>
                                 </span>
                                 <span class="thread-text">{text}</span>
