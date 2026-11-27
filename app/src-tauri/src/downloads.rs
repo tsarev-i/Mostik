@@ -164,7 +164,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
         .arg("-R")
         .arg(path)
         .spawn()
-        .map(drop)
+        .map(crate::backend::files::reap)
         .map_err(|e| format!("could not show the file: {e}"))
 }
 
@@ -198,7 +198,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
     crate::appimage::outside(&mut folder);
     folder
         .spawn()
-        .map(drop)
+        .map(crate::backend::files::reap)
         .map_err(|e| format!("could not show the file: {e}"))
 }
 

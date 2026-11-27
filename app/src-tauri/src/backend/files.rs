@@ -521,8 +521,17 @@ pub(crate) fn open_external(url: &str) -> Result<(), String> {
     crate::appimage::outside(&mut command);
     command
         .spawn()
-        .map(drop)
+        .map(reap)
         .map_err(|e| format!("could not open the browser: {e}"))
+}
+
+/// Waits for a started helper (`xdg-open`, `open`) on a thread of its own: a child no one waits
+/// for stays a zombie until Mostik exits, one for every link opened.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn reap(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// Opens a link or a file in the program the system has for it. ShellExecuteW, not
