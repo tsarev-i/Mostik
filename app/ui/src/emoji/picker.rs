@@ -234,14 +234,42 @@ pub fn EmojiPicker(
             busy.try_set(false);
         });
     };
+    // Sections built so far: all 1900 emoji at once keep the picker from showing for a while, so
+    // it opens with "Frequently used" and the first section and builds one more each frame.
+    let built = RwSignal::new(1usize);
+    let section_count = sections.len();
+    fn build_next(built: RwSignal<usize>, count: usize) {
+        request_animation_frame(move || {
+            // None once the picker is closed.
+            if built.try_update(|n| *n = (*n + 1).min(count)).is_some()
+                && built.get_untracked() < count
+            {
+                build_next(built, count);
+            }
+        });
+    }
+    build_next(built, section_count);
+    // A section just asked for may come into the page a frame or two later.
+    fn scroll_to_section(body: NodeRef<html::Div>, id: String, frames: u32) {
+        request_animation_frame(move || {
+            // Closed meanwhile: nothing to scroll.
+            let Some(b) = body.try_get_untracked().flatten() else { return };
+            match b.query_selector(&format!("[data-sec='{id}']")).ok().flatten() {
+                Some(el) => el.scroll_into_view(),
+                None if frames > 0 => scroll_to_section(body, id, frames - 1),
+                None => {}
+            }
+        });
+    }
     let jump = move |id: String| {
-        query.set(String::new());
-        if let Some(el) = body
-            .get_untracked()
-            .and_then(|b| b.query_selector(&format!("[data-sec='{id}']")).ok().flatten())
-        {
-            el.scroll_into_view();
+        // Clearing an empty search would build the whole grid again.
+        if !query.with_untracked(String::is_empty) {
+            query.set(String::new());
         }
+        if let Ok(i) = id.parse::<usize>() {
+            built.update(|n| *n = (*n).max(i + 1));
+        }
+        scroll_to_section(body, id, 10);
     };
 
     let grid = move || {
@@ -262,11 +290,16 @@ pub fn EmojiPicker(
                 <div class="ep-grid">{rec.into_iter().map(cell).collect_view()}</div>
             })}
             {sections.iter().enumerate().map(|(i, title)| {
-                let list: Vec<Item> = all.with_value(|all| all.iter().filter(|it| it.section == i).cloned().collect());
-                view! {
-                    <div class="ep-sec" data-sec=i.to_string()>{*title}</div>
-                    <div class="ep-grid">{list.into_iter().map(cell).collect_view()}</div>
-                }
+                let title = *title;
+                // A memo, so that building the next section leaves the ones built alone.
+                let shown = Memo::new(move |_| built.get() > i);
+                move || shown.get().then(|| {
+                    let list: Vec<Item> = all.with_value(|all| all.iter().filter(|it| it.section == i).cloned().collect());
+                    view! {
+                        <div class="ep-sec" data-sec=i.to_string()>{title}</div>
+                        <div class="ep-grid">{list.into_iter().map(cell).collect_view()}</div>
+                    }
+                })
             }).collect_view()}
         }
         .into_any()
