@@ -817,6 +817,7 @@ pub(super) fn message_menu_items(
         s.chat(&msg.chat_id)
             .map_or((true, true), |ch| (ch.can_post(in_pane), ch.can(Right::EditMessage)))
     });
+    let may_edit = may_edit && msg.editable();
     let copy = |text: String| {
         let _ = window().navigator().clipboard().write_text(&text);
     };

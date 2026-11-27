@@ -436,6 +436,13 @@ impl Message {
         self.call.is_some() || self.system.is_some()
     }
 
+    /// Whether the user can edit the message's text: not a file other than a picture, which
+    /// Telemost keeps without text (its caption goes as a message of its own, and a text added
+    /// in an edit is dropped).
+    pub fn editable(&self) -> bool {
+        !self.is_note() && !self.attachments.iter().any(|a| a.kind == AttachmentKind::File)
+    }
+
     /// The message this one replies to, with the quoted fragment if there is one.
     pub fn reply_to(&self) -> Option<&Forwarded> {
         match self.forwarded.as_slice() {
@@ -1288,6 +1295,27 @@ mod tests {
             media: None,
             reads: None,
         }
+    }
+
+    /// A file keeps no text in Telemost, so it is not offered for editing; a picture keeps its
+    /// caption.
+    #[test]
+    fn a_file_message_is_not_editable() {
+        let with = |kind| {
+            let mut m = msg("u1", 1);
+            m.attachments.push(Attachment {
+                kind,
+                file_id: "file/1".into(),
+                name: "a".into(),
+                size: 1,
+                width: 0,
+                height: 0,
+            });
+            m
+        };
+        assert!(msg("u1", 1).editable());
+        assert!(with(AttachmentKind::Image).editable());
+        assert!(!with(AttachmentKind::File).editable());
     }
 
     #[test]

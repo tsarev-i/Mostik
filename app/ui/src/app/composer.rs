@@ -532,7 +532,7 @@ fn MessageField(thread: bool) -> impl IntoView {
                     }
                     s.messages
                         .iter()
-                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && !m.is_note())
+                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && m.editable())
                         .max_by_key(|m| m.ts)
                         .cloned()
                 });
