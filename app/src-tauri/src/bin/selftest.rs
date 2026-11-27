@@ -9,7 +9,8 @@
 //! `-- --notes-thread` runs only the thread step, in "Notes", the chat with oneself: it writes a
 //! message and a reply in its thread there and deletes both.
 //! `-- --listen` prints every raw push as JSON until stopped (read-only; includes message texts).
-//! `-- --dump [list | <chat id>]` prints the raw chat list or the latest page of a chat (read-only).
+//! `-- --dump [list | threads | <chat id>]` prints the raw chat list, the list of followed threads or
+//! the latest page of a chat (read-only).
 //! `-- --buckets` prints the synced settings, `get_buckets` (read-only).
 //! `-- --search <query>` runs the global message search (no `chat_id`) in a few forms and prints
 //! how many messages each found in how many chats, and the shape of the answer, not the texts
@@ -306,6 +307,7 @@ async fn run() -> Res<()> {
     if let Some(i) = args.iter().position(|a| a == "--dump") {
         let req: Value = match args.get(i + 1).map(String::as_str) {
             Some("list") | None => serde_json::to_value(wire::chat_list(0)).map_err(|e| e.to_string())?,
+            Some("threads") => serde_json::to_value(wire::thread_list(0)).map_err(|e| e.to_string())?,
             Some(chat) => serde_json::to_value(HistoryRequest::page(chat, 30, None)).map_err(|e| e.to_string())?,
         };
         let v = xiva.call("history", &req, 40).await.map_err(|e| e.to_string())?;

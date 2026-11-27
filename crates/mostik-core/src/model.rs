@@ -596,6 +596,31 @@ pub struct FollowedThread {
 }
 
 impl FollowedThread {
+    /// Whether the thread has replies left, so "Threads" shows it: not once all of them are
+    /// deleted, though Telemost still has the user follow it. One with no known count has them.
+    pub fn has_replies(&self) -> bool {
+        self.parent.thread.as_ref().is_none_or(|t| t.reply_count > 0)
+    }
+
+    /// A new reply at `ts`: one more in the count, so a thread with all replies deleted is back.
+    /// An unknown count stays unknown.
+    pub fn add_reply(&mut self, ts: Timestamp) {
+        if let Some(t) = self.parent.thread.as_mut() {
+            t.reply_count = t.reply_count.saturating_add(1);
+            t.last_reply_ts = t.last_reply_ts.max(ts);
+        }
+    }
+
+    /// A reply deleted: one fewer in the count, and no more unread ones than are left (the reply
+    /// may have been an unread one not loaded). The thread stays followed with none left, out of
+    /// sight until a new reply.
+    pub fn remove_reply(&mut self) {
+        if let Some(t) = self.parent.thread.as_mut() {
+            t.reply_count = t.reply_count.saturating_sub(1);
+            self.unread = self.unread.min(t.reply_count);
+        }
+    }
+
     /// The thread is read up to its last known reply.
     pub fn read(&mut self) {
         self.unread = 0;
@@ -1385,6 +1410,46 @@ mod tests {
         for none in ["1/0/a", "100/0/a_1", "110/0/aa_bb_1", "aa", "aa_", "_bb", "aa_bb_cc"] {
             assert!(!id(none).has_threads(), "{none}");
         }
+    }
+
+    /// A followed thread whose replies are all deleted is out of sight, and a new reply brings
+    /// it back.
+    #[test]
+    fn followed_thread_replies() {
+        let mut t = FollowedThread {
+            parent: Message {
+                thread: Some(ThreadSummary {
+                    reply_count: 1,
+                    last_reply_ts: 20,
+                    participants: vec![],
+                }),
+                ..msg("a", 10)
+            },
+            unread: 1,
+            last_ts: 20,
+            last_seq: 1,
+            seen_seq: Some(0),
+        };
+        assert!(t.has_replies());
+        // The unread reply, not loaded, is deleted: nothing is left to read.
+        t.remove_reply();
+        assert!(!t.has_replies());
+        assert_eq!(t.unread, 0);
+        t.remove_reply();
+        t.add_reply(30);
+        assert!(t.has_replies());
+        let summary = t.parent.thread.as_ref().map(|s| (s.reply_count, s.last_reply_ts));
+        assert_eq!(summary, Some((1, 30)));
+        // No count known: it has replies, and stays unknown with one more or one fewer.
+        let mut unknown = FollowedThread {
+            parent: msg("a", 10),
+            unread: 2,
+            ..t
+        };
+        unknown.add_reply(40);
+        unknown.remove_reply();
+        assert!(unknown.has_replies());
+        assert_eq!((unknown.parent.thread, unknown.unread), (None, 2));
     }
 
     #[test]

@@ -343,6 +343,7 @@ pub(super) fn ThreadsView() -> impl IntoView {
     let c = ctx();
     let list = Memo::new(move |_| {
         let mut list = c.threads.get();
+        list.retain(FollowedThread::has_replies);
         list.sort_by_key(|t| (t.unread == 0, std::cmp::Reverse(t.last_ts)));
         list
     });

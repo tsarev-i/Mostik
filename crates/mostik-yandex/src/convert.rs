@@ -786,9 +786,25 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
         // The parent lives in the chat itself, whatever `Plain.ChatId` says.
         parent.chat_id = ChatId(parent_chat);
         parent.ts = parent_ts;
+        // `ThreadState` counts the deleted replies too; the thread chat's counters tell them
+        // apart. A thread whose replies are all deleted stays, with none: Telemost still has the
+        // user follow it ([`FollowedThread::has_replies`]).
+        let replies = n(chat, &["Counters", "TotalMessageCount"])
+            .map(|total| total.saturating_sub(n(chat, &["Counters", "HiddenMessageCount"]).unwrap_or(0)));
+        if let Some(replies) = replies {
+            parent
+                .thread
+                .get_or_insert(ThreadSummary {
+                    reply_count: 0,
+                    last_reply_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
+                    participants: vec![],
+                })
+                .reply_count = count32(replies);
+        }
         let last_seq = n(chat, &["LastSeqNo"]).unwrap_or(0);
+        let unread = last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0));
         out.push(FollowedThread {
-            unread: count32(last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0))),
+            unread: count32(replies.map_or(unread, |r| unread.min(r))),
             last_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
             last_seq,
             seen_seq: Some(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0)),
@@ -1512,6 +1528,34 @@ mod tests {
                 parent: 42
             })
         );
+    }
+
+    /// Deleted replies, as Telemost listed them on 2026-11-27: `ThreadState` and `LastSeqNo` still
+    /// count them, the thread chat's `Counters` keep them as `HiddenMessageCount`.
+    #[test]
+    fn followed_threads_without_deleted_replies() {
+        let thread = |id: &str, ts: u64, last: u64, seen: u64, total: u64, hidden: u64| {
+            json!({"ChatId": id, "LastSeqNo": last, "LastSeenByMeSeqNo": seen, "LastTsMcs": 90,
+                "Counters": {"TotalMessageCount": total, "HiddenMessageCount": hidden},
+                "ThreadParentMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/abc", "Text": {"MessageText": "p"}}},
+                    "ServerMessageInfo": {"Timestamp": ts, "From": {"Guid": "u1"},
+                        "ThreadState": {"LastSeqNo": last, "LastTsMcs": 90}}}})
+        };
+        let v = json!({"Chats": [
+            // Its only reply deleted unread: followed, with no replies and none unread.
+            thread("100/0/abc_1", 1, 1, 0, 1, 1),
+            // One of three deleted, unread ones among them.
+            thread("100/0/abc_2", 2, 3, 0, 3, 1),
+        ]});
+        let (threads, _) = followed_threads(&v, None);
+        let got: Vec<_> = threads
+            .iter()
+            .map(|t| {
+                let count = t.parent.thread.as_ref().map(|t| t.reply_count);
+                (t.parent.ts, count, t.unread, t.has_replies())
+            })
+            .collect();
+        assert_eq!(got, [(1, Some(0), 0, false), (2, Some(2), 2, true)]);
     }
 
     /// Threads of a direct chat, as the web client showed them on 2026-11-27: the thread chat is

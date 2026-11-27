@@ -309,21 +309,17 @@ pub fn remove(c: Ctx, chat: &ChatId, ts: Timestamp, thread_parent: Option<Timest
         c.older_changed.set(Some((chat.clone(), ts)));
     }
     c.threads.update(|list| match parent {
+        // With its last reply gone the thread stays, out of sight: Telemost still has the user
+        // follow it, and a new reply brings it back ([`FollowedThread::has_replies`]).
         Some(parent) => {
-            if let Some(i) = list
-                .iter()
-                .position(|t| &t.parent.chat_id == chat && t.parent.ts == parent)
+            if let Some(t) = list
+                .iter_mut()
+                .find(|t| &t.parent.chat_id == chat && t.parent.ts == parent)
             {
-                let t = &mut list[i];
                 if unread_reply {
                     t.unread = t.unread.saturating_sub(1);
                 }
-                if let Some(th) = t.parent.thread.as_mut() {
-                    th.reply_count = th.reply_count.saturating_sub(1);
-                    if th.reply_count == 0 {
-                        list.remove(i);
-                    }
-                }
+                t.remove_reply();
             }
         }
         None => list.retain(|t| !(&t.parent.chat_id == chat && t.parent.ts == ts)),
