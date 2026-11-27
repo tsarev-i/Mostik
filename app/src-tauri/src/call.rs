@@ -29,6 +29,9 @@ use tokio::sync::Mutex;
 /// The current call changed: [`CallInfo`] or `null` when there is no call.
 pub const CALL_EVENT: &str = "mostik://call";
 
+/// A button of the meeting page asked Mostik for something: [`CallRequest`].
+pub const ACTION_EVENT: &str = "mostik://call-action";
+
 /// Refusal to open a second call while one is open.
 pub const BUSY: &str = "another call is already open, leave it first";
 
@@ -43,6 +46,8 @@ const HEIGHT: f64 = 680.0;
 
 /// What the UI shows about the current call.
 pub use mostik_ipc::CallInfo;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use mostik_ipc::{CallAction, CallRequest};
 
 struct Active {
     info: CallInfo,
@@ -298,6 +303,56 @@ fn ended(app: &AppHandle, generation: u64) {
     }
 }
 
+/// "Chat" and "Invite to the meeting" of the meeting page, from the page script: the main window
+/// comes to the front and the UI opens the chat of the call or adds people to it, as the
+/// messenger around the page does in Telemost. Only for the call that is open now.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn requested(app: &AppHandle, generation: u64, action: &str) {
+    let action = match action {
+        "chat" => CallAction::Chat,
+        "invite" => CallAction::Invite,
+        _ => return,
+    };
+    let request = {
+        let state = app.state::<CallState>();
+        let Ok(active) = state.active.lock() else { return };
+        let Some(a) = active.as_ref().filter(|a| a.generation == generation) else {
+            return;
+        };
+        CallRequest {
+            action,
+            chat_id: a.info.chat_id.clone(),
+            url: a.url.clone(),
+        }
+    };
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = app2.get_webview_window("main") {
+            crate::webview::raise(&w);
+        }
+        let _ = app2.emit(ACTION_EVENT, &request);
+    });
+}
+
+/// The page script calls this function with "chat" or "invite" (Linux: a DevTools binding).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const BINDING: &str = "__mostikCall";
+
+/// Whether a link the meeting page opens in a new window goes to the user's browser: a page of
+/// another site, which has nothing to do in a window of the call's throwaway profile, over the
+/// call (a "Share" link to Telegram, help pages). Yandex pages stay in the call window's browser,
+/// which has the session (the account settings).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn elsewhere(url: &str) -> bool {
+    mostik_core::markup::safe_url(url)
+        && Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https") && !is_yandex(&u))
+}
+
+/// Where the page script asks for "chat" or "invite" without [`BINDING`] (Windows): a new window
+/// at `<ACTION_URL><action>`, which the call window refuses.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const ACTION_URL: &str = "https://mostik.invalid/call/";
+
 /// Where the page script sends the window once the call is over; the window then closes.
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const ENDED_URL: &str = "about:blank#mostik-call-ended";
@@ -331,10 +386,15 @@ pub fn meeting_page(url: &str, english: bool) -> String {
 /// has shown something, has no WebRTC connection left and stays blank for two seconds, it goes
 /// to [`ENDED_URL`] and the window closes. While any connection is open the window stays, even
 /// if the page hides all its controls.
+///
+/// "Chat" and "Invite to the meeting" go to Mostik (see [`requested`]).
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn page_script(title: &str) -> String {
     let t = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
     let ended = serde_json::to_string(ENDED_URL).unwrap_or_default();
+    let binding = serde_json::to_string(BINDING).unwrap_or_default();
+    let yandex = serde_json::to_string(&mostik_yandex::endpoints::YANDEX_DOMAINS).unwrap_or_default();
+    let action_url = serde_json::to_string(ACTION_URL).unwrap_or_default();
     format!(
         r#"(() => {{
   if (window.top !== window) return;
@@ -362,6 +422,96 @@ fn page_script(title: &str) -> String {
       e.stopPropagation();
       location.replace({ended});
     }}
+  }}, true);
+
+  // The page's Redux store, from the `store` of react-redux's `Provider` in React's tree. The
+  // page takes the messenger's answers only in a frame of the messenger, which the call window
+  // is not, so what the messenger would answer goes straight to the store.
+  let store = null;
+  const pageStore = () => {{
+    if (store) return store;
+    for (const el of document.querySelectorAll("body, body > div")) {{
+      const key = Object.keys(el).find(k => k.startsWith("__reactContainer$"));
+      if (!key) continue;
+      // The marker may be the root fiber of the first render: the mounted tree is its root's
+      // `current`.
+      const marker = el[key];
+      const stack = [marker, marker && marker.alternate, marker && marker.stateNode && marker.stateNode.current];
+      for (let n = 0; stack.length && n < 20000; n++) {{
+        const f = stack.pop();
+        if (!f) continue;
+        const s = f.memoizedProps && f.memoizedProps.store;
+        if (s && typeof s.dispatch === "function" && typeof s.getState === "function") return (store = s);
+        if (f.sibling) stack.push(f.sibling);
+        if (f.child) stack.push(f.child);
+      }}
+    }}
+    return null;
+  }};
+  const dispatch = action => {{
+    try {{ const s = pageStore(); if (s) s.dispatch(action); }} catch {{}}
+  }};
+
+  // "Chat", "Invite to the meeting" and "Settings" only tell the messenger around the page (a
+  // JSON string posted to the parent window, here the page itself). Mostik opens the chat or
+  // adds people; the settings are the page's own dialog, which it shows when not in the messenger.
+  const asks = {{ CHAT_OPEN: "chat", ADD_USERS_EVENT: "invite" }};
+  window.addEventListener("message", e => {{
+    if (e.source !== window || typeof e.data !== "string") return;
+    let m;
+    try {{ m = JSON.parse(e.data); }} catch {{ return; }}
+    if (m && m.event === "OPEN_SETTINGS") return dispatch({{ type: "settingsModal/setIsOpened", payload: true }});
+    const ask = m && Object.hasOwn(asks, m.event) ? asks[m.event] : null;
+    if (!ask) return;
+    const call = window[{binding}];
+    if (typeof call === "function") call(ask);
+    else window.open({action_url} + ask, "_blank");
+    // Until the messenger answers that the chat is open, the page keeps a spinner on "Chat" and
+    // takes no other click on it.
+    if (ask === "chat") dispatch({{ type: "chat/setIsChatLoading", payload: false }});
+  }});
+
+  // A link to another site the page opens in a new window goes to Mostik, which opens it in the
+  // user's browser rather than in a window of this throwaway profile over the call (see
+  // `elsewhere`); Yandex pages open here as the page means them to. Only with the binding
+  // (Linux); the Windows window sorts out its new windows itself. A link cancelled the old way
+  // (`return false` in `onclick`) is not told from one let through: the page does not do that.
+  const yandex = {yandex};
+  const webLink = url => {{
+    if (typeof window[{binding}] !== "function" || !url) return null;
+    let u;
+    try {{ u = new URL(String(url), location.href); }} catch {{ return null; }}
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    const host = u.hostname.toLowerCase();
+    return yandex.some(d => host === d || host.endsWith("." + d)) ? null : u.href;
+  }};
+  const openOut = url => {{
+    const href = webLink(url);
+    if (href) window[{binding}]("open:" + href);
+    return !!href;
+  }};
+  let pageOpened = false;
+  const nativeOpen = window.open;
+  // Only a new window: `_self`, `_top` or a named one keep what they are.
+  window.open = function (url, target, ...rest) {{
+    const fresh = target === undefined || target === "" || target === "_blank";
+    if (!fresh || !openOut(url)) return nativeOpen.call(window, url, target, ...rest);
+    pageOpened = true;
+    return null;
+  }};
+  // A link with `target=_blank`: the page's handlers may stop the click before it bubbles up
+  // here, so it is caught on the way down and kept from opening a window; once they have run, it
+  // goes to Mostik, unless the page has cancelled it or opened it with `window.open` itself.
+  window.addEventListener("click", e => {{
+    const a = e.target instanceof Element ? e.target.closest("a[href]") : null;
+    const href = a && a.target === "_blank" && !e.defaultPrevented ? webLink(a.href) : null;
+    if (!href) return;
+    const cancel = e.preventDefault.bind(e);
+    let cancelled = false;
+    e.preventDefault = () => {{ cancelled = true; cancel(); }};
+    cancel();
+    pageOpened = false;
+    setTimeout(() => {{ if (!cancelled && !pageOpened) openOut(href); }});
   }}, true);
 
   const Native = window.RTCPeerConnection;
@@ -519,7 +669,8 @@ mod imp {
         let loading = loading_page(app, title);
         match prepare(&cdp, url, title, &loading, jar).await {
             Ok(target) => {
-                tauri::async_runtime::spawn(close_when_left(cdp.clone(), events, target.clone()));
+                let watch = close_when_left(app.clone(), generation, cdp.clone(), events, target.clone());
+                tauri::async_runtime::spawn(watch);
                 Ok(Some(Handle {
                     cdp,
                     target,
@@ -652,6 +803,11 @@ mod imp {
             .ok_or("Target.attachToTarget: no sessionId")?;
         // Navigation events, for `close_when_left`.
         cdp.send("Page.enable", json!({}), Some(session)).await?;
+        // "Chat" and "Invite" of the meeting page (see `page_script`). The page gets the binding
+        // only while the Runtime domain is on; its other events (console) are dropped unread.
+        cdp.send("Runtime.enable", json!({}), Some(session)).await?;
+        cdp.send("Runtime.addBinding", json!({ "name": super::BINDING }), Some(session))
+            .await?;
         cdp.send("Page.navigate", json!({ "url": loading }), Some(session))
             .await?;
         cdp.send("Storage.setCookies", json!({ "cookies": cookies(jar) }), None)
@@ -672,10 +828,23 @@ mod imp {
     }
 
     /// Closes the window once the user leaves the meeting, as the Slack huddle window does
-    /// (see `EndWatch`).
-    async fn close_when_left(cdp: Arc<Cdp>, mut events: UnboundedReceiver<Event>, target: String) {
+    /// (see `EndWatch`). Passes on what the page's buttons ask of Mostik (see `page_script`).
+    async fn close_when_left(
+        app: AppHandle,
+        generation: u64,
+        cdp: Arc<Cdp>,
+        mut events: UnboundedReceiver<Event>,
+        target: String,
+    ) {
         let mut watch = super::EndWatch::default();
         while let Some(e) = events.recv().await {
+            if let Some(action) = binding_call(&e) {
+                match action.strip_prefix("open:") {
+                    Some(url) => open_link(url),
+                    None => super::requested(&app, generation, action),
+                }
+                continue;
+            }
             let Some(url) = main_frame_url(&e, &target) else {
                 continue;
             };
@@ -686,6 +855,24 @@ mod imp {
                 return;
             }
         }
+    }
+
+    /// A link to another site the meeting page opens in a new window (see `page_script`): in the
+    /// user's browser.
+    fn open_link(url: &str) {
+        if !super::elsewhere(url) {
+            return;
+        }
+        if let Err(e) = crate::backend::open_external(url) {
+            eprintln!("call: could not open a link: {e}");
+        }
+    }
+
+    /// What the page script asked for through [`super::BINDING`], if the event is that.
+    pub(super) fn binding_call(e: &Event) -> Option<&str> {
+        (e.method == "Runtime.bindingCalled" && e.params.get("name").and_then(Value::as_str) == Some(super::BINDING))
+            .then(|| e.params.get("payload")?.as_str())
+            .flatten()
     }
 
     /// The new URL of the window's page, if the event is its navigation. The main frame has
@@ -1017,6 +1204,21 @@ b{{color:#f8f8f8;font-size:17px}}
             assert_eq!(main_frame_url(&ev("Page.loadEventFired", json!({})), "T"), None);
         }
 
+        #[test]
+        fn binding_calls_of_the_page_script_only() {
+            let ev = |name: &str| Event {
+                method: "Runtime.bindingCalled".into(),
+                params: json!({ "name": name, "payload": "chat", "executionContextId": 1 }),
+            };
+            assert_eq!(binding_call(&ev(super::super::BINDING)), Some("chat"));
+            assert_eq!(binding_call(&ev("other")), None);
+            let console = Event {
+                method: "Runtime.consoleAPICalled".into(),
+                params: json!({ "name": super::super::BINDING, "payload": "chat" }),
+            };
+            assert_eq!(binding_call(&console), None);
+        }
+
         /// Drives a real browser in headless mode: the pipe, cookies and permissions work, and
         /// WebRTC is there. Needs Chromium or Chrome and the network: `cargo test -- --ignored`.
         #[tokio::test]
@@ -1095,6 +1297,10 @@ b{{color:#f8f8f8;font-size:17px}}
             assert_eq!(eval("typeof RTCPeerConnection").await, "function");
             // The title survives a page that sets its own, both ways.
             cdp.send("Page.enable", json!({}), Some(&s)).await.unwrap();
+            cdp.send("Runtime.enable", json!({}), Some(&s)).await.unwrap();
+            cdp.send("Runtime.addBinding", json!({ "name": super::super::BINDING }), Some(&s))
+                .await
+                .unwrap();
             cdp.send(
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({ "source": super::super::page_script("Call · #dev") }),
@@ -1115,6 +1321,54 @@ b{{color:#f8f8f8;font-size:17px}}
                 seen |= main_frame_url(&e, &target).is_some_and(|u| u.starts_with("data:text/html,<title>"));
             }
             assert!(seen, "no Page.frameNavigated for the main frame");
+            // "Chat" and "Invite" of the meeting page, posted to the messenger around it, reach
+            // Mostik; other messages do not. What the messenger would answer goes to the page's
+            // store, found in React's tree: "Chat" stops its spinner, "Settings" opens the dialog.
+            let page = "data:text/html,<p>In a call</p><div id=root></div><script>window.acts = [];\
+                const store = {dispatch: a => acts.push(a.type + '=' + a.payload), getState: () => ({})};\
+                root['__reactContainer$x'] = {child: null, stateNode: {current: {child: {sibling: {memoizedProps: {store}}}}}};\
+                for (const event of ['CHAT_OPEN', 'SET_THEME', 'ADD_USERS_EVENT', 'toString', 'OPEN_SETTINGS'])\
+                postMessage(JSON.stringify({event}), '*')</script>";
+            cdp.send("Page.navigate", json!({ "url": page }), Some(&s))
+                .await
+                .unwrap();
+            let mut asked = vec![];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+                    && let Some(action) = binding_call(&e)
+                {
+                    asked.push(action.to_owned());
+                }
+            }
+            assert_eq!(asked, ["chat", "invite"]);
+            assert_eq!(
+                eval("acts.join()").await,
+                "chat/setIsChatLoading=false,settingsModal/setIsOpened=true"
+            );
+            // Links the page opens in a new window go to Mostik: a link with `target=_blank` and
+            // `window.open`; one the page has handled itself, opens in a named window or of Yandex
+            // does not.
+            let page = "data:text/html,<a id=a target=_blank href='https://t.me/share'>t</a>\
+                <a id=b target=_blank href='https://example.org/b'>b</a><script>\
+                b.addEventListener('click', e => e.preventDefault());\
+                setTimeout(() => a.click(), 100); setTimeout(() => b.click(), 200);\
+                setTimeout(() => window.open('https://example.org/w'), 300);\
+                setTimeout(() => window.open('https://example.org/n', 'named'), 400);\
+                setTimeout(() => window.open('https://id.yandex.ru/personal'), 500)</script>";
+            cdp.send("Page.navigate", json!({ "url": page }), Some(&s))
+                .await
+                .unwrap();
+            let mut opened = vec![];
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+                    && let Some(action) = binding_call(&e)
+                {
+                    opened.push(action.to_owned());
+                }
+            }
+            assert_eq!(opened, ["open:https://t.me/share", "open:https://example.org/w"]);
             // A page that showed something and went blank, with no WebRTC connection: the call is over.
             let page =
                 "data:text/html,<p>In a call</p><script>setTimeout(()=>{document.body.textContent=''},1200)</script>";
@@ -1271,7 +1525,7 @@ mod imp {
     use std::sync::Mutex;
 
     use mostik_yandex::session::CookieJar;
-    use tauri::webview::{Color, PermissionKind, PermissionResponse};
+    use tauri::webview::{Color, NewWindowResponse, PermissionKind, PermissionResponse};
     use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
     use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_COOKIE_SAME_SITE_KIND_NONE, ICoreWebView2_2};
     use windows_core::{HSTRING, Interface};
@@ -1298,6 +1552,7 @@ mod imp {
         let label = format!("call-{generation}");
         let app2 = app.clone();
         let label2 = label.clone();
+        let app3 = app.clone();
         let watch = Mutex::new(super::EndWatch::default());
         let window = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(blank))
             .title(title)
@@ -1314,6 +1569,21 @@ mod imp {
                 }
             })
             .initialization_script(super::page_script(title))
+            // "Chat" and "Invite" of the meeting page (see `page_script`): no window opens.
+            .on_new_window(move |url, _| match url.as_str().strip_prefix(super::ACTION_URL) {
+                Some(action) => {
+                    super::requested(&app3, generation, action);
+                    NewWindowResponse::Deny
+                }
+                // Another site goes to the user's browser, as on Linux (see `elsewhere`).
+                None if super::elsewhere(url.as_str()) => {
+                    if let Err(e) = crate::backend::open_external(url.as_str()) {
+                        eprintln!("call: could not open a link: {e}");
+                    }
+                    NewWindowResponse::Deny
+                }
+                None => NewWindowResponse::Allow,
+            })
             // The end of the call, as on Linux (`EndWatch`). Routing inside the page does not
             // come here; on the bare meeting page the page script covers it with `ENDED_URL`.
             .on_navigation(move |url| {
@@ -1463,6 +1733,18 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn links_to_other_sites_leave_the_call_window() {
+        assert!(elsewhere("https://t.me/share/url?url=x"));
+        assert!(elsewhere("http://example.org/"));
+        assert!(!elsewhere("https://id.yandex.ru/personal"));
+        assert!(!elsewhere("https://telemost.360.yandex.ru/j/1"));
+        assert!(elsewhere("https://yandex.ru.evil.example/"), "not a Yandex host");
+        assert!(!elsewhere("file:///etc/passwd"));
+        assert!(!elsewhere("javascript:alert(1)"));
+    }
 
     #[test]
     fn meeting_links() {

@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-app"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -3049,6 +3049,8 @@ dependencies = [
  "mostik-core",
  "mostik-ipc",
  "mostik-yandex",
+ "objc2",
+ "objc2-foundation",
  "ogg",
  "opus-rs",
  "rodio",
@@ -3058,6 +3060,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-notification",
+ "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
  "webkit2gtk",
@@ -3068,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emojis",
  "serde",
@@ -3077,7 +3080,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-ipc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "mostik-core",
  "serde",
@@ -3086,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-ui"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "console_error_panic_hook",
  "emojis",
@@ -3104,7 +3107,7 @@ dependencies = [
 
 [[package]]
 name = "mostik-yandex"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "cookie",
@@ -5733,6 +5736,22 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "url",
+ "zbus 5.19.0",
+]
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "726b6da0dd5bd1344f84f4108a622c07d01923baacb5c803a605189672c5352f"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
  "zbus 5.19.0",
 ]
 

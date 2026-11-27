@@ -41,7 +41,9 @@ pub async fn followed_threads(
 }
 
 /// Parses the followed threads and records them as the ones whose replies notify, and their
-/// attachments as ones the UI may save. Threads the user left meanwhile stay out.
+/// attachments as ones the UI may save. Threads the user left meanwhile stay out. Those with all
+/// replies deleted stay in, with none: Telemost still has the user follow them, and the UI keeps
+/// them out of sight until a new reply ([`mostik_core::FollowedThread::has_replies`]).
 fn remember_threads(state: &AppState, live: &Live, v: &Value) -> (Vec<mostik_core::FollowedThread>, Vec<User>) {
     let (mut threads, users) = convert::followed_threads(v, Some(&live.me));
     if let Ok(mut sh) = live.shared.lock() {

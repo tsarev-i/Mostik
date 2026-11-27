@@ -179,6 +179,8 @@ pub(super) fn merge_threads(c: Ctx, mut fresh: Vec<FollowedThread>) {
                 && old.last_ts > t.last_ts
             {
                 (t.unread, t.last_ts, t.last_seq, t.seen_seq) = (old.unread, old.last_ts, old.last_seq, old.seen_seq);
+                // Its count too: a thread the list has with all replies deleted got one since.
+                t.parent.thread.clone_from(&old.parent.thread);
             }
         }
         for old in list.iter() {
@@ -222,7 +224,14 @@ pub(super) fn track_thread(c: Ctx, m: &Message, parent: Timestamp) {
             .iter()
             .position(|t| t.parent.chat_id == m.chat_id && t.parent.ts == parent);
         let at = match (at, parent_msg) {
-            (Some(i), _) => i,
+            (Some(i), _) => {
+                // One more reply, unless the fetched list counts it already. A thread added below
+                // takes its parent from the chat, which counts the reply already.
+                if m.seq_no == 0 || m.seq_no > list[i].last_seq {
+                    list[i].add_reply(m.ts);
+                }
+                i
+            }
             (None, Some(p)) if mine || mentioned || (p.author == me && !left) => {
                 list.push(FollowedThread {
                     parent: p,

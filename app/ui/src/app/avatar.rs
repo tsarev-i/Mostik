@@ -305,6 +305,16 @@ pub(crate) fn display_title(s: &Snapshot, ch: &Chat) -> String {
     }
 }
 
+/// Where a thread is, in the line under it: `# name` of a channel, the person of a direct chat or
+/// "Notes".
+pub(super) fn place_title(s: &Snapshot, ch: &Chat) -> String {
+    let title = display_title(s, ch);
+    match ch.kind {
+        ChatKind::Direct { .. } | ChatKind::Notes => title,
+        _ => format!("# {title}"),
+    }
+}
+
 /// What marks a chat in lists: its kind, or the emoji its group name starts with (`⚠️|Test`).
 #[derive(Clone, PartialEq)]
 pub(super) struct Mark {

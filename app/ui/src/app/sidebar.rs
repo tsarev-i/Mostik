@@ -69,7 +69,7 @@ pub(super) fn Sidebar() -> impl IntoView {
                 <div class="sb-quick" hidden=move || searching(c)>
                     {move || {
                         // Bold with the number of threads that have new replies, as in Slack.
-                        let unread = c.threads.with(|l| l.iter().filter(|t| t.unread > 0).count());
+                        let unread = c.threads.with(|l| l.iter().filter(|t| t.unread > 0 && t.has_replies()).count());
                         let mut cls = String::from("sb-row");
                         if c.view.get() == ViewMode::Threads {
                             cls.push_str(" selected");

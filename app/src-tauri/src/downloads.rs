@@ -164,7 +164,7 @@ pub fn reveal(path: &Path) -> Result<(), String> {
         .arg("-R")
         .arg(path)
         .spawn()
-        .map(drop)
+        .map(crate::backend::files::reap)
         .map_err(|e| format!("could not show the file: {e}"))
 }
 
@@ -198,13 +198,13 @@ pub fn reveal(path: &Path) -> Result<(), String> {
     crate::appimage::outside(&mut folder);
     folder
         .spawn()
-        .map(drop)
+        .map(crate::backend::files::reap)
         .map_err(|e| format!("could not show the file: {e}"))
 }
 
 /// `file://` URI of an absolute path, every byte but the unreserved ones and `/` escaped (so a
 /// quote in a name cannot end the GVariant string it goes into).
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn file_uri(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut uri = String::from("file://");
@@ -224,7 +224,7 @@ mod tests {
 
     use super::*;
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn file_uris_escape_all_but_plain_characters() {
         assert_eq!(

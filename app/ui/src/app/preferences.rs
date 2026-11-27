@@ -682,6 +682,10 @@ fn ShortcutKeys(
         let Some(new) = keys::Shortcut::of(&e) else {
             return;
         };
+        // Undo and redo go by the letter of the layout, not by the key's place as `check` sees it.
+        if crate::compose::undo_shortcut(&e).is_some() {
+            return refused.set(Some((action, keys::Refusal::System.text())));
+        }
         match c.settings.with_untracked(|s| keys::check(&new, action, &s.shortcuts)) {
             Ok(()) => {
                 refused.set(None);

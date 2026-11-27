@@ -24,6 +24,22 @@ impl ChatId {
     pub fn is_group_call(&self) -> bool {
         self.0.starts_with("0/58/")
     }
+
+    /// A personal chat: the two users' GUIDs, `<guid>_<guid>`. A direct chat with someone else,
+    /// or "Notes", the chat with oneself, with the same GUID twice.
+    pub fn is_personal(&self) -> bool {
+        !self.0.contains('/')
+            && self
+                .0
+                .split_once('_')
+                .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !b.contains('_'))
+    }
+
+    /// Messages here can have threads: in groups (`0/<ns>/<uuid>`), direct chats and "Notes",
+    /// not in channels (`1/…`). The web client offers none in "Notes", but Telemost keeps them.
+    pub fn has_threads(&self) -> bool {
+        self.0.starts_with("0/") || self.is_personal()
+    }
 }
 
 /// Coarse presence shown as the dot on an avatar.
@@ -436,6 +452,13 @@ impl Message {
         self.call.is_some() || self.system.is_some()
     }
 
+    /// Whether the user can edit the message's text: not a file other than a picture, which
+    /// Telemost keeps without text (its caption goes as a message of its own, and a text added
+    /// in an edit is dropped).
+    pub fn editable(&self) -> bool {
+        !self.is_note() && !self.attachments.iter().any(|a| a.kind == AttachmentKind::File)
+    }
+
     /// The message this one replies to, with the quoted fragment if there is one.
     pub fn reply_to(&self) -> Option<&Forwarded> {
         match self.forwarded.as_slice() {
@@ -573,6 +596,31 @@ pub struct FollowedThread {
 }
 
 impl FollowedThread {
+    /// Whether the thread has replies left, so "Threads" shows it: not once all of them are
+    /// deleted, though Telemost still has the user follow it. One with no known count has them.
+    pub fn has_replies(&self) -> bool {
+        self.parent.thread.as_ref().is_none_or(|t| t.reply_count > 0)
+    }
+
+    /// A new reply at `ts`: one more in the count, so a thread with all replies deleted is back.
+    /// An unknown count stays unknown.
+    pub fn add_reply(&mut self, ts: Timestamp) {
+        if let Some(t) = self.parent.thread.as_mut() {
+            t.reply_count = t.reply_count.saturating_add(1);
+            t.last_reply_ts = t.last_reply_ts.max(ts);
+        }
+    }
+
+    /// A reply deleted: one fewer in the count, and no more unread ones than are left (the reply
+    /// may have been an unread one not loaded). The thread stays followed with none left, out of
+    /// sight until a new reply.
+    pub fn remove_reply(&mut self) {
+        if let Some(t) = self.parent.thread.as_mut() {
+            t.reply_count = t.reply_count.saturating_sub(1);
+            self.unread = self.unread.min(t.reply_count);
+        }
+    }
+
     /// The thread is read up to its last known reply.
     pub fn read(&mut self) {
         self.unread = 0;
@@ -1290,6 +1338,27 @@ mod tests {
         }
     }
 
+    /// A file keeps no text in Telemost, so it is not offered for editing; a picture keeps its
+    /// caption.
+    #[test]
+    fn a_file_message_is_not_editable() {
+        let with = |kind| {
+            let mut m = msg("u1", 1);
+            m.attachments.push(Attachment {
+                kind,
+                file_id: "file/1".into(),
+                name: "a".into(),
+                size: 1,
+                width: 0,
+                height: 0,
+            });
+            m
+        };
+        assert!(msg("u1", 1).editable());
+        assert!(with(AttachmentKind::Image).editable());
+        assert!(!with(AttachmentKind::File).editable());
+    }
+
     #[test]
     fn reply_is_the_only_forwarded_message_marked_as_reply() {
         let fwd = |reply: bool| Forwarded {
@@ -1329,6 +1398,58 @@ mod tests {
         assert!(id("0/58/a").is_meeting() && id("0/58/a").is_group_call());
         assert!(!id("0/22/a").is_group_call());
         assert!(!id("0/0/a").is_meeting() && !id("100/58/a_1").is_group_call());
+    }
+
+    #[test]
+    fn chats_with_threads() {
+        let id = |s: &str| ChatId(s.into());
+        assert!(id("0/0/a").has_threads() && id("0/22/a").has_threads());
+        // A direct chat and "Notes".
+        assert!(id("aa_bb").has_threads() && id("aa_aa").has_threads());
+        // Channels and thread chats have none.
+        for none in ["1/0/a", "100/0/a_1", "110/0/aa_bb_1", "aa", "aa_", "_bb", "aa_bb_cc"] {
+            assert!(!id(none).has_threads(), "{none}");
+        }
+    }
+
+    /// A followed thread whose replies are all deleted is out of sight, and a new reply brings
+    /// it back.
+    #[test]
+    fn followed_thread_replies() {
+        let mut t = FollowedThread {
+            parent: Message {
+                thread: Some(ThreadSummary {
+                    reply_count: 1,
+                    last_reply_ts: 20,
+                    participants: vec![],
+                }),
+                ..msg("a", 10)
+            },
+            unread: 1,
+            last_ts: 20,
+            last_seq: 1,
+            seen_seq: Some(0),
+        };
+        assert!(t.has_replies());
+        // The unread reply, not loaded, is deleted: nothing is left to read.
+        t.remove_reply();
+        assert!(!t.has_replies());
+        assert_eq!(t.unread, 0);
+        t.remove_reply();
+        t.add_reply(30);
+        assert!(t.has_replies());
+        let summary = t.parent.thread.as_ref().map(|s| (s.reply_count, s.last_reply_ts));
+        assert_eq!(summary, Some((1, 30)));
+        // No count known: it has replies, and stays unknown with one more or one fewer.
+        let mut unknown = FollowedThread {
+            parent: msg("a", 10),
+            unread: 2,
+            ..t
+        };
+        unknown.add_reply(40);
+        unknown.remove_reply();
+        assert!(unknown.has_replies());
+        assert_eq!((unknown.parent.thread, unknown.unread), (None, 2));
     }
 
     #[test]

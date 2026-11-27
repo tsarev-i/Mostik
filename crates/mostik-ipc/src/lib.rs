@@ -179,6 +179,28 @@ pub struct CallInfo {
     pub label: String,
 }
 
+/// A button of the meeting page that Telemost leaves to the messenger around the page
+/// (`mostik://call-action`): the call window has no messenger around it, so Mostik answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallAction {
+    /// "Chat": the chat of the call.
+    Chat,
+    /// "Invite to the meeting": add people to the chat of the call.
+    Invite,
+}
+
+/// [`CallAction`] of the call that is open now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRequest {
+    pub action: CallAction,
+    /// The chat whose meeting it is; `None` for a meeting link from a message.
+    pub chat_id: Option<ChatId>,
+    /// The meeting link, to share where there is no chat to add people to.
+    pub url: String,
+}
+
 /// What the UI shows in the top bar and in Preferences → Updates.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -259,6 +281,14 @@ mod tests {
                 label: "#dev".into(),
             },
             json!({ "chatId": "c1", "label": "#dev" }),
+        );
+        pinned(
+            CallRequest {
+                action: CallAction::Invite,
+                chat_id: None,
+                url: "https://telemost.yandex.ru/j/1".into(),
+            },
+            json!({ "action": "invite", "chatId": null, "url": "https://telemost.yandex.ru/j/1" }),
         );
         pinned(
             OpenTarget {

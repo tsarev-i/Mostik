@@ -18,7 +18,7 @@ use mostik_core::*;
 use crate::app::Ctx;
 use crate::bridge;
 
-pub use calls::{call_user, leave_call, start_call};
+pub use calls::{call_request, call_user, leave_call, start_call};
 pub use chats::{
     history_loaded, jump_to_message, leave_chat, load_older, mark_chat_read, navigate, open_chat, pinned_message,
     read_in_sight, recount_soon, stop_older, view_pinned,
@@ -26,8 +26,8 @@ pub use chats::{
 pub use links::{message_link, open_url};
 pub use messages::{
     Outgoing, ReplyTarget, attach_files, attached, cancel_file, delete, detach_file, drop_upload, edit, forward,
-    mark_unread, pin_message, retry_upload, send, send_files, start_reply, toggle_important, toggle_reaction, typing,
-    upload_progress,
+    mark_unread, pin_message, remove_failed_file, retry_upload, send, send_files, start_reply, toggle_important,
+    toggle_reaction, typing, upload_progress,
 };
 pub use people::{expire_presence, message_user, open_profile, refresh_me, refresh_presence, set_status};
 pub use session::{apply_boot, install_update, sign_out, subscribe};

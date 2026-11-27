@@ -240,6 +240,10 @@ pub const DISK_FULL: &str = "there is no room left on Yandex Disk";
 /// The UI shows it in its own words.
 pub const DISK_FILE_TOO_LARGE: &str = "the file is larger than Yandex Disk takes";
 
+/// How [`SendFiles`] fails, after `<file name>: `, when the Messenger storage refuses the file
+/// itself (`bad_file`: empty, or of a kind it does not take): a retry cannot help.
+pub const FILE_REFUSED: &str = "Telemost refused the file";
+
 /// How sending or editing a message fails when Telemost refuses its text as too big
 /// (`message too big`). The UI shows it in its own words.
 pub const MESSAGE_TOO_LONG: &str = "the message is too long";
@@ -644,6 +648,10 @@ commands! {
     PickEmojiImage = "pick_emoji_image", () => Option<PendingFile>;
     AddCustomEmoji = "add_custom_emoji", NewEmoji => Vec<EmojiSet>;
     DeleteCustomEmoji = "delete_custom_emoji", DeleteEmojiArgs => Vec<EmojiSet>;
+
+    // Help.
+    /// "Report a bug": the address of a new GitHub issue with the version and system filled in.
+    BugReport = "bug_report", () => String;
 
     // Updates.
     UpdateStatus = "update_status", () => crate::UpdateStatus;

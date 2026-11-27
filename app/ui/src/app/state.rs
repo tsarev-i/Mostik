@@ -30,6 +30,8 @@ pub struct Ctx {
     /// only the conversations whose name has it.
     pub sb_query: RwSignal<String>,
     pub about: RwSignal<bool>,
+    /// The "Report a bug" dialog is open.
+    pub bug_report: RwSignal<bool>,
     /// New version of Mostik: the "Update" button in the top bar.
     pub update: RwSignal<bridge::UpdateStatus>,
     /// `true` means data from Telemost (in Tauri), `false` means demo data in a browser.
@@ -358,6 +360,8 @@ pub fn enter_sends() -> bool {
 pub enum DetailsTab {
     About,
     Members,
+    /// "Members" with adding people open over it, for "Invite" in the call window.
+    AddPeople,
 }
 
 /// The tabs of the chat header, as in Slack: the messages, the pinned message, the files.

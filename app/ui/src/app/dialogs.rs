@@ -508,7 +508,12 @@ pub(super) fn CreateChannelDialog(to: NewChannel) -> impl IntoView {
 #[component]
 pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
     let c = ctx();
-    let tab = RwSignal::new(initial);
+    // "Invite" in the call window: the members, with adding people open over them.
+    let tab = RwSignal::new(if initial == DetailsTab::AddPeople {
+        DetailsTab::Members
+    } else {
+        initial
+    });
     let chat_id = c.current.get_untracked();
     let details: RwSignal<Option<bridge::ChatDetails>> = RwSignal::new(None);
     let members: RwSignal<Vec<ChatMember>> = RwSignal::new(vec![]);
@@ -516,7 +521,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
     let description = RwSignal::new(String::new());
     let confirm_leave = RwSignal::new(false);
     let member_query = RwSignal::new(String::new());
-    let adding = RwSignal::new(false);
+    let adding = RwSignal::new(initial == DetailsTab::AddPeople);
     let kind = c.snap.with_untracked(|s| s.chat(&chat_id).map(|ch| ch.kind.clone()));
     let close = move || c.details.set(None);
     let load = {
@@ -671,7 +676,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
                             </div>
                         }.into_any()
                     }
-                    DetailsTab::Members => {
+                    DetailsTab::Members | DetailsTab::AddPeople => {
                         let (rm, me) = (change_rm.clone(), me.clone());
                         view! {
                             <input class="text-input member-search" placeholder=tr().find_members prop:value=move || member_query.get()
@@ -716,7 +721,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
         {move || adding.get().then(|| {
             let add = change_add.clone();
             view! {
-                <AddPeopleDialog chat_id=picker_chat.clone() title=name.get_untracked() exclude=exclude
+                <AddPeopleDialog chat_id=picker_chat.clone() title=Signal::derive(move || name.get()) exclude=exclude
                     on_close=Callback::new(move |_| adding.set(false))
                     on_add=Callback::new(move |ids: Vec<UserId>| { adding.set(false); add(ids, true); })/>
             }
@@ -728,7 +733,7 @@ pub(super) fn ChannelDetailsDialog(initial: DetailsTab) -> impl IntoView {
 #[component]
 fn AddPeopleDialog(
     chat_id: ChatId,
-    title: String,
+    title: Signal<String>,
     exclude: Signal<Vec<UserId>>,
     on_close: Callback<()>,
     on_add: Callback<Vec<UserId>>,
@@ -748,7 +753,7 @@ fn AddPeopleDialog(
     view! {
         <Modal nested=true on_close=on_close>
             <header>
-                <h2>{format!("{} #{title}", tr().add_people_to)}</h2>
+                <h2>{move || format!("{} #{}", tr().add_people_to, title.get())}</h2>
                 <button class="icon-btn" title=tr().close on:click=move |_| on_close.run(())><Icon icon=I::X/></button>
             </header>
             <PeoplePicker chat_id=chat_id exclude=all_excluded on_pick=Callback::new(move |p: UserProfile| people.update(|v| v.push(p)))/>
@@ -1051,6 +1056,90 @@ pub(super) fn AboutDialog() -> impl IntoView {
             <p>{tr().about_trademarks}</p>
             <p>{tr().about_protocol}</p>
             <p class="muted">{tr().version(env!("CARGO_PKG_VERSION"))}</p>
+        </Modal>
+    }
+}
+
+/// "Report a bug": a warning that the report is public before the browser takes the user to
+/// GitHub, where the issue opens with the version and system filled in. The window closes once the
+/// browser is started; if it cannot be, the link is shown to copy. "Copy link" stays at hand: on
+/// Linux a started `xdg-open` counts as success even if no browser comes up after it.
+#[component]
+pub(super) fn BugReportDialog() -> impl IntoView {
+    let c = ctx();
+    let url = RwSignal::new(None::<String>);
+    // What went wrong, as the dialog says it: no link, or no browser for it.
+    let failed = RwSignal::new(None::<&'static str>);
+    // The browser is being started.
+    let opening = RwSignal::new(false);
+    // Whether "Copy link" put the link in the clipboard; `None` before it is pressed.
+    let copied = RwSignal::new(None::<bool>);
+    let close = move || c.bug_report.set(false);
+    spawn_local(async move {
+        match bridge::bug_report().await {
+            Ok(link) => url.try_set(Some(link)).map(drop),
+            Err(e) => {
+                leptos::logging::warn!("bug report: {e}");
+                failed.try_set(Some(tr().bug_no_link)).map(drop)
+            }
+        };
+    });
+    let open = move |_| {
+        let Some(link) = url.get_untracked() else { return };
+        opening.set(true);
+        failed.set(None);
+        spawn_local(async move {
+            let result = bridge::open_url(&link).await;
+            // Closed meanwhile: the dialog open now, if any, is another one.
+            if opening.try_set(false).is_some() {
+                return;
+            }
+            match result {
+                Ok(()) => close(),
+                Err(e) => {
+                    leptos::logging::warn!("bug report: {e}");
+                    failed.set(Some(tr().bug_no_browser));
+                }
+            }
+        });
+    };
+    let copy = move |_| {
+        let Some(link) = url.get_untracked() else { return };
+        let write = window().navigator().clipboard().write_text(&link);
+        spawn_local(async move {
+            let done = wasm_bindgen_futures::JsFuture::from(write).await.is_ok();
+            copied.try_set(Some(done));
+        });
+    };
+    // The browser did not start: the link is for opening by hand.
+    let manual = move || failed.get() == Some(tr().bug_no_browser);
+    view! {
+        <Modal class="bug-report" on_close=Callback::new(move |_| close())>
+            <header>
+                <h2>{tr().report_bug}</h2>
+                <button class="icon-btn" title=tr().close on:click=move |_| close()>
+                    <Icon icon=I::X/>
+                </button>
+            </header>
+            <p>{tr().bug_intro}</p>
+            <p class="muted">{tr().bug_public}</p>
+            {move || failed.get().map(|e| view! { <p class="danger-text">{e}</p> })}
+            {move || manual().then(|| view! {
+                <input class="bug-link" readonly prop:value=move || url.get().unwrap_or_default()
+                    on:focus=|e| { event_target::<web_sys::HtmlInputElement>(&e).select(); }/>
+            })}
+            <div class="modal-actions">
+                <button class="link bug-copy" disabled=move || url.with(Option::is_none) on:click=copy>
+                    {move || match copied.get() {
+                        None => tr().copy_link,
+                        Some(true) => tr().link_copied,
+                        Some(false) => tr().copy_failed,
+                    }}
+                </button>
+                <button class="btn primary" disabled=move || url.with(Option::is_none) || opening.get() on:click=open>
+                    {tr().bug_open}
+                </button>
+            </div>
         </Modal>
     }
 }

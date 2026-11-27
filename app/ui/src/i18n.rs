@@ -154,6 +154,10 @@ pub struct Tr {
     pub call_leave: &'static str,
     pub call_go_to_chat: &'static str,
     pub call_busy: &'static str,
+    pub call_no_chat: &'static str,
+    pub call_link: &'static str,
+    pub call_link_copied: &'static str,
+    pub call_link_copied_not_admin: &'static str,
     pub call_started: &'static str,
     pub call_incoming: &'static str,
     pub call_missed: &'static str,
@@ -249,6 +253,14 @@ pub struct Tr {
     // Avatar menu
     pub active: &'static str,
     pub preferences: &'static str,
+    pub report_bug: &'static str,
+    // "Report a bug" dialog
+    pub bug_intro: &'static str,
+    pub bug_public: &'static str,
+    pub bug_open: &'static str,
+    pub bug_no_browser: &'static str,
+    pub bug_no_link: &'static str,
+    pub copy_failed: &'static str,
     // About
     pub about_title: &'static str,
     pub update_button: &'static str,
@@ -620,6 +632,10 @@ pub static RU: Tr = Tr {
     call_leave: "Выйти",
     call_go_to_chat: "Перейти в чат созвона",
     call_busy: "Сначала выйдите из текущего созвона",
+    call_no_chat: "У встречи по ссылке нет своего чата в Мостике",
+    call_link: "Ссылка на созвон:",
+    call_link_copied: "Ссылка на созвон скопирована: отправьте её тем, кого хотите позвать",
+    call_link_copied_not_admin: "Добавлять людей в этот чат могут только его администраторы. Ссылка на созвон скопирована: отправьте её тем, кого хотите позвать",
     call_started: "Созвон начался",
     call_incoming: "Входящий звонок",
     call_missed: "Пропущенный звонок",
@@ -719,6 +735,13 @@ pub static RU: Tr = Tr {
     thread: "Тред",
     active: "В сети",
     preferences: "Настройки",
+    report_bug: "Сообщить об ошибке",
+    bug_intro: "Отчёты об ошибках принимаются на GitHub. Расскажите в форме, что пошло не так.",
+    bug_public: "Отчёт будет публичным. Не добавляйте переписку, имена коллег и другие личные данные.",
+    bug_open: "Открыть GitHub",
+    bug_no_browser: "Не удалось открыть браузер. Скопируйте ссылку и откройте её вручную.",
+    bug_no_link: "Не удалось подготовить ссылку",
+    copy_failed: "Не удалось скопировать",
     about_title: "О Мостике",
     update_button: "Обновить",
     p_updates: "Обновления",
@@ -1084,6 +1107,10 @@ pub static EN: Tr = Tr {
     call_leave: "Leave",
     call_go_to_chat: "Go to the call’s chat",
     call_busy: "Leave the current call first",
+    call_no_chat: "A meeting from a link has no chat of its own in Mostik",
+    call_link: "Call link:",
+    call_link_copied: "Call link copied: send it to the people you want to invite",
+    call_link_copied_not_admin: "Only admins of this chat can add people to it. Call link copied: send it to the people you want to invite",
     call_started: "A call started",
     call_incoming: "Incoming call",
     call_missed: "Missed call",
@@ -1183,6 +1210,13 @@ pub static EN: Tr = Tr {
     thread: "Thread",
     active: "Active",
     preferences: "Preferences",
+    report_bug: "Report a bug",
+    bug_intro: "Bug reports are filed on GitHub. Tell us in the form what went wrong.",
+    bug_public: "The report will be public. Leave out messages, colleagues’ names and other personal data.",
+    bug_open: "Open GitHub",
+    bug_no_browser: "Could not open the browser. Copy the link and open it manually.",
+    bug_no_link: "Could not prepare the link",
+    copy_failed: "Could not copy",
     about_title: "About Mostik",
     update_button: "Update",
     p_updates: "Updates",
@@ -1967,6 +2001,27 @@ impl Tr {
         match percent {
             Some(p) => format!("{word} {p}%"),
             None => format!("{word}…"),
+        }
+    }
+
+    pub fn empty_file(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Файл «{name}» пустой, Телемост его не примет"),
+            Lang::En => format!("“{name}” is empty, Telemost would refuse it"),
+        }
+    }
+
+    pub fn file_refused(&self, name: &str) -> String {
+        match self.lang {
+            Lang::Ru => format!("Телемост не принял файл «{name}». Уберите его и повторите"),
+            Lang::En => format!("Telemost refused “{name}”. Remove it and retry"),
+        }
+    }
+
+    pub fn attempt(&self, n: u32) -> String {
+        match self.lang {
+            Lang::Ru => format!("попытка {n}"),
+            Lang::En => format!("attempt {n}"),
         }
     }
 

@@ -6,8 +6,11 @@
 //!
 //! Run: `cargo run -p mostik-app --features selftest --bin mostik-selftest` (needs a session saved by Mostik).
 //! `-- --threads` only prints the format of thread chat IDs (read-only).
+//! `-- --notes-thread` runs only the thread step, in "Notes", the chat with oneself: it writes a
+//! message and a reply in its thread there and deletes both.
 //! `-- --listen` prints every raw push as JSON until stopped (read-only; includes message texts).
-//! `-- --dump [list | <chat id>]` prints the raw chat list or the latest page of a chat (read-only).
+//! `-- --dump [list | threads | <chat id>]` prints the raw chat list, the list of followed threads or
+//! the latest page of a chat (read-only).
 //! `-- --buckets` prints the synced settings, `get_buckets` (read-only).
 //! `-- --search <query>` runs the global message search (no `chat_id`) in a few forms and prints
 //! how many messages each found in how many chats, and the shape of the answer, not the texts
@@ -304,6 +307,7 @@ async fn run() -> Res<()> {
     if let Some(i) = args.iter().position(|a| a == "--dump") {
         let req: Value = match args.get(i + 1).map(String::as_str) {
             Some("list") | None => serde_json::to_value(wire::chat_list(0)).map_err(|e| e.to_string())?,
+            Some("threads") => serde_json::to_value(wire::thread_list(0)).map_err(|e| e.to_string())?,
             Some(chat) => serde_json::to_value(HistoryRequest::page(chat, 30, None)).map_err(|e| e.to_string())?,
         };
         let v = xiva.call("history", &req, 40).await.map_err(|e| e.to_string())?;
@@ -320,11 +324,33 @@ async fn run() -> Res<()> {
         return threads(&xiva).await;
     }
 
-    // Find the test group and make sure the user is its only member.
     let list = xiva
         .call("history", &wire::chat_list(0), 40)
         .await
         .map_err(|e| e.to_string())?;
+    if std::env::args().any(|a| a == "--notes-thread") {
+        // "Notes", the chat with oneself: the same GUID twice.
+        let notes = list
+            .get("Chats")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.get("ChatId").and_then(Value::as_str))
+            .find(|id| !id.contains('/') && id.split_once('_').is_some_and(|(a, b)| a == b))
+            .ok_or("no \"Notes\" in the chat list: write something there first")?;
+        println!("\"Notes\" found");
+        let ctx = Ctx {
+            xiva,
+            sub,
+            ua,
+            origin: page.service_id.clone(),
+            chat: notes.to_owned(),
+        };
+        let ok = thread_check(&ctx).await?;
+        return finish(&pushes, ok).await;
+    }
+
+    // Find the test group and make sure the user is its only member.
     let candidates: Vec<&Value> = list
         .get("Chats")
         .and_then(Value::as_array)
@@ -442,41 +468,7 @@ async fn run() -> Res<()> {
     all_ok &= step("delete", gone, m.map(|m| shape(&m)).unwrap_or(json!("not in history")));
 
     // 7. Thread: message → thread reply → check → delete both.
-    let parent_text = format!("Mostik: thread parent {}", request_id());
-    let r = ctx
-        .push(wire::plain_text(&chat_id, &request_id(), &parent_text))
-        .await?;
-    let pts = sent_ts(&r)?;
-    let thread = mostik_yandex::convert::thread_chat_id(&chat_id, pts).ok_or("this chat does not support threads")?;
-    let r = ctx
-        .push(wire::plain_text(&thread, &request_id(), "Mostik: thread reply"))
-        .await;
-    all_ok &= step(
-        "thread reply",
-        r.as_ref().is_ok_and(|v| v.get("MessageInfo").is_some()),
-        r.as_ref().map(shape).unwrap_or_else(|e| json!(e)),
-    );
-    let rts = r
-        .ok()
-        .and_then(|v| v.pointer("/MessageInfo/TimestampMcs").and_then(Value::as_u64));
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let th = ctx
-        .xiva
-        .call("history", &HistoryRequest::page(&thread, 20, None), 20)
-        .await
-        .map_err(|e| e.to_string())?;
-    let replies = th
-        .pointer("/Chats/0/Messages")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    all_ok &= step("thread history", replies >= 1, format!("{replies} messages"));
-    let parent = ctx.find(pts).await?.unwrap_or_default();
-    let state = parent.pointer("/ServerMessageInfo/ThreadState");
-    step("parent ThreadState", state.is_some(), json!(state.map(shape)));
-    if let Some(rts) = rts {
-        ctx.push(wire::delete(&thread, rts)).await?;
-    }
-    ctx.push(wire::delete(&chat_id, pts)).await?;
+    all_ok &= thread_check(&ctx).await?;
 
     // 8. Reply and quote: a message → a reply quoting part of it → Mostik reads both back → delete all.
     let original = format!("Mostik: reply target {}", request_id());
@@ -508,6 +500,11 @@ async fn run() -> Res<()> {
     }
     ctx.push(wire::delete(&chat_id, ots)).await?;
 
+    finish(&pushes, all_ok).await
+}
+
+/// The end of a writing test: the shapes of the pushes it brought, and whether all steps passed.
+async fn finish(pushes: &Mutex<Vec<Value>>, all_ok: bool) -> Res<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
     let pushes = pushes.lock().map(|p| p.clone()).unwrap_or_default();
     println!("pushes during the test: {}", pushes.len());
@@ -521,7 +518,52 @@ async fn run() -> Res<()> {
     }
 }
 
-/// Read-only check that a thread chat ID is `100/<ns>/<parent uuid>_<parent ts>`.
+/// A thread in `ctx.chat`: a message, a reply in its thread, the reply in the thread's history and
+/// `ThreadState` on the message; then both are deleted. Whether the steps that count passed.
+async fn thread_check(ctx: &Ctx) -> Res<bool> {
+    let mut ok = true;
+    let parent_text = format!("Mostik: thread parent {}", request_id());
+    let r = ctx
+        .push(wire::plain_text(&ctx.chat, &request_id(), &parent_text))
+        .await?;
+    let pts = sent_ts(&r)?;
+    let thread = mostik_yandex::convert::thread_chat_id(&ctx.chat, pts).ok_or("this chat does not support threads")?;
+    let r = ctx
+        .push(wire::plain_text(&thread, &request_id(), "Mostik: thread reply"))
+        .await;
+    ok &= step(
+        "thread reply",
+        r.as_ref()
+            .is_ok_and(|v| v.pointer("/MessageInfo/TimestampMcs").is_some()),
+        r.as_ref().map(shape).unwrap_or_else(|e| json!(e)),
+    );
+    let rts = r
+        .ok()
+        .and_then(|v| v.pointer("/MessageInfo/TimestampMcs").and_then(Value::as_u64));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let th = ctx
+        .xiva
+        .call("history", &HistoryRequest::page(&thread, 20, None), 20)
+        .await
+        .map_err(|e| e.to_string())?;
+    let replies = th
+        .pointer("/Chats/0/Messages")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    ok &= step("thread history", replies >= 1, format!("{replies} messages"));
+    let parent = ctx.find(pts).await?.unwrap_or_default();
+    let state = parent.pointer("/ServerMessageInfo/ThreadState");
+    step("parent ThreadState", state.is_some(), json!(state.map(shape)));
+    if let Some(rts) = rts {
+        ctx.push(wire::delete(&thread, rts)).await?;
+    }
+    ctx.push(wire::delete(&ctx.chat, pts)).await?;
+    Ok(ok)
+}
+
+/// Read-only check that a thread chat ID is the one Mostik makes of its parent:
+/// `100/<ns>/<parent uuid>_<parent ts>` in a group, `110/0/<personal chat>_<parent ts>` in a direct chat
+/// or "Notes".
 async fn threads(xiva: &XivaClient) -> Res<()> {
     let t = xiva
         .call("history", &wire::thread_list(0), 40)
@@ -546,10 +588,17 @@ async fn threads(xiva: &XivaClient) -> Res<()> {
         let uuid_ok = parent_chat
             .and_then(|p| p.rsplit('/').next())
             .is_some_and(|u| id.contains(u));
+        let ours = parent_chat
+            .zip(parent_ts)
+            .and_then(|(chat, ts)| mostik_yandex::convert::thread_chat_id(chat, ts));
+        let ours_ok = ours.as_deref() == Some(id);
         step(
             "thread ID",
-            tail_ok && uuid_ok,
-            format!("suffix is parent time: {tail_ok}; contains parent chat uuid: {uuid_ok}"),
+            tail_ok && uuid_ok && ours_ok,
+            format!(
+                "{}: suffix is parent time: {tail_ok}; contains parent chat uuid: {uuid_ok}; Mostik makes the same: {ours_ok}",
+                id_pattern(id)
+            ),
         );
     }
     Ok(())

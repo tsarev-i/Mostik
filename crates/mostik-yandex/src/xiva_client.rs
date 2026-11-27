@@ -72,6 +72,11 @@ const DEFAULT_PING_INTERVAL_MS: u64 = 60_000;
 /// (see [`Liveness::check_unanswered`]): shorter timeouts can just be a slow answer.
 const UNANSWERED_SILENCE_MS: u64 = 15_000;
 
+/// Requests in a row with no answer that make a connection dead, whatever else comes in: seen
+/// at night, a socket where each heartbeat got a 6-byte frame that does not decode instead of
+/// its answer, and the pings kept it looking alive.
+const UNANSWERED_IN_ROW: u64 = 2;
+
 /// Finds a connection that died without closing (sleep, a network change, a dropped NAT
 /// mapping): requests on it would wait for their timeouts and pushes would stop for good.
 /// Xiva sends a text ping every `server-interval-sec`; a connection that has been silent for
@@ -82,6 +87,8 @@ struct Liveness {
     closed: Arc<AtomicBool>,
     /// Milliseconds since the Unix epoch of the last frame received.
     last_frame: Arc<AtomicU64>,
+    /// Requests that went unanswered since the last answer.
+    unanswered: Arc<AtomicU64>,
     ping_interval_ms: Arc<AtomicU64>,
     kill: Arc<Notify>,
 }
@@ -107,11 +114,18 @@ impl Liveness {
     /// (other people's heartbeats), and the answer itself would have been a frame.
     fn check_unanswered(&self, waited_ms: u64) {
         let silent = now_ms().saturating_sub(self.last_frame.load(Ordering::SeqCst));
-        if !self.closed.load(Ordering::SeqCst) && dead_after_unanswered(silent, waited_ms) {
+        let in_row = self.unanswered.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        if dead_after_unanswered(silent, waited_ms) {
             eprintln!(
                 "xiva: no answer and nothing received for {} s, the connection is dropped",
                 silent / 1000
             );
+            self.kill.notify_one();
+        } else if in_row >= UNANSWERED_IN_ROW {
+            eprintln!("xiva: {in_row} requests in a row got no answer, the connection is dropped");
             self.kill.notify_one();
         } else {
             self.check();
@@ -199,6 +213,7 @@ impl XivaClient {
         let liveness = Liveness {
             closed: closed.clone(),
             last_frame: Arc::new(AtomicU64::new(now_ms())),
+            unanswered: Arc::default(),
             ping_interval_ms: Arc::new(AtomicU64::new(DEFAULT_PING_INTERVAL_MS)),
             kill: Arc::default(),
         };
@@ -222,10 +237,23 @@ impl XivaClient {
                         Some(Err(e)) => break format!("read error: {e}"),
                         None => break "the stream ended".to_owned(),
                     };
-                    live.last_frame.store(now_ms(), Ordering::SeqCst);
+                    // Any frame is a sign of life, but one that does not decode and answers nothing
+                    // (see `UNANSWERED_IN_ROW`).
+                    let decoded = match &msg {
+                        WsMessage::Binary(data) => Some(xiva::decode(data)),
+                        _ => None,
+                    };
+                    let seq_of_bad = match (&decoded, &msg) {
+                        (Some(Err(_)), WsMessage::Binary(data)) => xiva::rpc_seq(data),
+                        _ => None,
+                    };
+                    if !matches!(decoded, Some(Err(_))) || seq_of_bad.is_some() {
+                        live.last_frame.store(now_ms(), Ordering::SeqCst);
+                    }
                     match msg {
-                        WsMessage::Binary(data) => match xiva::decode(&data) {
+                        WsMessage::Binary(data) => match decoded.unwrap_or_else(|| xiva::decode(&data)) {
                             Ok(Frame::Rpc { seq, body, .. }) => {
+                                live.unanswered.store(0, Ordering::SeqCst);
                                 if crate::diag::traffic_logging() {
                                     crate::diag::traffic_log(
                                         serde_json::json!({ "dir": "in", "via": "ws", "seq": seq, "body": body }),
@@ -239,8 +267,9 @@ impl XivaClient {
                             Ok(Frame::ProtobufTwin { .. }) => {}
                             // A response that does not decode still answers its request, so the
                             // caller does not wait for the timeout.
-                            Err(e) => match xiva::rpc_seq(&data) {
+                            Err(e) => match seq_of_bad {
                                 Some(seq) => {
+                                    live.unanswered.store(0, Ordering::SeqCst);
                                     crate::diag::traffic_log(serde_json::json!({
                                         "dir": "in", "via": "ws", "seq": seq, "error": e.to_string(), "hex": crate::diag::hex(&data)
                                     }));
@@ -249,7 +278,13 @@ impl XivaClient {
                                         let _ = tx.send(Err(e.to_string()));
                                     }
                                 }
-                                None => eprintln!("xiva: a frame of {} bytes not decoded: {e}", data.len()),
+                                None => {
+                                    // Its bytes go to the traffic log, to tell later what it was.
+                                    crate::diag::traffic_log(serde_json::json!({
+                                        "dir": "in", "via": "ws", "error": e.to_string(), "hex": crate::diag::hex(&data)
+                                    }));
+                                    eprintln!("xiva: a frame of {} bytes not decoded: {e}", data.len());
+                                }
                             },
                         },
                         WsMessage::Text(t) => {
@@ -469,6 +504,34 @@ mod tests {
         // A short wait in vain can be a slow answer, however silent the socket.
         assert!(!dead_after_unanswered(5_000, 5_000));
         assert!(dead_after_unanswered(15_000, 5_000));
+    }
+
+    /// Frames keep coming, yet two requests in a row went unanswered: the connection is dead.
+    #[tokio::test]
+    async fn two_unanswered_requests_in_a_row_mean_it_is_dead() {
+        let live = Liveness {
+            closed: Arc::default(),
+            last_frame: Arc::new(AtomicU64::new(now_ms())),
+            unanswered: Arc::default(),
+            ping_interval_ms: Arc::new(AtomicU64::new(DEFAULT_PING_INTERVAL_MS)),
+            kill: Arc::default(),
+        };
+        let dropped = |live: &Liveness| {
+            let kill = live.kill.clone();
+            async move {
+                tokio::time::timeout(Duration::from_millis(50), kill.notified())
+                    .await
+                    .is_ok()
+            }
+        };
+        live.check_unanswered(20_000);
+        assert!(!dropped(&live).await, "one late answer is no reason yet");
+        // An answer in between starts the count again.
+        live.unanswered.store(0, Ordering::SeqCst);
+        live.check_unanswered(20_000);
+        assert!(!dropped(&live).await);
+        live.check_unanswered(20_000);
+        assert!(dropped(&live).await);
     }
 
     #[tokio::test]

@@ -532,7 +532,7 @@ fn MessageField(thread: bool) -> impl IntoView {
                     }
                     s.messages
                         .iter()
-                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && !m.is_note())
+                        .filter(|m| m.chat_id == chat && m.author == s.me && m.thread_parent == tp && m.editable())
                         .max_by_key(|m| m.ts)
                         .cloned()
                 });
@@ -561,7 +561,7 @@ fn MessageField(thread: bool) -> impl IntoView {
                             let path = f.path.clone();
                             view! {
                                 <span class="pending-file">
-                                    <span class="file-icon small">{if f.image { "🖼" } else { "📄" }}</span>
+                                    <FileThumb file=f.clone()/>
                                     <span class="file-meta">
                                         // As the sent message will show it: a bidi control would turn the name round (#42).
                                         <span class="file-name">{mostik_core::plain_file_name(&f.name)}</span>
@@ -698,5 +698,25 @@ fn MessageField(thread: bool) -> impl IntoView {
             </div>
             <div class="typing">{typing_text}</div>
         </div>
+    }
+}
+
+/// The largest picture shown as itself in the card of an attached file: a photo of many
+/// megapixels takes far more memory decoded than the card is worth.
+const THUMB_MAX: u64 = 20 * 1024 * 1024;
+
+/// What an attached file looks like in its card: a picture shows itself, anything else (or a
+/// picture that does not load) an icon.
+#[component]
+pub(super) fn FileThumb(file: bridge::PendingFile) -> impl IntoView {
+    let broken = RwSignal::new(false);
+    let thumb = file.image && file.size <= THUMB_MAX;
+    let url = bridge::local_file_url(&file.path);
+    move || {
+        if thumb && !broken.get() {
+            view! { <img class="file-thumb small" src=url.clone() alt="" decoding="async" on:error=move |_| broken.set(true)/> }.into_any()
+        } else {
+            view! { <span class="file-icon small">{if file.image { "🖼" } else { "📄" }}</span> }.into_any()
+        }
     }
 }

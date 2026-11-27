@@ -1,0 +1,23 @@
+# "Report a bug" in Mostik's profile menu opens this form (bug-en.yml in the English UI) with
+# `environment` filled in from the link (app/src-tauri/src/backend/report.rs). Copies already
+# installed keep that link: keep the file names, that id and its label.
+name: Ошибка
+description: Что-то в Мостике работает не так
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Отчёт будет публичным. Не добавляйте переписку, имена коллег и другие личные данные.
+  - type: textarea
+    id: what
+    attributes:
+      label: Описание
+      placeholder: Что произошло? Как повторить ошибку? Что вы ожидали?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Версия и система
+    validations:
+      required: true

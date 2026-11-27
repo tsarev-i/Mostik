@@ -32,6 +32,7 @@ pub mod messages;
 pub mod notify;
 pub mod prefs;
 pub mod presence;
+pub mod report;
 pub mod service;
 pub mod threads;
 pub mod voice;
@@ -205,11 +206,14 @@ impl Default for Prefs {
 
 /// String in the UI language.
 pub fn text(app: &AppHandle, ru: &'static str, en: &'static str) -> &'static str {
-    let english = app
-        .try_state::<AppState>()
+    if english(app) { en } else { ru }
+}
+
+/// Whether the UI is in English rather than Russian.
+pub fn english(app: &AppHandle) -> bool {
+    app.try_state::<AppState>()
         .and_then(|s| s.prefs.lock().ok().map(|p| p.english))
-        .unwrap_or(false);
-    if english { en } else { ru }
+        .unwrap_or(false)
 }
 
 /// Tray menu items, kept to rename them when the language changes.

@@ -34,22 +34,38 @@ pub fn count32(x: u64) -> u32 {
     u32::try_from(x).unwrap_or(u32::MAX)
 }
 
-/// Thread chat for message `ts` of chat `chat_id`: `0/<ns>/<uuid>` → `100/<ns>/<uuid>_<ts>`.
-/// Verified on a live session for `0/0/…` groups; other chats do not support threads.
+/// Thread chat for message `ts` of chat `chat_id`: a group `0/<ns>/<uuid>` →
+/// `100/<ns>/<uuid>_<ts>`, a personal chat `<guid>_<guid>` (direct or "Notes") →
+/// `110/0/<guid>_<guid>_<ts>`. Verified on a live session on 2026-11-27 (direct chats by the web
+/// client, "Notes" by `mostik-selftest --notes-thread`); channels have no threads. Which chats
+/// have them is [`ChatId::has_threads`].
 pub fn thread_chat_id(chat_id: &str, ts: Timestamp) -> Option<String> {
-    let rest = chat_id.strip_prefix("0/")?;
-    let (ns, uuid) = rest.split_once('/')?;
-    (!uuid.is_empty() && !uuid.contains('/')).then(|| format!("100/{ns}/{uuid}_{ts}"))
+    if let Some(rest) = chat_id.strip_prefix("0/") {
+        let (ns, uuid) = rest.split_once('/')?;
+        return (!uuid.is_empty() && !uuid.contains('/')).then(|| format!("100/{ns}/{uuid}_{ts}"));
+    }
+    ChatId(chat_id.to_owned())
+        .is_personal()
+        .then(|| format!("110/0/{chat_id}_{ts}"))
 }
 
 /// Inverse of [`thread_chat_id`]: `(parent chat, time of the parent message)`.
 fn thread_parent(thread_id: &str) -> Option<(String, Timestamp)> {
-    let rest = thread_id.strip_prefix("100/")?;
-    let (ns, tail) = rest.split_once('/')?;
-    let (uuid, ts) = tail.rsplit_once('_')?;
+    let (chat, ts) = if let Some(rest) = thread_id.strip_prefix("100/") {
+        let (ns, tail) = rest.split_once('/')?;
+        let (uuid, ts) = tail.rsplit_once('_')?;
+        (format!("0/{ns}/{uuid}"), ts)
+    } else {
+        let (chat, ts) = thread_id.strip_prefix("110/0/")?.rsplit_once('_')?;
+        let chat = ChatId(chat.to_owned());
+        if !chat.is_personal() {
+            return None;
+        }
+        (chat.0, ts)
+    };
     // A time the UI could not hold exactly is not a time.
     let ts = ts.parse().ok().filter(|ts| *ts <= MAX_SAFE_INTEGER)?;
-    Some((format!("0/{ns}/{uuid}"), ts))
+    Some((chat, ts))
 }
 
 /// Chat kind by its ID: `<guid>_<guid>` is direct, `1/…` is a channel, everything else is a group.
@@ -770,9 +786,25 @@ pub fn followed_threads(v: &Value, me: Option<&UserId>) -> (Vec<FollowedThread>,
         // The parent lives in the chat itself, whatever `Plain.ChatId` says.
         parent.chat_id = ChatId(parent_chat);
         parent.ts = parent_ts;
+        // `ThreadState` counts the deleted replies too; the thread chat's counters tell them
+        // apart. A thread whose replies are all deleted stays, with none: Telemost still has the
+        // user follow it ([`FollowedThread::has_replies`]).
+        let replies = n(chat, &["Counters", "TotalMessageCount"])
+            .map(|total| total.saturating_sub(n(chat, &["Counters", "HiddenMessageCount"]).unwrap_or(0)));
+        if let Some(replies) = replies {
+            parent
+                .thread
+                .get_or_insert(ThreadSummary {
+                    reply_count: 0,
+                    last_reply_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
+                    participants: vec![],
+                })
+                .reply_count = count32(replies);
+        }
         let last_seq = n(chat, &["LastSeqNo"]).unwrap_or(0);
+        let unread = last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0));
         out.push(FollowedThread {
-            unread: count32(last_seq.saturating_sub(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0))),
+            unread: count32(replies.map_or(unread, |r| unread.min(r))),
             last_ts: n(chat, &["LastTsMcs"]).unwrap_or(parent_ts),
             last_seq,
             seen_seq: Some(n(chat, &["LastSeenByMeSeqNo"]).unwrap_or(0)),
@@ -1498,6 +1530,124 @@ mod tests {
         );
     }
 
+    /// Deleted replies, as Telemost listed them on 2026-11-27: `ThreadState` and `LastSeqNo` still
+    /// count them, the thread chat's `Counters` keep them as `HiddenMessageCount`.
+    #[test]
+    fn followed_threads_without_deleted_replies() {
+        let thread = |id: &str, ts: u64, last: u64, seen: u64, total: u64, hidden: u64| {
+            json!({"ChatId": id, "LastSeqNo": last, "LastSeenByMeSeqNo": seen, "LastTsMcs": 90,
+                "Counters": {"TotalMessageCount": total, "HiddenMessageCount": hidden},
+                "ThreadParentMessage": {"ClientMessage": {"Plain": {"ChatId": "0/0/abc", "Text": {"MessageText": "p"}}},
+                    "ServerMessageInfo": {"Timestamp": ts, "From": {"Guid": "u1"},
+                        "ThreadState": {"LastSeqNo": last, "LastTsMcs": 90}}}})
+        };
+        let v = json!({"Chats": [
+            // Its only reply deleted unread: followed, with no replies and none unread.
+            thread("100/0/abc_1", 1, 1, 0, 1, 1),
+            // One of three deleted, unread ones among them.
+            thread("100/0/abc_2", 2, 3, 0, 3, 1),
+        ]});
+        let (threads, _) = followed_threads(&v, None);
+        let got: Vec<_> = threads
+            .iter()
+            .map(|t| {
+                let count = t.parent.thread.as_ref().map(|t| t.reply_count);
+                (t.parent.ts, count, t.unread, t.has_replies())
+            })
+            .collect();
+        assert_eq!(got, [(1, Some(0), 0, false), (2, Some(2), 2, true)]);
+    }
+
+    /// Threads of a direct chat, as the web client showed them on 2026-11-27: the thread chat is
+    /// `110/0/<direct chat>_<parent time>`; replies, read markers, `you_added_to_thread` and the
+    /// list of followed threads name it.
+    #[test]
+    fn direct_chat_threads() {
+        let dm = "aa-1_bb-2";
+        let thread = "110/0/aa-1_bb-2_42";
+        assert_eq!(thread_chat_id(dm, 42).as_deref(), Some(thread));
+        assert_eq!(thread_parent(thread), Some((dm.into(), 42)));
+        // Channels have no threads; a personal thread has a personal chat for a parent.
+        assert_eq!(thread_chat_id("1/0/x", 42), None);
+        for not_personal in ["110/0/aa-1_42", "110/0/0/0/x_42", "110/1/aa-1_bb-2_42"] {
+            assert_eq!(thread_parent(not_personal), None, "{not_personal}");
+        }
+        // Telemost's ID and Mostik's "has threads" agree.
+        for id in ["0/0/x", "0/22/x", dm, "aa-1_aa-1", "1/0/x", "100/0/x_1", thread] {
+            assert_eq!(thread_chat_id(id, 1).is_some(), ChatId(id.into()).has_threads(), "{id}");
+        }
+
+        let me = UserId("aa-1".into());
+        let reply = json!({"ClientMessage": {"Plain": {"ChatId": thread, "Text": {"MessageText": "r"}}},
+                           "ServerMessageInfo": {"Timestamp": 50, "SeqNo": 1, "From": {"Guid": "bb-2"}}});
+        match from_push(&reply, Some(&me)) {
+            Some(LiveEvent::Upsert { message, .. }) => {
+                assert_eq!((message.chat_id.0.as_str(), message.thread_parent), (dm, Some(42)));
+            }
+            other => panic!("{other:?}"),
+        }
+        let seen = |who: &str| {
+            json!({"ClientMessage": {"SeenMarker": {"ChatId": thread, "Timestamp": 50, "SeqNo": 1}},
+                   "ServerMessageInfo": {"Timestamp": 50, "From": {"Guid": who}}})
+        };
+        assert_eq!(
+            from_push(&seen("aa-1"), Some(&me)),
+            Some(LiveEvent::ThreadSeen {
+                chat_id: ChatId(dm.into()),
+                parent: 42
+            })
+        );
+        // The peer's read of a thread is not a read of the chat.
+        assert_eq!(from_push(&seen("bb-2"), Some(&me)), None);
+        let joined = sync_push(json!({"type": "you_added_to_thread", "data": {"thread_id": thread,
+            "chat_member": {"version": 3, "role": "member", "rights": ["leave", "read", "write", "pin_message"]}}}));
+        assert_eq!(
+            from_push(&joined, Some(&me)),
+            Some(LiveEvent::ThreadJoined {
+                chat_id: ChatId(dm.into()),
+                parent: 42
+            })
+        );
+        let list = json!({"Chats": [{"ChatId": thread, "LastSeqNo": 1, "LastSeenByMeSeqNo": 0, "LastTsMcs": 50,
+            "ThreadParentMessage": {"ClientMessage": {"Plain": {"ChatId": dm, "Text": {"MessageText": "p"}}},
+                "ServerMessageInfo": {"Timestamp": 42, "From": {"Guid": "bb-2"},
+                    "ThreadState": {"LastSeqNo": 1, "LastTsMcs": 50}}}}]});
+        let (threads, _) = followed_threads(&list, Some(&me));
+        assert_eq!(threads.len(), 1);
+        let t = &threads[0];
+        assert_eq!((t.parent.chat_id.0.as_str(), t.parent.ts, t.unread), (dm, 42, 1));
+    }
+
+    /// Threads of "Notes", the chat with oneself: the web client offers none, but Telemost keeps
+    /// them under the same `110/0/<chat>_<parent time>` as a direct chat's.
+    #[test]
+    fn notes_threads() {
+        let notes = "aa-1_aa-1";
+        let thread = "110/0/aa-1_aa-1_42";
+        assert_eq!(thread_chat_id(notes, 42).as_deref(), Some(thread));
+        assert_eq!(thread_parent(thread), Some((notes.into(), 42)));
+        assert!(ChatId(notes.into()).has_threads());
+
+        let me = UserId("aa-1".into());
+        let reply = json!({"ClientMessage": {"Plain": {"ChatId": thread, "Text": {"MessageText": "r"}}},
+                           "ServerMessageInfo": {"Timestamp": 50, "SeqNo": 1, "From": {"Guid": "aa-1"}}});
+        match from_push(&reply, Some(&me)) {
+            Some(LiveEvent::Upsert { message, .. }) => {
+                assert_eq!((message.chat_id.0.as_str(), message.thread_parent), (notes, Some(42)));
+            }
+            other => panic!("{other:?}"),
+        }
+        let seen = json!({"ClientMessage": {"SeenMarker": {"ChatId": thread, "Timestamp": 50, "SeqNo": 1}},
+                          "ServerMessageInfo": {"Timestamp": 50, "From": {"Guid": "aa-1"}}});
+        assert_eq!(
+            from_push(&seen, Some(&me)),
+            Some(LiveEvent::ThreadSeen {
+                chat_id: ChatId(notes.into()),
+                parent: 42
+            })
+        );
+    }
+
     #[test]
     fn chat_from_chats_info() {
         let me = UserId("aa".into());
@@ -1995,7 +2145,7 @@ mod tests {
         assert_eq!(chat_kind("aa_aa", Some(&me), false), ChatKind::Notes);
         assert_eq!(chat_kind("1/0/x", Some(&me), true), ChatKind::Broadcast);
         assert_eq!(thread_chat_id("0/0/abc-1", 42).as_deref(), Some("100/0/abc-1_42"));
-        assert_eq!(thread_chat_id("aa_bb", 42), None);
+        assert_eq!(thread_chat_id("aa_bb", 42).as_deref(), Some("110/0/aa_bb_42"));
         assert_eq!(thread_parent("100/0/abc-1_42"), Some(("0/0/abc-1".into(), 42)));
         // A parent time past what the UI holds exactly is no parent.
         let at_limit = format!("100/0/abc-1_{MAX_SAFE_INTEGER}");
