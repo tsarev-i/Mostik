@@ -241,9 +241,7 @@ pub fn EmojiPicker(
     fn build_next(built: RwSignal<usize>, count: usize) {
         request_animation_frame(move || {
             // None once the picker is closed.
-            if built.try_update(|n| *n = (*n + 1).min(count)).is_some()
-                && built.get_untracked() < count
-            {
+            if built.try_update(|n| *n = (*n + 1).min(count)).is_some() && built.get_untracked() < count {
                 build_next(built, count);
             }
         });
@@ -253,7 +251,9 @@ pub fn EmojiPicker(
     fn scroll_to_section(body: NodeRef<html::Div>, id: String, frames: u32) {
         request_animation_frame(move || {
             // Closed meanwhile: nothing to scroll.
-            let Some(b) = body.try_get_untracked().flatten() else { return };
+            let Some(b) = body.try_get_untracked().flatten() else {
+                return;
+            };
             match b.query_selector(&format!("[data-sec='{id}']")).ok().flatten() {
                 Some(el) => el.scroll_into_view(),
                 None if frames > 0 => scroll_to_section(body, id, frames - 1),
